@@ -6,8 +6,7 @@ It provides two key work modes that can be invoked using the built-in SQL functi
 * Sync mode (for initial data synchronization)
 * Follow mode (for replicate incremental changse after initial sync)
 
-Sync mode copies a table from heterogeneous database into PostgreSQL, including its schema, indexes, triggers, other table properties as well as current data it holds
-follow mode subscribes to a table in heterogeneous database and obtain incremental changes and apply them to the same table PostgreSQL similar to PostgreSQL logical replication
+Sync mode copies a table from heterogeneous database into PostgreSQL, including its schema, indexes, triggers, other table properties as well as current data it holds. Follow mode subscribes to a table in heterogeneous database and obtain incremental changes and apply them to the same table PostgreSQL similar to PostgreSQL logical replication
 
 ## Architecture
 SynchDB extension consists of 4 major components:
