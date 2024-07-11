@@ -154,7 +154,7 @@ mysql -h 127.0.0.1 -u root -p
 GRANT replication client on *.* to mysqluser;
 GRANT replication slave  on *.* to mysqluser;
 GRANT RELOAD ON *.* TO 'mysqluser'@'%';
-GRANT FLUSH TABLES ON *.* TO 'mysqluser'@'%';
+FLUSH PRIVILEGES;
 ```
 
 Exit mysql client tool:
