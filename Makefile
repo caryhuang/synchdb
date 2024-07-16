@@ -7,7 +7,9 @@ DATA = synchdb--1.0.sql
 PGFILEDESC = "synchdb - allows logical replication with heterogeneous databases"
 REGRESS = synchdb
 
-OBJS = synchdb.o
+OBJS = synchdb.o \
+       format_converter.o \
+       replication_agent.o
 
 PG_CFLAGS = -I/usr/include/jdk-22.0.1/include -I/usr/include/jdk-22.0.1/include/linux
 PG_LDFLAGS= -L/usr/lib/jdk-22.0.1/lib/server -ljvm
