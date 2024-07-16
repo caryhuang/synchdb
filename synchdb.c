@@ -9,6 +9,7 @@
 #include "fmgr.h"
 #include "utils/builtins.h"
 #include <jni.h>
+#include "format_converter.h"
 
 PG_MODULE_MAGIC;
 
@@ -62,7 +63,6 @@ void _PG_init(void)
 
 void _PG_fini(void)
 {
-
 	if (jvm != NULL)
 	{
 		// Destroy the JVM
@@ -192,6 +192,9 @@ synchdb_get_changes(PG_FUNCTION_ARGS)
 		{
 			const char *eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
         	elog(WARNING, "DBZ Event: %s\n", eventStr);
+
+        	fc_processDBZChangeEvent(eventStr);
+
         	(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
 		}
     }
