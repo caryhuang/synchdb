@@ -30,8 +30,30 @@ typedef struct dbz_ddl
 	char * id;
 	char * type;
 	char * primaryKeyColumnNames;
-	List * columns;	/* list of DDL_COLUMN */
+	List * columns;	/* list of DBZ_DDL_COLUMN */
 } DBZ_DDL;
+
+typedef struct
+{
+	char name[NAMEDATALEN];
+	Oid oid;
+} NameOidEntry;
+
+typedef struct dbz_ddl_column_value
+{
+	char * name;
+	char * value;	/* expressed as string as taken from json */
+	Oid datatype;		/* data type Oid as defined by PostgreSQL */
+} DBZ_DML_COLUMN_VALUE;
+
+typedef struct dbz_dml
+{
+	char op;
+	char * db;
+	char * table;
+	List * columnValuesBefore;	/* list of DBZ_DML_COLUMN_VALUE */
+	List * columnValuesAfter;	/* list of DBZ_DML_COLUMN_VALUE */
+} DBZ_DML;
 
 int fc_processDBZChangeEvent(const char * event);
 
