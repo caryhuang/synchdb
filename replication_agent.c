@@ -10,7 +10,7 @@
 #include "replication_agent.h"
 #include "executor/spi.h"
 
-int ra_executePGDDL(PG_DDL * pgddl)
+static int spi_execute(char * query)
 {
 	int ret = -1;
 	PG_TRY();
@@ -21,16 +21,26 @@ int ra_executePGDDL(PG_DDL * pgddl)
 			return ret;
 		}
 
-		ret = SPI_exec(pgddl->ddlquery, 0);
-		if (ret != SPI_OK_UTILITY)
+		ret = SPI_exec(query, 0);
+		switch (ret)
 		{
-			SPI_finish();
-			elog(WARNING, "SPI_exec failed: %s", pgddl->ddlquery);
-			return ret;
+			case SPI_OK_INSERT:
+			case SPI_OK_UTILITY:
+			case SPI_OK_DELETE:
+			case SPI_OK_UPDATE:
+			{
+				elog(WARNING, "SPI OK with ret %d", ret);
+				break;
+			}
+			default:
+			{
+				SPI_finish();
+				elog(WARNING, "SPI_exec failed: %d", ret);
+				return ret;
+			}
 		}
 
 		ret = 0;
-
 		// Finish the SPI connection
 		if (SPI_finish() != SPI_OK_FINISH)
 		{
@@ -39,7 +49,7 @@ int ra_executePGDDL(PG_DDL * pgddl)
 	}
 	PG_CATCH();
 	{
-		elog(WARNING, "caught an exception from handling PG DDL");
+//		elog(WARNING, "caught an exception from handling PG DDL");
 		SPI_finish();
 		ret = -1;
 
@@ -52,4 +62,14 @@ int ra_executePGDDL(PG_DDL * pgddl)
 	}
 	PG_END_TRY();
 	return ret;
+}
+
+int ra_executePGDDL(PG_DDL * pgddl)
+{
+	return spi_execute(pgddl->ddlquery);
+}
+
+int ra_executePGDML(PG_DML * pgdml)
+{
+	return spi_execute(pgdml->dmlquery);
 }
