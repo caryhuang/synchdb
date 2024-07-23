@@ -19,6 +19,7 @@
 #include "storage/ipc.h"
 #include "miscadmin.h"
 #include "utils/wait_event.h"
+#include "varatt.h"
 
 PG_MODULE_MAGIC;
 
@@ -195,11 +196,11 @@ static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject 
 }
 
 static int dbz_engine_start(char * hostname, unsigned int port, char * user,
-		char * pwd, char * db, ConnectorType connectorType, JavaVM *jvm, JNIEnv *env,
-		jclass *cls, jobject *obj)
+		char * pwd, char * db, char * table, ConnectorType connectorType, JavaVM *jvm,
+		JNIEnv *env, jclass *cls, jobject *obj)
 {
 	jmethodID mid;
-	jstring jHostname, jUser, jPassword, jDatabase;
+	jstring jHostname, jUser, jPassword, jDatabase, jTable;
 
 	if (!jvm)
 	{
@@ -216,7 +217,7 @@ static int dbz_engine_start(char * hostname, unsigned int port, char * user,
 
 	// Get the method ID of the Java method
 	mid = (*env)->GetMethodID(env, *cls, "startEngine",
-			"(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+			"(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
 	if (mid == NULL)
 	{
 		elog(WARNING, "Failed to find method");
@@ -236,8 +237,9 @@ static int dbz_engine_start(char * hostname, unsigned int port, char * user,
 	jUser = (*env)->NewStringUTF(env, user);
 	jPassword = (*env)->NewStringUTF(env, pwd);
 	jDatabase = (*env)->NewStringUTF(env, db);
+	jTable = (*env)->NewStringUTF(env, table);
 
-	(*env)->CallVoidMethod(env, *obj, mid, jHostname, port, jUser, jPassword, jDatabase);
+	(*env)->CallVoidMethod(env, *obj, mid, jHostname, port, jUser, jPassword, jDatabase, jTable, connectorType);
 	return 0;
 }
 
@@ -352,7 +354,8 @@ static ConnectorType get_connector_type(const char * connector)
 	}
 }
 static void prepare_bgw(BackgroundWorker * worker, char * hostname,
-		unsigned int port, char * user, char * pwd, char * db, char * connector)
+		unsigned int port, char * user, char * pwd, char * src_db,
+		char * dst_db, char * table, char * connector)
 {
 	ConnectorType type = get_connector_type(connector);
 	switch(type)
@@ -384,9 +387,13 @@ static void prepare_bgw(BackgroundWorker * worker, char * hostname,
 			break;
 		}
 	}
-	/* Format the extra args into the bgw_extra field */
-	snprintf(worker->bgw_extra, BGW_EXTRALEN, "%s:%u:%s:%s:%s",
-			hostname, port, user, pwd, db);
+	/* Format the extra args into the bgw_extra field
+	 * todo: BGW_EXTRALEN is only 128 bytes, so the formatted string will be
+	 * cut off here if exceeding this length. Maybe there is a better way to
+	 * pass these args to background worker?
+	 */
+	snprintf(worker->bgw_extra, BGW_EXTRALEN, "%s:%u:%s:%s:%s:%s:%s",
+			hostname, port, user, pwd, src_db, dst_db, table);
 }
 
 void _PG_init(void)
@@ -407,7 +414,9 @@ void
 synchdb_engine_main(Datum main_arg)
 {
 	int delay_in_ms = 5000;		/* todo: make configurable */
-	char hostname[256], user[256], pwd[256], db[256];
+//	char hostname[256] = {0}, user[256] = {0}, pwd[256] = {0}, src_db[256] = {0}, dst_db[256] = {0};
+	char * hostname = NULL, * user = NULL, * pwd = NULL, * src_db = NULL, * dst_db = NULL, * table = NULL;
+	char * args = NULL, * tmp = NULL;
 	unsigned int port, connectorType;
 	pid_t enginepid;
 
@@ -422,13 +431,42 @@ synchdb_engine_main(Datum main_arg)
 	jclass cls; 	/* represents debezium runner java class */
 	jobject obj;	/* represents debezium runner java class object */
 
-	/* Parse the arguments from bgw_extra */
+	/* Parse the arguments from bgw_extra and main_arg */
 	connectorType = DatumGetUInt32(main_arg);
-	sscanf(MyBgworkerEntry->bgw_extra, "%255[^:]:%u:%255[^:]:%255[^:]:%255s",
-		   hostname, &port, user, pwd, db);
+	args = pstrdup(MyBgworkerEntry->bgw_extra);
+	/* hostname */
+	tmp = strtok(args, ":");
+	if (tmp)
+		hostname = pstrdup(tmp);
+	/* port */
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		port = atoi(tmp);
+	/* user */
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		user = pstrdup(tmp);
+	/* password */
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		pwd = pstrdup(tmp);
+	/* source database */
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		src_db = pstrdup(tmp);
+	/* destination database */
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		dst_db = pstrdup(tmp);
+	/* table - in the form of database.table */
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		table = pstrdup(tmp);
 
-	elog(WARNING, "host %s, user %s, pwd %s, db %s, port %u, connectorType %u",
-			hostname, user, pwd, db, port, connectorType);
+	pfree(args);
+
+	elog(WARNING, "host %s, port %u user %s, pwd %s, src_db %s, dst_db %s, table %s, connectorType %u",
+			hostname, port, user, pwd, src_db, dst_db, table, connectorType);
 
 	/* Establish signal handlers; once that's done, unblock signals. */
 	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
@@ -439,7 +477,7 @@ synchdb_engine_main(Datum main_arg)
 	BackgroundWorkerUnblockSignals();
 
 	/* Connect to current database: NULL user - bootstrap superuser is used */
-	BackgroundWorkerInitializeConnection(db, NULL, 0);
+	BackgroundWorkerInitializeConnection(dst_db, NULL, 0);
 
 	/* Create or attach to our synchdb shared memory */
 	synchdb_init_shmem();
@@ -496,8 +534,13 @@ synchdb_engine_main(Datum main_arg)
 		return;
 	}
 
-	dbz_engine_start(hostname, port, user, pwd, db, connectorType,
-			jvm, env, &cls, &obj);
+	ret = dbz_engine_start(hostname, port, user, pwd, src_db, table, connectorType,
+						   jvm, env, &cls, &obj);
+	if (ret < 0)
+	{
+		elog(WARNING, "Failed to start dbz engine");
+		return;
+	}
 
 	while (!ShutdownRequestPending)
 	{
@@ -526,22 +569,104 @@ synchdb_engine_main(Datum main_arg)
 		jvm = NULL;
 		env = NULL;
 	}
+
+	if(hostname)
+		pfree(hostname);
+	if(user)
+		pfree(user);
+	if(pwd)
+		pfree(pwd);
+	if(src_db)
+		pfree(src_db);
+	if(dst_db)
+		pfree(dst_db);
+	if(table)
+		pfree(table);
+
 	proc_exit(0);
 }
 Datum
 synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 {
-	char * hostname = text_to_cstring(PG_GETARG_TEXT_P(0));
-	unsigned int port = PG_GETARG_UINT32(1);
-	char * user = text_to_cstring(PG_GETARG_TEXT_P(2));
-	char * pwd = text_to_cstring(PG_GETARG_TEXT_P(3));
-	char * db = text_to_cstring(PG_GETARG_TEXT_P(4));
-	char * connector = text_to_cstring(PG_GETARG_TEXT_P(5));
-
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
 	pid_t		pid;
+
+	/* input args */
+	text * hostname_text;
+	text * user_text;
+	text * pwd_text;
+	text * src_db_text;
+	text * dst_db_text;
+	text * table_text;
+	text * connector_text;
+	char * hostname;
+	unsigned int port;
+	char * user;
+	char * pwd;
+	char * src_db;
+	char * dst_db;
+	char * table;
+	char * connector;
+
+	/* sanity check on input arguments */
+	hostname_text = PG_GETARG_TEXT_PP(0);
+	if (VARSIZE(hostname_text) - VARHDRSZ == 0)
+	{
+		elog(ERROR, "hostname cannot be empty");
+	}
+	hostname = text_to_cstring(hostname_text);
+
+	port = PG_GETARG_UINT32(1);
+	if (port == 0 || port > 65535)
+	{
+		elog(ERROR, "invalid port number");
+	}
+
+	user_text = PG_GETARG_TEXT_PP(2);
+	if (VARSIZE(user_text) - VARHDRSZ == 0)
+	{
+		elog(ERROR, "username cannot be empty");
+	}
+	user = text_to_cstring(user_text);
+
+	pwd_text = PG_GETARG_TEXT_PP(3);
+	if (VARSIZE(pwd_text) - VARHDRSZ == 0)
+	{
+		elog(ERROR, "password cannot be empty");
+	}
+	pwd = text_to_cstring(pwd_text);
+
+	/* source database can be empty or NULL */
+	src_db_text = PG_GETARG_TEXT_PP(4);
+	if (VARSIZE(src_db_text) - VARHDRSZ == 0)
+		src_db = "null";
+	else
+		src_db = text_to_cstring(src_db_text);
+
+	dst_db_text = PG_GETARG_TEXT_PP(5);
+	if (VARSIZE(dst_db_text) - VARHDRSZ == 0)
+	{
+		elog(ERROR, "destination database cannot be empty");
+	}
+	dst_db = text_to_cstring(dst_db_text);
+
+	/* table can be empty or NULL */
+	table_text = PG_GETARG_TEXT_PP(6);
+	if (VARSIZE(table_text) - VARHDRSZ == 0)
+		table = "null";
+	else
+		table = text_to_cstring(table_text);
+
+	connector_text = PG_GETARG_TEXT_PP(7);
+	if (VARSIZE(connector_text) - VARHDRSZ == 0)
+	{
+		elog(ERROR, "connector type cannot be empty");
+	}
+	connector = text_to_cstring(connector_text);
+
+	/* prepare background worker */
 
 	MemSet(&worker, 0, sizeof(BackgroundWorker));
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
@@ -553,7 +678,8 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	strcpy(worker.bgw_library_name, "synchdb");
 	strcpy(worker.bgw_function_name, "synchdb_engine_main");
 
-	prepare_bgw(&worker, hostname, port, user, pwd, db, connector);
+	prepare_bgw(&worker, hostname, port, user, pwd, src_db, dst_db, table, connector);
+	elog(WARNING, "extra args: %s", worker.bgw_extra);
 
 	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
 		ereport(ERROR,
