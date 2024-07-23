@@ -593,7 +593,7 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	if (pid != InvalidPid)
 	{
 		elog(WARNING, "terminating dbz connector (%d) with pid %d", type, (int) pid);
-		DirectFunctionCall1(pg_terminate_backend, UInt32GetDatum(pid));
+		DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(5000));
 		set_shm_connector_pid(type, InvalidPid);
 	}
 	else
