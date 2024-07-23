@@ -15,6 +15,8 @@
 #include "utils/rel.h"
 #include "access/table.h"
 #include <time.h>
+#include "access/xact.h"
+#include "utils/snapmgr.h"
 
 static void remove_double_quotes(StringInfoData * str)
 {
@@ -880,6 +882,9 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 	 * before parsing, we need to make sure the target namespace and table
 	 * do exist in PostgreSQL, and also fetch their attribute type IDs
 	 */
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+
 	schemaoid = get_namespace_oid(dbzdml->db, false);
 	if (!OidIsValid(schemaoid))
 	{
@@ -901,6 +906,7 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 
 		return NULL;
 	}
+
 	elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", dbzdml->db, dbzdml->table, tableoid);
 
 	/* prepare a temporary hash table for datatype look up with column name */
@@ -944,6 +950,9 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 
 	}
 	table_close(rel, NoLock);
+
+	PopActiveSnapshot();
+	CommitTransactionCommand();
 
 	switch(op)
 	{

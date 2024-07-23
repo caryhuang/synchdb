@@ -9,12 +9,18 @@
 #include "fmgr.h"
 #include "replication_agent.h"
 #include "executor/spi.h"
+#include "access/xact.h"
+#include "utils/snapmgr.h"
 
 static int spi_execute(char * query)
 {
 	int ret = -1;
 	PG_TRY();
 	{
+		/* Start a transaction and set a snapshot */
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+
 		if (SPI_connect() != SPI_OK_CONNECT)
 		{
 			elog(WARNING, "synchdb_pgsql - SPI_connect failed");
@@ -46,6 +52,10 @@ static int spi_execute(char * query)
 		{
 			elog(WARNING, "SPI_finish failed");
 		}
+
+		/* Commit the transaction */
+		PopActiveSnapshot();
+		CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{
