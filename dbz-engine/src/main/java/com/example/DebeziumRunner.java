@@ -20,18 +20,49 @@ public class DebeziumRunner {
 	private List<String> changeEvents = new ArrayList<>();
 	private DebeziumEngine<ChangeEvent<String, String>> engine;
 	private ExecutorService executor;
-	
-	public void startEngine(String hostname, int port, String user, String password, String database) throws Exception
+ 
+	public void startEngine(String hostname, int port, String user, String password, String database, String table, int connectorType) throws Exception
 	{
-        Properties props = new Properties();
+        final int TYPE_MYSQL = 1;
+		final int TYPE_ORACLE = 2;
+		final int TYPE_SQLSERVER = 3;
+
+		Properties props = new Properties();
         // Set Debezium properties...
         props.setProperty("name", "engine");
-        props.setProperty("connector.class", "io.debezium.connector.mysql.MySqlConnector");
+		switch(connectorType)
+		{
+			case TYPE_MYSQL:
+			{
+		        props.setProperty("connector.class", "io.debezium.connector.mysql.MySqlConnector");
+				break;
+			}
+			case TYPE_ORACLE:
+			{
+		        props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
+				break;
+			}
+			case TYPE_SQLSERVER:
+			{
+		        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");
+				break;
+			}
+		}
 		props.setProperty("offset.storage", "org.apache.kafka.connect.storage.FileOffsetBackingStore");
 		props.setProperty("offset.storage.file.filename", "/dev/shm/offsets.dat");
 		props.setProperty("offset.flush.interval.ms", "60000");
 		
 		/* begin connector properties */
+		if (database.equals("null"))
+			logger.warn("database is null - skip setting database.include.list property");
+		else
+			props.setProperty("database.include.list", database);
+
+		if (table.equals("null"))
+			logger.warn("table is null - skip setting table.include.list property");
+		else
+			props.setProperty("table.include.list", table);
+
 		props.setProperty("database.hostname", hostname);
 		props.setProperty("database.port", String.valueOf(port));
 		props.setProperty("database.user", user);
@@ -127,7 +158,7 @@ public class DebeziumRunner {
 		DebeziumRunner runner = new DebeziumRunner();
         try
 		{
-            runner.startEngine("192.168.1.86", 3306, "mysqluser", "mysqlpwd", "inventory");
+            runner.startEngine("192.168.1.86", 3306, "mysqluser", "mysqlpwd", "inventory", "null", 1);
         }
 		catch (Exception e)
 		{
