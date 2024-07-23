@@ -76,8 +76,8 @@ echo "export PATH=$PATH:/home/$USER/jdk-22.0.1/bin" >> /home/$USER/.bashrc
 With Java and Maven setup, we are ready to build Debezium Runner Engine:
 
 ```
-cd synchdb/dbz-engine
-mvn clean install
+cd /home/$USER/postgres/contrib/synchdb
+make build_dbz
 ```
 The output of the build will be located in:
 ```
@@ -174,20 +174,61 @@ Install SynchDB: Please make sure you have set the path to the Debezium Runner E
 CREATE EXTENSION synchdb;
 ```
 
-Start Debezium engine to start capturing the MySQL database changes so far:
-```
-select synchdb_start_engine('127.0.0.1',3306, 'mysqluser', 'mysqlpwd', 'inventory');
-```
-The function returns 0 on success or 1 on failure. Observe the PostgreSQL log for CDC status:
+Use the SQL function `synchdb_start_engine_bgw` to spawn a new background worker to capture CDC from a heterogeneous database such as MySQL. `synchdb_start_engine_bgw` takes these arguments:
+* hostname - the IP address of heterogeneous database
+* port - the port number to connect to
+* username - user name to use to connect
+* password - password to authenticate the username
+* source database (optional) - the database name to replicate changes from. For example, the database that exists in MySQL. If empty, all databases from MySQL are replicated.
+* destination database - the database to apply changes to - For example, the database that exists in PostgreSQL. Must be a valid database that exists.
+* table (optional) - expressed in the form of [database].[table] that must exists in MySQL so the engine will only replicate the specified tables. If empty, all tables are replicated 
+* connector - the connector to use. Can be MySQL, Oracle, or SQLServer regardless of capital or lower case. Currently only MySQL is supported.
 
-Capture the changes so far on-demand:
+For example:
 ```
-select synchdb_get_changes();
+select synchdb_start_engine_bgw('127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');
 ```
 
-When done, stop the engine:
+This command will spawn a dedicated background worker that will replicate all tables from the 'inventory' database from MySQL database. 
+
+If we are only interested in a few tables, we can call the SQL function like this:
 ```
-select synchdb_stop_engine();
+select synchdb_start_engine_bgw('127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'mysql');
+```
+
+which will only replicate changes from `order` and `customers` tables under database `inventory` from MySQL database.
+
+To stop a running synchdb background worker. Use the `synchdb_stop_engine_bgw` SQL function. `synchdb_stop_engine_bgw` takes this argument:
+* connector - the conenctor type expressed as string, can be MySQL, Oracle, SQLServer regardless of capital or lower case. Currently only MySQL is supported.
+
+For example:
+```
+select synchdb_stop_engine_bgw('mysql');
+```
+
+The replicated changes will be mapped to a schema in destination database. For example, a table named `orders` from database `inventory` in MySQL will be replicated to a table named `orders` under schema `inventory` under the database `postgres`
+
+During the synchdb operations, intermediate files will be generated and they are by default located in:
+* /dev/shm/offsets.dat
+* /dev/shm/schemahistory.dat
+
+offsets.dat stores the current position of the CDC operation and subsequent launch of the dbz worker will resume from this offset. schemahistory.dat stores the schema needed to created the source database. 
+
+If you would like synchdb to start replicating from the very beginning. Follow these steps:
+
+stop the dbz engine
+```
+select synchdb_stop_engine_bgw('mysql');
+``` 
+
+remove the files
+```
+rm /dev/shm/offsets.dat /dev/shm/schemahistory.dat
+```
+
+restart the dbz engine
+```
+select synchdb_start_engine_bgw('127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');
 ```
 
 ## Architecture
