@@ -12,6 +12,8 @@ OBJS = synchdb.o \
        format_converter.o \
        replication_agent.o
 
+DBZ_ENGINE_PATH = dbz-engine
+
 # Dynamically set JDK paths
 JAVA_PATH := $(shell which java)
 JDK_HOME_PATH := $(shell readlink -f $(JAVA_PATH) | sed 's:bin/java::')
@@ -47,3 +49,14 @@ check_jdk:
 	  echo "Error: JDK lib path $(JDK_LIB_PATH) not found"; \
 	  exit 1; \
 	fi
+
+build_dbz:
+	cd $(DBZ_ENGINE_PATH) && mvn clean install
+
+clean_dbz:
+	cd $(DBZ_ENGINE_PATH) && mvn clean
+
+install_dbz:
+	install -c -m 664 $(DBZ_ENGINE_PATH)/target/dbz-engine-1.0.0.jar $(libdir)
+	@echo "install dir $(libdir)"
+# append new recipe to the original all and clean as defined by global Makefile

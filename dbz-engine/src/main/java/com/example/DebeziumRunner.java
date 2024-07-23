@@ -103,7 +103,13 @@ public class DebeziumRunner {
 
 	public List<String> getChangeEvents()
 	{
-		return new ArrayList<>(changeEvents);
+		/* make a copy of current change list for returning */
+		List<String> listcopy = new ArrayList<>(changeEvents);
+
+		/* empty the changeEvents as they have been consumed */
+		changeEvents.clear();
+
+		return listcopy;
 		/*
         synchronized (this) {
 
