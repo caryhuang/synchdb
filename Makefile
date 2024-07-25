@@ -57,6 +57,8 @@ clean_dbz:
 	cd $(DBZ_ENGINE_PATH) && mvn clean
 
 install_dbz:
-	install -c -m 664 $(DBZ_ENGINE_PATH)/target/dbz-engine-1.0.0.jar $(libdir)
-	@echo "install dir $(libdir)"
+	rm -rf $(libdir)/dbz_engine
+	install -d $(libdir)/dbz_engine
+	cp -rp $(DBZ_ENGINE_PATH)/target/* $(libdir)/dbz_engine
+	chown root:root -R $(libdir)/dbz_engine
 # append new recipe to the original all and clean as defined by global Makefile

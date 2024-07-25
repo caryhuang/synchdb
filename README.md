@@ -72,23 +72,6 @@ Optionally, you can also add the above export command in .bashrc file so it is a
 ```
 echo "export PATH=$PATH:/home/$USER/jdk-22.0.1/bin" >> /home/$USER/.bashrc
 ```
-### Build Debezium Runner Engine
-With Java and Maven setup, we are ready to build Debezium Runner Engine:
-
-```
-cd /home/$USER/postgres/contrib/synchdb
-make build_dbz
-```
-The output of the build will be located in:
-```
-/home/$USER/postgres/contrib/synchdb/dbz-engine/target/dbz-engine-1.0.0.jar
-```
-
-This path is important as SynchDB relies on it to perform real-time CDC. We can export it to an environment variable:
-```
-export DBZ_ENGINE_DIR=/home/$USER/postgres/contrib/synchdb/dbz-engine/target/dbz-engine-1.0.0.jar
-```
-
 ### Build and Install PostgreSQL
 This can be done by following the standard build and install procedure as described [here](https://www.postgresql.org/docs/current/install-make.html). Generally, it consists of:
 
@@ -104,6 +87,19 @@ You should build and install the default extensions as well:
 cd /home/$USER/postgres/contrib
 make
 sudo make install
+```
+
+### Build Debezium Runner Engine
+With Java and Maven setup, we are ready to build Debezium Runner Engine:
+
+```
+cd /home/$USER/postgres/contrib/synchdb
+make build_dbz
+```
+
+then install dbz engine to PostgreSQL lib path
+``` 
+sudo make install_dbz
 ```
 
 ### Build SynchDB PostgreSQL Extension
@@ -161,6 +157,42 @@ Exit mysql client tool:
 ```
 \q
 ```
+
+### Prepare a sample SQL Server Database
+We can start a sample SQL server database for testing using docker compose. The user credentials are described in the `synchdb-sqlserver-test.yaml` file
+```
+docker compose -f synchdb-sqlserver-test.yaml up -d
+```
+
+You may not have sql server client tool installed, you could login to SQL server container to access its client tool.
+
+Find out the container ID for SQL server:
+```
+id=$(docker ps | grep sqlserver | awk '{print $1}')
+```
+
+copy the database schema into sql server container
+```
+docker cp inventory.sql $id:/
+```
+
+login to sqlserver container
+```
+docker exec -it $id bash
+```
+
+build the database accordign to schema
+```
+/opt/mssql-tools/bin/sqlcmd -U sa -P $SA_PASSWORD -i /inventory.sql
+```
+
+run some simple queries
+```
+/opt/mssql-tools/bin/sqlcmd -U sa -P $SA_PASSWORD -d testDB -q "insert into orders(order_date, purchaser, quantity, product_id) values( '2024-01-01', 1003, 2, 107)"
+
+/opt/mssql-tools/bin/sqlcmd -U sa -P $SA_PASSWORD -d testDB -q "select * from orders"
+```
+
 ### Prepare a sample PostgreSQL database
 Initialize and start a new PostgreSQL database:
 
@@ -198,23 +230,52 @@ select synchdb_start_engine_bgw('127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inv
 
 which will only replicate changes from `order` and `customers` tables under database `inventory` from MySQL database.
 
+You may start another synchdb background worker replicating from SQL server to a different database within PostgreSQL :
+
+```
+create database sqlserverdb;
+select synchdb_start_engine_bgw('127.0.0.1',1433, 'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver');
+```
+
+The above will spawn a second worker to replicate changes from SQL server to a PostgreSQL database called `sqlserverdb`
+
+```
+ps -ef | grep postgres
+ubuntu    153865       1  0 15:49 ?        00:00:00 /usr/local/pgsql/bin/postgres -D ../../synchdbtest
+ubuntu    153866  153865  0 15:49 ?        00:00:00 postgres: checkpointer
+ubuntu    153867  153865  0 15:49 ?        00:00:00 postgres: background writer
+ubuntu    153869  153865  0 15:49 ?        00:00:00 postgres: walwriter
+ubuntu    153870  153865  0 15:49 ?        00:00:00 postgres: autovacuum launcher
+ubuntu    153871  153865  0 15:49 ?        00:00:00 postgres: logical replication launcher
+ubuntu    153875  153865  0 15:49 ?        00:00:46 postgres: synchdb engine: sqlserver@127.0.0.1:1433 -> postgres
+ubuntu    153900  153865  0 15:49 ?        00:00:46 postgres: synchdb engine: mysql@127.0.0.1:3306 -> mysqldb
+```
+
+As you can see, there are 2 additional background workers, one replicating from MySQL, the other replicating from SQL server.
+
 To stop a running synchdb background worker. Use the `synchdb_stop_engine_bgw` SQL function. `synchdb_stop_engine_bgw` takes this argument:
 * connector - the conenctor type expressed as string, can be MySQL, Oracle, SQLServer regardless of capital or lower case. Currently only MySQL is supported.
 
 For example:
 ```
 select synchdb_stop_engine_bgw('mysql');
+select synchdb_stop_engine_bgw('sqlserver');
 ```
 
-The replicated changes will be mapped to a schema in destination database. For example, a table named `orders` from database `inventory` in MySQL will be replicated to a table named `orders` under schema `inventory` under the database `postgres`
+The replicated changes will be mapped to a schema in destination database. For example, a table named `orders` from database `inventory` in MySQL will be replicated to a table named `orders` under schema `inventory`.
 
-During the synchdb operations, intermediate files will be generated and they are by default located in:
-* /dev/shm/offsets.dat
-* /dev/shm/schemahistory.dat
+During the synchdb operations, metadata files (offsets and schemahistory files) will be generated by DBZ engine and they are by default located in `$PGDATA/pg_synchdb` directory:
 
-offsets.dat stores the current position of the CDC operation and subsequent launch of the dbz worker will resume from this offset. schemahistory.dat stores the schema needed to created the source database. 
+```
+ls $PGDATA/pg_synchdb
+mysql_mysqluser@127.0.0.1_3306_offsets.dat        sqlserver_sa@127.0.0.1_1433_offsets.dat
+mysql_mysqluser@127.0.0.1_3306_schemahistory.dat  sqlserver_sa@127.0.0.1_1433_schemahistory.dat
 
-If you would like synchdb to start replicating from the very beginning. Follow these steps:
+```
+
+each DBZ engine worker has its own pair of metadata files. These store the schema information to build the source tables and the offsets to resume upon restarting.
+
+If you would like synchdb to start replicating from the very beginning (for MySQL as an example). Follow these steps:
 
 stop the dbz engine
 ```
@@ -223,7 +284,8 @@ select synchdb_stop_engine_bgw('mysql');
 
 remove the files
 ```
-rm /dev/shm/offsets.dat /dev/shm/schemahistory.dat
+rm $PGDATA/pg_synchdb/mysql_mysqluser@127.0.0.1_3306_offsets.dat
+rm $PGDATA/pg_synchdb/mysql_mysqluser@127.0.0.1_3306_schemahistory.dat
 ```
 
 restart the dbz engine

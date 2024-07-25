@@ -473,7 +473,116 @@ static DBZ_DDL * parseDBZDDL(Jsonb * jb)
 	return ddlinfo;
 }
 
-static PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl)
+/*
+ * This function transforms id format 'database.schema.table' to
+ * 'database.schema_table'. If the id format is 'database.table'
+ * then no transformation is applied.
+ */
+static void splitIdString(char * id, char ** db, char ** schema, char ** table)
+{
+	int dotCount = 0;
+	char *p = NULL;
+
+	for (p = id; *p != '\0'; p++)
+	{
+		if (*p == '.')
+			dotCount++;
+	}
+
+	if (dotCount == 1)
+	{
+		/* assume to be: database.table */
+		*db = strtok(id, ".");
+		*schema = NULL;
+		*table = strtok(NULL, ".");
+	}
+	else
+	{
+		/* assume to be: database.schema.table */
+		*db = strtok(id, ".");
+		*schema = strtok(NULL, ".");
+		*table = strtok(NULL, ".");
+	}
+}
+
+static void transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData * strinfo)
+{
+	switch (conntype)
+	{
+		case TYPE_MYSQL:
+		{
+			/*
+			 * todo: column data type conversion cases for MySQL:
+			 *  - if type is INT and autoincremented is true, translate to SERIAL
+			 *  - if type is BIGINT and autoincremented is true, translate to BIGSERIAL
+			 *  - if type is SMALLINT and autoincremented is true, translate to SMALLSERIAL
+			 *  - if type is ENUM, translate to TEXT with length=0
+			 *  - if type is GEOMETRY, translate to TEXT
+			 */
+			if (!strcasecmp(col->typeName, "INT") && col->autoIncremented)
+				appendStringInfo(strinfo, " %s %s ", col->name, "SERIAL");
+			else if (!strcasecmp(col->typeName, "BIGINT") && col->autoIncremented)
+				appendStringInfo(strinfo, " %s %s ", col->name, "BIGSERIAL");
+			else if (!strcasecmp(col->typeName, "SMALLINT") && col->autoIncremented)
+				appendStringInfo(strinfo, " %s %s ", col->name, "SMALLSERIAL");
+			else if (!strcasecmp(col->typeName, "ENUM"))
+			{
+				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
+				col->length = 0;	/* this prevents adding a fixed size for TEXT */
+			}
+			else if (!strcmp(col->typeName, "GEOMETRY"))
+				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
+			else
+				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+
+			break;
+		}
+		case TYPE_ORACLE:
+		{
+			break;
+		}
+		case TYPE_SQLSERVER:
+		{
+			/*
+			 * todo: column data type conversion cases for SqlServer:
+			 *  - if type is int identity and autoincremented is true, translate to SERIAL
+			 *  - if type is bigint identity and autoincremented is true, translate to BIGSERIAL
+			 *  - if type is smallint identity and autoincremented is true, translate to SMALLSERIAL
+			 *  - if type is ENUM, translate to TEXT with length=0
+			 *  - if type is GEOMETRY, translate to TEXT
+			 */
+			if (!strcasecmp(col->typeName, "int identity") && col->autoIncremented)
+				appendStringInfo(strinfo, " %s %s ", col->name, "SERIAL");
+			else if (!strcasecmp(col->typeName, "bigint identity") && col->autoIncremented)
+				appendStringInfo(strinfo, " %s %s ", col->name, "BIGSERIAL");
+			else if (!strcasecmp(col->typeName, "int identity") && col->autoIncremented)
+				appendStringInfo(strinfo, " %s %s ", col->name, "SMALLSERIAL");
+			else if (!strcasecmp(col->typeName, "ENUM"))
+			{
+				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
+				col->length = 0;	/* this prevents adding a fixed size for TEXT */
+			}
+			else if (!strcmp(col->typeName, "GEOMETRY"))
+				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
+			else
+				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+
+			/* set the length to 0 to prevent adding a fixed size for non-string columne types */
+			if (strcasecmp(col->typeName, "varchar") && strcasecmp(col->typeName, "char") && col->length > 0)
+				col->length = 0;	/* this prevents adding a fixed size for types that are not varchar or char */
+
+			break;
+		}
+		default:
+		{
+			/* unknown type, no special handling - may error out later when applying to PostgreSQL */
+			appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+			break;
+		}
+	}
+}
+
+static PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 {
 	PG_DDL * pgddl = (PG_DDL*) palloc0(sizeof(PG_DDL));
 	ListCell * cell;
@@ -485,47 +594,45 @@ static PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl)
 	if (!strcmp(dbzddl->type, "CREATE"))
 	{
 		/* assume CREATE table */
-		/* todo: dbzddl->id is expressed in database.table format and for now
-		 * we automatically map it to schema.table within current database
-		 * (whatever it is). So here we extract the database part from dbzddl->id
-		 * and try to create a schema if not exist. We should make this behavior
-		 * configurable in the future
+		/* todo: dbzddl->id is can be exprssed in either database.table or
+		 * database.schema.table formats. Right now we will transform like this:
+		 *
+		 * database.table:
+		 * 	- database becomes schema in PG
+		 * 	- table name stays
+		 *
+		 * database.schema.table:
+		 * 	- database becomes schema in PG
+		 * 	- schema is ignored
+		 * 	- table name stays
+		 *
+		 * todo: We should make this behavior configurable in the future
 		 */
 		char * tmp = pstrdup(dbzddl->id);
-		char * schema = strtok(tmp, ".");
-		appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; ", schema);
+		char * db = NULL, * schema = NULL, * table = NULL;
+
+		splitIdString(dbzddl->id, &db, &schema, &table);
+
+		/* database and table must be present. schema is optional */
+		if (!db || !table)
+		{
+			elog(WARNING, "malformed id field in dbz change event: %s", dbzddl->id);
+			pfree(strinfo.data);
+			return NULL;
+		}
+
+		/* database mapped to schema */
+		appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; ", db);
 		pfree(tmp);
 
-		/* if id is valid, we treat it as CREATE TABLE */
-		appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s (", dbzddl->id);
+		/* table stays as table, schema ignored */
+		appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s.%s (", db, table);
 
 		foreach(cell, dbzddl->columns)
 		{
 			DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
 
-			/*
-			 * todo: column data type conversion cases:
-			 *  - if type is INT and autoincremented is true, translate to SERIAL
-			 *  - if type is BIGINT and autoincremented is true, translate to BIGSERIAL
-			 *  - if type is SMALLINT and autoincremented is true, translate to SMALLSERIAL
-			 *  - if type is ENUM, translate to TEXT with length=0
-			 *  - if type is GEOMETRY, translate to TEXT
-			 */
-			if (!strcmp(col->typeName, "INT") && col->autoIncremented)
-				appendStringInfo(&strinfo, " %s %s ", col->name, "SERIAL");
-			else if (!strcmp(col->typeName, "BIGINT") && col->autoIncremented)
-				appendStringInfo(&strinfo, " %s %s ", col->name, "BIGSERIAL");
-			else if (!strcmp(col->typeName, "SMALLINT") && col->autoIncremented)
-				appendStringInfo(&strinfo, " %s %s ", col->name, "SMALLSERIAL");
-			else if (!strcmp(col->typeName, "ENUM"))
-			{
-				appendStringInfo(&strinfo, " %s %s ", col->name, "TEXT");
-				col->length = 0;	/* this prevents adding a fixed size for TEXT */
-			}
-			else if (!strcmp(col->typeName, "GEOMETRY"))
-				appendStringInfo(&strinfo, " %s %s ", col->name, "TEXT");
-			else
-				appendStringInfo(&strinfo, " %s %s ", col->name, col->typeName);
+			transformDDLColumns(col, type, &strinfo);
 
 			/* if a length if specified, add it. For example VARCHAR(30)*/
 			if (col->length > 0)
@@ -849,7 +956,7 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 	Oid tableoid, schemaoid;
 	Relation rel;
 	TupleDesc tupdesc;
-	int attnum;
+	int attnum, j = 0;
 
 	HTAB * typeidhash;
 	HASHCTL hash_ctl;
@@ -880,8 +987,17 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 	dbzdml->op = op;
 	/*
 	 * before parsing, we need to make sure the target namespace and table
-	 * do exist in PostgreSQL, and also fetch their attribute type IDs
+	 * do exist in PostgreSQL, and also fetch their attribute type IDs. PG
+	 * automatically converts upper case letters to lower when they are
+	 * created. However, catalog lookups are case sensitive so here we must
+	 * convert db and table to all lower case letters.
 	 */
+	for (j = 0; j < strlen(dbzdml->db); j++)
+		dbzdml->db[j] = (char) pg_tolower((unsigned char) dbzdml->db[j]);
+
+	for (j = 0; j < strlen(dbzdml->table); j++)
+		dbzdml->table[j] = (char) pg_tolower((unsigned char) dbzdml->table[j]);
+
 	StartTransactionCommand();
 	PushActiveSnapshot(GetTransactionSnapshot());
 
@@ -1426,11 +1542,33 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 	return dbzdml;
 }
 
+ConnectorType fc_get_connector_type(const char * connector)
+{
+	if (!strcasecmp(connector, "mysql"))
+	{
+		return TYPE_MYSQL;
+	}
+	else if (!strcasecmp(connector, "oracle"))
+	{
+		return TYPE_ORACLE;
+	}
+	else if (!strcasecmp(connector, "sqlserver"))
+	{
+		return TYPE_SQLSERVER;
+	}
+	/* todo: support more dbz connector types here */
+	else
+	{
+		return TYPE_UNDEF;
+	}
+}
+
 int fc_processDBZChangeEvent(const char * event)
 {
 	Datum jsonb_datum;
 	Jsonb *jb;
 	StringInfoData strinfo;
+	ConnectorType type;
 
 	initStringInfo(&strinfo);
 
@@ -1438,6 +1576,8 @@ int fc_processDBZChangeEvent(const char * event)
     jb = DatumGetJsonbP(jsonb_datum);
 
     getPathElementString(jb, "payload.source.connector", &strinfo);
+    type = fc_get_connector_type(strinfo.data);
+
     getPathElementString(jb, "payload.source.file", &strinfo);
     getPathElementString(jb, "payload.source.pos", &strinfo);
     getPathElementString(jb, "payload.ddl", &strinfo);
@@ -1459,7 +1599,7 @@ int fc_processDBZChangeEvent(const char * event)
     	elog(WARNING, "converting to PG DDL change event...");
 
     	/* (2) convert */
-    	pgddl = convert2PGDDL(dbzddl);
+    	pgddl = convert2PGDDL(dbzddl, type);
     	if (!pgddl)
     	{
     		elog(WARNING, "failed to convert DBZ DDL to PG DDL change event");
