@@ -247,8 +247,8 @@ ubuntu    153867  153865  0 15:49 ?        00:00:00 postgres: background writer
 ubuntu    153869  153865  0 15:49 ?        00:00:00 postgres: walwriter
 ubuntu    153870  153865  0 15:49 ?        00:00:00 postgres: autovacuum launcher
 ubuntu    153871  153865  0 15:49 ?        00:00:00 postgres: logical replication launcher
-ubuntu    153875  153865  0 15:49 ?        00:00:46 postgres: synchdb engine: sqlserver@127.0.0.1:1433 -> postgres
-ubuntu    153900  153865  0 15:49 ?        00:00:46 postgres: synchdb engine: mysql@127.0.0.1:3306 -> mysqldb
+ubuntu    153875  153865  0 15:49 ?        00:00:46 postgres: synchdb engine: sqlserver@127.0.0.1:1433 -> sqlserverdb
+ubuntu    153900  153865  0 15:49 ?        00:00:46 postgres: synchdb engine: mysql@127.0.0.1:3306 -> postgres
 ```
 
 As you can see, there are 2 additional background workers, one replicating from MySQL, the other replicating from SQL server.
@@ -294,44 +294,74 @@ select synchdb_start_engine_bgw('127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inv
 ```
 
 ## Architecture
-SynchDB extension consists of 4 major components:
-* heterogeneous connector (MySQL for now)
-* format converter
-* replication agent
-* sync agent
+SynchDB extension consists of 6 major components:
+* Debezium Runner Engine (Java)
+* SynchDB Launcher
+* SynchDB Worker
+* Format Converter
+* Replication Agent
+* Table Synch Agent
 
-![img](https://www.highgo.ca/wp-content/uploads/2024/05/syncdb-Page-2.drawio.png)
+![img](https://www.highgo.ca/wp-content/uploads/2024/07/synchdb.drawio.png)
 
-### Heterogeneous connector
-* communicates with a remote heterogeneous database (such as MySQL) with appropriate driver.
-* obtains heterogeneous data and pass it down to format converter.
+### Debezium Runner Engine (Java)
+* it is a java application that utilizes Debezium embedded library that supports various connector implementations to replicate change data from various database types such as MySQL, Oracle, SQL server...etc.
+* it is to be invokved by `SynchDB Worker` to initialize Debezium embedded library and to receive change data.
+* the change data is sent to `SynchDB Worker` in generalized JSON format to be further processed. 
+
+### SynchDB Laucnher
+* responsible for creating and destroying synchdb workers using PostgreSQL's background worker APIs. 
+* configure each worker's connector type, destination database IPs, ports...etc.
+
+### SynchDB Worker
+* responsible for instantiating a `Debezium Runner Engine` to replicate changes from a particular connector type.
+* communicate with Debezium Runner via JNI to receive change data in JSON formats.
+* transfer the JSON change data to `Format Converter` module for furher processing.
+* 
 
 ### Format Converter
-* formats heterogeneous data into a format that PostgreSQL understands.
-* formatted data can be used by replication and sync agent.
+* parse the JSON change data using PostgreSQL Jsonb APIs
+* transform DDL queries to PostgreSQL compatible queries and translate heterogeneous column data type to PostgreSQL compatible types.
+* transform DML queries to PostgreSQL compatible queries and handle data processing based on column data types
+* Currently, format converter produces PostgreSQL compatible queries for both DDL and DML, which is then passed to `Replication Agent` for furhter processing.
+* in the future, for DMLs, we may change the outputs to be raw HeapTupleData which can be fed directly to Heap Access Method within PostgreSQL for faster executions.
 
-### replication Agent
-* triggers heterogeneous connector to obtain incremental changes from heterogeneous database (such as MySQL) .
-* takes the formatted data from format converter and interacts with PostgreSQL core to insert, update, delete or truncate a desginated table.
+### Replication Agent
+* Takes the outputs from `Format Converter` and process them.
+* Currently, `Format Converter` produces PostgreSQL compatible queries for both DDL and DML. so `Replication Agent` will invok PostgreSQL's SPI to execute these queries.
+* In the future when `Format Converter` can produce HeapTupleData format outputs, then `Replication Agent` will have an option to invoke PostgreSQL's heap access method routines to handle them.
 
 ### Sync Agent
-* triggers initial table sync via heterogeneous connector
-* takes the formatted data from format converter and interacts with PostgreSQL core to synchronized schema, indexes, and other table properties as well as copies initial data.
+* design details and implementation are not available yet. TBD
+* supposed to provide a more efficient alternative to perform initial table synchronization.
 
-## General Scope of Work
-* all features to be made into a single PostgreSQL extension called SynchDB
-* starts with MySQL as the only heterogeneous database to synchronize to PostgreSQL
-* support 2 operating modes, sync vs follow and user is able to choose which one to use via a SQL function call
-* allow user to query current copy status with a few SQL function calls
-* ...
+## Feature Highlights and TODOs
 
+### Debezium Runner Engine (Java)
+* support more connector types
 
-## Feature Highlights (More to Come)
-* synce mode for initial data, schema, index, trigger...etc synchronizaation
-* follow mode for logically replicating incremental data changes
-* DDL and DML Synchronization
-* Concurrent table synchronization
-* same table concurrency
-* index concurrency
-* ...
+### SynchDB Launcher
+* support more connector types
+* define and implement potential configuration parameters
+* configurable starting offsets for each worker
+* utility SQL functions to display worker status, current offsets, potential errors...etc
+* automatic worker re-launch upon PostgreSQL restart
+* support multiple workers for the same connector
 
+### SynchDB Worker
+* support more column data type translations to PostgreSQL based on connector types
+* support ALTER TABLE, TRUNCATE, CREATE INDEX, DROP INDEX...
+
+### Format Converter
+* support more data conversions based on column data type
+* support HeapTupleData conversions for DMLs
+
+### Replication Agent
+* support direct data update via Heap Access Method in addition to SPI
+
+### Table Synch Agent
+* design and POC
+* proposed features:
+	* same table concurrency
+	* Concurrent table synchronization
+	* ...
