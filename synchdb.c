@@ -17,6 +17,7 @@
 #include "storage/lwlock.h"
 #include "storage/proc.h"
 #include "storage/ipc.h"
+#include "storage/fd.h"
 #include "miscadmin.h"
 #include "utils/wait_event.h"
 #include "varatt.h"
@@ -26,14 +27,8 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(synchdb_stop_engine_bgw);
 PG_FUNCTION_INFO_V1(synchdb_start_engine_bgw);
 
-typedef enum _connectorType
-{
-	TYPE_UNDEF = 0,
-	TYPE_MYSQL,
-	TYPE_ORACLE,
-	TYPE_SQLSERVER,
-
-} ConnectorType;
+#define SYNCHDB_METADATA_DIR "pg_synchdb"
+#define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
 
 typedef struct _MysqlStateInfo
 {
@@ -261,6 +256,7 @@ static pid_t get_shm_connector_pid(ConnectorType type)
 		{
 			return sdb_state->sqlserverinfo.pid;
 		}
+		/* todo: support more dbz connector types here */
 		default:
 		{
 			return InvalidPid;
@@ -287,6 +283,7 @@ static void set_shm_connector_pid(ConnectorType type, pid_t pid)
 			sdb_state->sqlserverinfo.pid = pid;
 			break;
 		}
+		/* todo: support more dbz connector types here */
 		default:
 		{
 			break;
@@ -313,6 +310,7 @@ static void synchdb_init_shmem(void)
 		LWLockInitialize(&sdb_state->lock, LWLockNewTrancheId());
 		sdb_state->mysqlinfo.pid = InvalidPid;
 		sdb_state->oracleinfo.pid = InvalidPid;
+		sdb_state->sqlserverinfo.pid = InvalidPid;
 	}
 	LWLockRelease(AddinShmemInitLock);
 
@@ -333,60 +331,45 @@ static void synchdb_detach_shmem(int code, Datum arg)
 	LWLockRelease(&sdb_state->lock);
 }
 
-static ConnectorType get_connector_type(const char * connector)
-{
-	if (!strcasecmp(connector, "mysql"))
-	{
-		return TYPE_MYSQL;
-	}
-	else if (!strcasecmp(connector, "oracle"))
-	{
-		return TYPE_ORACLE;
-	}
-	else if (!strcasecmp(connector, "sqlserver"))
-	{
-		return TYPE_SQLSERVER;
-	}
-	/* todo: support more dbz connector types here */
-	else
-	{
-		return TYPE_UNDEF;
-	}
-}
 static void prepare_bgw(BackgroundWorker * worker, char * hostname,
 		unsigned int port, char * user, char * pwd, char * src_db,
 		char * dst_db, char * table, char * connector)
 {
-	ConnectorType type = get_connector_type(connector);
+	ConnectorType type = fc_get_connector_type(connector);
 	switch(type)
 	{
 		case TYPE_MYSQL:
 		{
 			worker->bgw_main_arg = UInt32GetDatum(TYPE_MYSQL);
-			strcpy(worker->bgw_name, "synchdb mysql engine");
-			strcpy(worker->bgw_type, "synchdb mysql engine");
+			snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: mysql@%s:%u", hostname, port);
+			strcpy(worker->bgw_type, "synchdb engine: mysql");
 			break;
 		}
 		case TYPE_ORACLE:
 		{
 			worker->bgw_main_arg = UInt32GetDatum(TYPE_ORACLE);
-			strcpy(worker->bgw_name, "synchdb oracle engine");
-			strcpy(worker->bgw_type, "synchdb oracle engine");
+			snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: oracle@%s:%u", hostname, port);
+			strcpy(worker->bgw_type, "synchdb engine: oracle");
 			break;
 		}
 		case TYPE_SQLSERVER:
 		{
 			worker->bgw_main_arg = UInt32GetDatum(TYPE_SQLSERVER);
-			strcpy(worker->bgw_name, "synchdb sqlserver engine");
-			strcpy(worker->bgw_type, "synchdb sqlserver engine");
+			snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: sqlserver@%s:%u", hostname, port);
+			strcpy(worker->bgw_type, "synchdb engine: sqlserver");
 			break;
 		}
+		/* todo: support more dbz connector types here */
 		default:
 		{
 			elog(ERROR, "unsupported connector type");
 			break;
 		}
 	}
+	/* append destination database to worker->bgw_name for clarity */
+	strcat(worker->bgw_name, " -> ");
+	strcat(worker->bgw_name, dst_db);
+
 	/* Format the extra args into the bgw_extra field
 	 * todo: BGW_EXTRALEN is only 128 bytes, so the formatted string will be
 	 * cut off here if exceeding this length. Maybe there is a better way to
@@ -398,7 +381,21 @@ static void prepare_bgw(BackgroundWorker * worker, char * hostname,
 
 void _PG_init(void)
 {
-
+	/* create a pg_synchdb directory under $PGDATA to store connector meta data */
+	if (MakePGDirectory(SYNCHDB_METADATA_DIR) < 0)
+	{
+		if (errno != EEXIST)
+		{
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not create directory \"%s\": %m",
+							 SYNCHDB_METADATA_DIR)));
+		}
+	}
+	else
+	{
+		fsync_fname(SYNCHDB_METADATA_DIR, true);
+	}
 }
 
 void _PG_fini(void)
@@ -425,7 +422,7 @@ synchdb_engine_main(Datum main_arg)
     JavaVMOption options[2];
 	int ret;
 	const char * dbzpath = getenv("DBZ_ENGINE_DIR");
-	char javaopt[512] = {0};
+	char javaopt[512] = {0}, defaultdbzpath[512] = {0};
 	JavaVM *jvm = NULL;		/* represents java vm instance */
 	JNIEnv *env = NULL;		/* represents JNI run-time environment */
 	jclass cls; 	/* represents debezium runner java class */
@@ -507,12 +504,31 @@ synchdb_engine_main(Datum main_arg)
 
 	if (!dbzpath)
 	{
-		elog(WARNING, "DBZ_ENGINE_DIR not set. Please set it to the "
-				"path to Debezium engine jar file");
-		return;
+		elog(WARNING, "DBZ_ENGINE_DIR not set. Using default lib path %s/dbz_engine/%s",
+				pkglib_path, DBZ_ENGINE_JAR_FILE);
+		snprintf(defaultdbzpath, sizeof(defaultdbzpath), "%s/dbz_engine/%s",
+				pkglib_path, DBZ_ENGINE_JAR_FILE);
+		if (access(defaultdbzpath, F_OK) == -1)
+		{
+			elog(WARNING, "cannot find DBZ engine jar file from %s",
+					defaultdbzpath);
+			return;
+		}
+		snprintf(javaopt, sizeof(javaopt), "-Djava.class.path=%s", defaultdbzpath);
+	}
+	else
+	{
+		elog(WARNING, "DBZ_ENGINE_DIR is set. DBZ engine jar location: %s", dbzpath);
+		if (access(dbzpath, F_OK) == -1)
+		{
+			elog(WARNING, "cannot find DBZ engine jar file from %s",
+					dbzpath);
+			return;
+		}
+		snprintf(javaopt, sizeof(javaopt), "-Djava.class.path=%s", dbzpath);
 	}
 
-	snprintf(javaopt, sizeof(javaopt), "-Djava.class.path=%s", dbzpath);
+//	snprintf(javaopt, sizeof(javaopt), "-Djava.class.path=%s", dbzpath);
 
 	/*
 	 * Path to the Java class:
@@ -667,7 +683,6 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	connector = text_to_cstring(connector_text);
 
 	/* prepare background worker */
-
 	MemSet(&worker, 0, sizeof(BackgroundWorker));
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
 			BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -679,7 +694,6 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	strcpy(worker.bgw_function_name, "synchdb_engine_main");
 
 	prepare_bgw(&worker, hostname, port, user, pwd, src_db, dst_db, table, connector);
-	elog(WARNING, "extra args: %s", worker.bgw_extra);
 
 	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
 		ereport(ERROR,
@@ -701,7 +715,7 @@ Datum
 synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 {
 	char * connector = text_to_cstring(PG_GETARG_TEXT_P(0));
-	ConnectorType type = get_connector_type(connector);
+	ConnectorType type = fc_get_connector_type(connector);
 	pid_t pid;
 
 	if (type == TYPE_UNDEF)

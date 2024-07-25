@@ -11,6 +11,15 @@
 #include "nodes/pg_list.h"
 #include "replication_agent.h"
 
+typedef enum _connectorType
+{
+	TYPE_UNDEF = 0,
+	TYPE_MYSQL,
+	TYPE_ORACLE,
+	TYPE_SQLSERVER,
+
+} ConnectorType;
+
 /* data structures representing DBZ change events */
 typedef struct dbz_ddl_column
 {
@@ -56,5 +65,6 @@ typedef struct dbz_dml
 } DBZ_DML;
 
 int fc_processDBZChangeEvent(const char * event);
+ConnectorType fc_get_connector_type(const char * connector);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */

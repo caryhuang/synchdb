@@ -26,6 +26,9 @@ public class DebeziumRunner {
         final int TYPE_MYSQL = 1;
 		final int TYPE_ORACLE = 2;
 		final int TYPE_SQLSERVER = 3;
+		String offsetfile = "/dev/shm/offsets.dat";
+		String schemahistoryfile = "/dev/shm/schemahistory.dat";
+		String targ = user + "@" + hostname + "_" + port;
 
 		Properties props = new Properties();
         // Set Debezium properties...
@@ -35,21 +38,35 @@ public class DebeziumRunner {
 			case TYPE_MYSQL:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.mysql.MySqlConnector");
+				offsetfile = "pg_synchdb/mysql_" + targ + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/mysql_" + targ + "_schemahistory.dat";
 				break;
 			}
 			case TYPE_ORACLE:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
+				offsetfile = "pg_synchdb/oracle_" + targ + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/oracle_" + targ + "_schemahistory.dat";
 				break;
 			}
 			case TYPE_SQLSERVER:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");
+				offsetfile = "pg_synchdb/sqlserver_" + targ + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/sqlserver_" + targ + "_schemahistory.dat";
+
+				/* sqlserver requires database - cannot be null */
+				if (database.equals("null"))
+					logger.error("database cannot be null");
+				else
+					props.setProperty("database.names", database);
+
+				props.setProperty("database.encrypt", "false");
 				break;
 			}
 		}
 		props.setProperty("offset.storage", "org.apache.kafka.connect.storage.FileOffsetBackingStore");
-		props.setProperty("offset.storage.file.filename", "/dev/shm/offsets.dat");
+		props.setProperty("offset.storage.file.filename", offsetfile);
 		props.setProperty("offset.flush.interval.ms", "60000");
 		
 		/* begin connector properties */
@@ -70,7 +87,7 @@ public class DebeziumRunner {
 		props.setProperty("database.server.id", "223344");
 		props.setProperty("topic.prefix", "my-app-connector");
 		props.setProperty("schema.history.internal", "io.debezium.storage.file.history.FileSchemaHistory");
-		props.setProperty("schema.history.internal.file.filename", "/dev/shm/schemahistory.dat");
+		props.setProperty("schema.history.internal.file.filename", schemahistoryfile);
 
         // Set other required properties...
 		logger.info("Hello from DebeziumRunner class!");
