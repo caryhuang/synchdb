@@ -46,13 +46,15 @@ typedef struct
 {
 	char name[NAMEDATALEN];
 	Oid oid;
+	int position;
 } NameOidEntry;
 
 typedef struct dbz_ddl_column_value
 {
 	char * name;
 	char * value;	/* expressed as string as taken from json */
-	Oid datatype;		/* data type Oid as defined by PostgreSQL */
+	Oid datatype;	/* data type Oid as defined by PostgreSQL */
+	int position;	/* position of this column value, start from 1 */
 } DBZ_DML_COLUMN_VALUE;
 
 typedef struct dbz_dml
@@ -60,6 +62,7 @@ typedef struct dbz_dml
 	char op;
 	char * db;
 	char * table;
+	Oid tableoid;
 	List * columnValuesBefore;	/* list of DBZ_DML_COLUMN_VALUE */
 	List * columnValuesAfter;	/* list of DBZ_DML_COLUMN_VALUE */
 } DBZ_DML;

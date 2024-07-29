@@ -226,6 +226,12 @@ static void destroyPGDML(PG_DML * dmlinfo)
 	{
 		if (dmlinfo->dmlquery)
 			pfree(dmlinfo->dmlquery);
+
+		if (dmlinfo->columnValuesBefore)
+			list_free_deep(dmlinfo->columnValuesBefore);
+
+		if (dmlinfo->columnValuesAfter)
+			list_free_deep(dmlinfo->columnValuesAfter);
 		pfree(dmlinfo);
 	}
 }
@@ -685,7 +691,7 @@ static PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
  * this function performs necessary data conversions to convert input data
  * as string and output a processed string based on type
  */
-static char * processDataByType(char * in, Oid type)
+static char * processDataByType(char * in, Oid type, bool addquote)
 {
 	char * out = NULL;
 
@@ -714,40 +720,48 @@ static char * processDataByType(char * in, Oid type)
 		case VARCHAROID:
 		case CSTRINGOID:
 		{
-			size_t i = 0, j = 0;
-			size_t outlen = 0;
-
-			/* escape possible single quotes */
-			for (i = 0; i < strlen(in); i++)
+			if (addquote)
 			{
-				if (in[i] == '\'')
+				size_t i = 0, j = 0;
+				size_t outlen = 0;
+
+				/* escape possible single quotes */
+				for (i = 0; i < strlen(in); i++)
 				{
-					/* single quote will be escaped so +2 in size */
-					outlen += 2;
+					if (in[i] == '\'')
+					{
+						/* single quote will be escaped so +2 in size */
+						outlen += 2;
+					}
+					else
+					{
+						outlen++;
+					}
 				}
-				else
+
+				/* 2 more to account for open and closing quotes */
+				out = (char *) palloc0(outlen + 2 + 1);
+
+				out[j++] = '\'';
+				for (i = 0; i < strlen(in); i++)
 				{
-					outlen++;
+					if (in[i] == '\'')
+					{
+						out[j++] = '\'';
+						out[j++] = '\'';
+					}
+					else
+					{
+						out[j++] = in[i];
+					}
 				}
+				out[j++] = '\'';
 			}
-
-			/* 2 more to account for open and closing quotes */
-			out = (char *) palloc0(outlen + 2 + 1);
-
-			out[j++] = '\'';
-			for (i = 0; i < strlen(in); i++)
+			else
 			{
-				if (in[i] == '\'')
-				{
-					out[j++] = '\'';
-					out[j++] = '\'';
-				}
-				else
-				{
-					out[j++] = in[i];
-				}
+				out = (char *) palloc0(strlen(in) + 1);
+				strncpy(out, in, strlen(in));
 			}
-			out[j++] = '\'';
 			elog(WARNING, "out str %s", out);
 			break;
 		}
@@ -778,9 +792,17 @@ static char * processDataByType(char * in, Oid type)
 			target_date = gmtime(&target_time);
 			strftime(datestr, 11, "%Y-%m-%d", target_date);
 
-			/* date string needs quotes as well */
-			out = (char *) palloc0(strlen(datestr) + 2 + 1);
-			snprintf(out, strlen(datestr) + 2 + 1, "'%s'", datestr);
+			if (addquote)
+			{
+				/* date string needs quotes as well */
+				out = (char *) palloc0(strlen(datestr) + 2 + 1);
+				snprintf(out, strlen(datestr) + 2 + 1, "'%s'", datestr);
+			}
+			else
+			{
+				out = (char *) palloc0(strlen(datestr) + 1);
+				strncpy(out, datestr, strlen(datestr));
+			}
 			break;
 		}
 		case TIMEOID:
@@ -794,6 +816,19 @@ static char * processDataByType(char * in, Oid type)
 	}
 	return out;
 }
+
+static int list_sort_cmp (const ListCell *a, const ListCell *b)
+{
+	DBZ_DML_COLUMN_VALUE * colvala = (DBZ_DML_COLUMN_VALUE *) lfirst(a);
+	DBZ_DML_COLUMN_VALUE * colvalb = (DBZ_DML_COLUMN_VALUE *) lfirst(b);
+
+	if (colvala->position < colvalb->position)
+		return -1;
+	if (colvala->position > colvalb->position)
+		return 1;
+	return 0;
+}
+
 /*
  * todo: currently, this function converts DBZ DML to a DML query to be sent to
  * PostgreSQL's SPI for fast implementation. In the future, we can convert into
@@ -809,11 +844,19 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 
 	initStringInfo(&strinfo);
 
+	/* copy identification data to PG_DML */
+	pgdml->op = dbzdml->op;
+	pgdml->tableoid = dbzdml->tableoid;
+
+	/* todo: right now, we convert to both SPI and heap DML processing mode. We should choose
+	 * one type of conversion only instead of both. This should be controlled by a GUC later
+	 */
 	switch(dbzdml->op)
 	{
 		case 'r':
 		case 'c':
 		{
+			/* --- Convert to use SPI to handler DML --- */
 			appendStringInfo(&strinfo, "INSERT INTO %s.%s(", dbzdml->db, dbzdml->table);
 			foreach(cell, dbzdml->columnValuesAfter)
 			{
@@ -827,7 +870,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 			foreach(cell, dbzdml->columnValuesAfter)
 			{
 				DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
-				char * data = processDataByType(colval->value, colval->datatype);
+				char * data = processDataByType(colval->value, colval->datatype, true);
 
 				if (data != NULL)
 				{
@@ -844,10 +887,30 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 			strinfo.len = strinfo.len - 1;
 
 			appendStringInfo(&strinfo, ");");
+
+			/* --- Convert to use Heap AM to handler DML --- */
+			foreach(cell, dbzdml->columnValuesAfter)
+			{
+				DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+				PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+
+				char * data = processDataByType(colval->value, colval->datatype, false);
+
+				if (data != NULL)
+					pgcolval->value = pstrdup(data);
+				else
+					pgcolval->value = pstrdup("NULL");
+
+				pgcolval->datatype = colval->datatype;
+
+				pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval);
+			}
+			pgdml->columnValuesBefore = NULL;
 			break;
 		}
 		case 'd':
 		{
+			/* --- Convert to use SPI to handler DML --- */
 			appendStringInfo(&strinfo, "DELETE FROM %s.%s WHERE ", dbzdml->db, dbzdml->table);
 			foreach(cell, dbzdml->columnValuesBefore)
 			{
@@ -855,7 +918,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 				char * data;
 
 				appendStringInfo(&strinfo, "%s = ", colval->name);
-				data = processDataByType(colval->value, colval->datatype);
+				data = processDataByType(colval->value, colval->datatype, true);
 				if (data != NULL)
 				{
 					appendStringInfo(&strinfo, "%s", data);
@@ -872,10 +935,30 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 			strinfo.len = strinfo.len - 5;
 
 			appendStringInfo(&strinfo, ";");
+
+			/* --- Convert to use Heap AM to handler DML --- */
+			foreach(cell, dbzdml->columnValuesBefore)
+			{
+				DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+				PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+
+				char * data = processDataByType(colval->value, colval->datatype, false);
+
+				if (data != NULL)
+					pgcolval->value = pstrdup(data);
+				else
+					pgcolval->value = pstrdup("NULL");
+
+				pgcolval->datatype = colval->datatype;
+				pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval);
+			}
+			pgdml->columnValuesAfter = NULL;
+
 			break;
 		}
 		case 'u':
 		{
+			/* --- Convert to use SPI to handler DML --- */
 			appendStringInfo(&strinfo, "UPDATE %s.%s SET ", dbzdml->db, dbzdml->table);
 			foreach(cell, dbzdml->columnValuesAfter)
 			{
@@ -883,7 +966,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 				char * data;
 
 				appendStringInfo(&strinfo, "%s = ", colval->name);
-				data = processDataByType(colval->value, colval->datatype);
+				data = processDataByType(colval->value, colval->datatype, true);
 				if (data != NULL)
 				{
 					appendStringInfo(&strinfo, "%s,", data);
@@ -905,7 +988,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 				char * data;
 
 				appendStringInfo(&strinfo, "%s = ", colval->name);
-				data = processDataByType(colval->value, colval->datatype);
+				data = processDataByType(colval->value, colval->datatype, true);
 				if (data != NULL)
 				{
 					appendStringInfo(&strinfo, "%s", data);
@@ -923,6 +1006,40 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 			strinfo.len = strinfo.len - 5;
 
 			appendStringInfo(&strinfo, ";");
+
+			/* todo: change to forboth instead of 2 foreach */
+			/* --- Convert to use Heap AM to handler DML --- */
+			foreach(cell, dbzdml->columnValuesAfter)
+			{
+				DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+				PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+
+				char * data = processDataByType(colval->value, colval->datatype, false);
+
+				if (data != NULL)
+					pgcolval->value = pstrdup(data);
+				else
+					pgcolval->value = pstrdup("NULL");
+
+				pgcolval->datatype = colval->datatype;
+				pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval);
+			}
+
+			foreach(cell, dbzdml->columnValuesBefore)
+			{
+				DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+				PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+
+				char * data = processDataByType(colval->value, colval->datatype, false);
+
+				if (data != NULL)
+					pgcolval->value = pstrdup(data);
+				else
+					pgcolval->value = pstrdup("NULL");
+
+				pgcolval->datatype = colval->datatype;
+				pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval);
+			}
 			break;
 		}
 		default:
@@ -953,7 +1070,7 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 	char * value = NULL;
 	DBZ_DML * dbzdml = NULL;
 	DBZ_DML_COLUMN_VALUE * colval = NULL;
-	Oid tableoid, schemaoid;
+	Oid schemaoid;
 	Relation rel;
 	TupleDesc tupdesc;
 	int attnum, j = 0;
@@ -1012,8 +1129,8 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 		return NULL;
 	}
 
-	tableoid = get_relname_relid(dbzdml->table, schemaoid);
-	if (!OidIsValid(tableoid))
+	dbzdml->tableoid = get_relname_relid(dbzdml->table, schemaoid);
+	if (!OidIsValid(dbzdml->tableoid))
 	{
 		elog(WARNING, "no valid OID found for table '%s'", dbzdml->table);
 		destroyDBZDML(dbzdml);
@@ -1023,7 +1140,7 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 		return NULL;
 	}
 
-	elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", dbzdml->db, dbzdml->table, tableoid);
+	elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", dbzdml->db, dbzdml->table, dbzdml->tableoid);
 
 	/* prepare a temporary hash table for datatype look up with column name */
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
@@ -1040,7 +1157,7 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 	 * The type IDs are stored in typeidhash temporarily for the parser
 	 * below to look up
 	 */
-	rel = table_open(tableoid, NoLock);
+	rel = table_open(dbzdml->tableoid, NoLock);
 	tupdesc = RelationGetDescr(rel);
 
 	for (attnum = 1; attnum <= tupdesc->natts; attnum++)
@@ -1057,11 +1174,12 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 		{
 			strncpy(entry->name, NameStr(attr->attname), NAMEDATALEN);
 			entry->oid = attr->atttypid;
-			elog(DEBUG2, "Inserted name '%s' with OID %u", entry->name, entry->oid);
+			entry->position = attnum;
+			elog(DEBUG2, "Inserted name '%s' with OID %u and position %d", entry->name, entry->oid, entry->position);
 		}
 		else
 		{
-			elog(DEBUG2, "Name '%s' already exists with OID %u", entry->name, entry->oid);
+			elog(DEBUG2, "Name '%s' already exists with OID %u and position %d", entry->name, entry->oid, entry->position);
 		}
 
 	}
@@ -1207,10 +1325,14 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 						colval->value = pstrdup(value);
+
 						/* look up its data type */
 						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
 						if (found)
+						{
 							colval->datatype = entry->oid;
+							colval->position = entry->position;
+						}
 						else
 							elog(WARNING, "cannot find data type for column %s. None-existent column?", colval->name);
 
@@ -1349,7 +1471,10 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 						/* look up its data type */
 						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
 						if (found)
+						{
 							colval->datatype = entry->oid;
+							colval->position = entry->position;
+						}
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
@@ -1505,7 +1630,10 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 							/* look up its data type */
 							entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
 							if (found)
+							{
 								colval->datatype = entry->oid;
+								colval->position = entry->position;
+							}
 							else
 								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
@@ -1536,7 +1664,17 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 		}
 	}
 
-	if(strinfo.data)
+	/*
+	 * finally, we need to sort dbzdml->columnValuesBefore and dbzdml->columnValuesAfter
+	 * based on position to align with PostgreSQL's attnum
+	 */
+	if (dbzdml->columnValuesBefore != NULL)
+		list_sort(dbzdml->columnValuesBefore, list_sort_cmp);
+
+	if (dbzdml->columnValuesAfter != NULL)
+		list_sort(dbzdml->columnValuesAfter, list_sort_cmp);
+
+	if (strinfo.data)
 		pfree(strinfo.data);
 
 	return dbzdml;
