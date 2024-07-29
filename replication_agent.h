@@ -8,23 +8,31 @@
 #ifndef SYNCHDB_REPLICATION_AGENT_H_
 #define SYNCHDB_REPLICATION_AGENT_H_
 
+#include "executor/tuptable.h"
+
 /* data structures representing PostgreSQL data formats */
 typedef struct pg_ddl
 {
-	char * ddlquery;	/* to be fed into SPI interface for fast execution*/
+	char * ddlquery;	/* to be fed into SPI*/
 } PG_DDL;
+
+typedef struct pg_ddl_column_value
+{
+	char * value;	/* string representation of column values that
+					 * is processed and ready to be used to built
+					 * into TupleTableSlot.
+					 */
+	Oid datatype;
+} PG_DML_COLUMN_VALUE;
 
 typedef struct pg_dml
 {
-	char * dmlquery;
-	/* todo: express dml in HeapTuple or TableTupleSlot and invoke
-	 * Heap Access Method for direct handling of insert, update,
-	 * deletem, truncate...etc
-	 *
-	 * refer to src/backend/replication/logical/worker.c function
-	 * apply_handle_insert() about how to read from a change stream
-	 * and directly invoke Heap Access Method via the executor
-	 */
+	char * dmlquery;	/* to be fed into SPI */
+
+	char op;
+	Oid tableoid;
+	List * columnValuesBefore;	/* list of PG_DML_COLUMN_VALUE */
+	List * columnValuesAfter;	/* list of PG_DML_COLUMN_VALUE */
 } PG_DML;
 
 int ra_executePGDDL(PG_DDL * pgddl);
