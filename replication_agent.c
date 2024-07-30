@@ -179,7 +179,7 @@ static int synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid ta
 	List	   *perminfos = NIL;
 	ResultRelInfo *resultRelInfo;
 	ListCell * cell;
-	int i = 0;
+	int i = 0, ret = 0;
 	EPQState	epqstate;
 	bool found;
 	Oid idxoid = InvalidOid;
@@ -301,7 +301,7 @@ static int synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid ta
 	else
 	{
 		elog(WARNING, "tuple to update not found");
-		return -1;
+		ret = -1;
 	}
 
 	/* Cleanup. */
@@ -314,8 +314,131 @@ static int synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid ta
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 
-	return 0;
+	return ret;
 }
+
+static int synchdb_handle_delete(List * colvalbefore, Oid tableoid)
+{
+	Relation rel;
+	TupleDesc tupdesc;
+	TupleTableSlot * remoteslot, * localslot;
+	EState	   *estate;
+	RangeTblEntry *rte;
+	List	   *perminfos = NIL;
+	ResultRelInfo *resultRelInfo;
+	ListCell * cell;
+	int i = 0, ret = 0;
+	EPQState	epqstate;
+	bool found;
+	Oid idxoid = InvalidOid;
+
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+
+	rel = table_open(tableoid, NoLock);
+
+	/* initialize estate */
+	estate = CreateExecutorState();
+
+	rte = makeNode(RangeTblEntry);
+	rte->rtekind = RTE_RELATION;
+	rte->relid = RelationGetRelid(rel);
+	rte->relkind = rel->rd_rel->relkind;
+	rte->rellockmode = AccessShareLock;
+
+	addRTEPermissionInfo(&perminfos, rte);
+
+	ExecInitRangeTable(estate, list_make1(rte), perminfos);
+	estate->es_output_cid = GetCurrentCommandId(true);
+
+	/* initialize resultRelInfo */
+	resultRelInfo = makeNode(ResultRelInfo);
+	InitResultRelInfo(resultRelInfo, rel, 1, NULL, 0);
+
+	/* turn colvalbefore into TupleTableSlot */
+	tupdesc = RelationGetDescr(rel);
+
+	remoteslot = ExecInitExtraTupleSlot(estate, tupdesc, &TTSOpsVirtual);
+	localslot = table_slot_create(rel, &estate->es_tupleTable);
+
+	ExecClearTuple(remoteslot);
+
+	i = 0;
+	foreach(cell, colvalbefore)
+	{
+		PG_DML_COLUMN_VALUE * colval = (PG_DML_COLUMN_VALUE *) lfirst(cell);
+		Form_pg_attribute attr = TupleDescAttr(remoteslot->tts_tupleDescriptor, i);
+		Oid			typinput;
+		Oid			typioparam;
+
+		if (!strcasecmp(colval->value, "NULL"))
+			remoteslot->tts_isnull[i] = true;
+		else
+		{
+			getTypeInputInfo(colval->datatype, &typinput, &typioparam);
+			remoteslot->tts_values[i] =
+				OidInputFunctionCall(typinput, colval->value,
+									 typioparam, attr->atttypmod);
+			remoteslot->tts_isnull[i] = false;
+		}
+		i++;
+	}
+	ExecStoreVirtualTuple(remoteslot);
+	EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1, NIL);
+
+	/* We must open indexes here. */
+	ExecOpenIndices(resultRelInfo, false);
+
+	/*
+	 * check if there is a PK or relation identity index that we could use to
+	 * locate the old tuple. If no identity or PK, there may potentially be
+	 * other indexes created on other columns that can be used. But for now,
+	 * we do not bother checking for them. Mark it as todo for later.
+	 */
+	idxoid = GetRelationIdentityOrPK(rel);
+	if (OidIsValid(idxoid))
+	{
+		elog(WARNING, "attempt to find old tuple by index");
+		found = RelationFindReplTupleByIndex(rel, idxoid,
+											 LockTupleExclusive,
+											 remoteslot, localslot);
+	}
+	else
+	{
+		elog(WARNING, "attempt to find old tuple by seq scan");
+		found = RelationFindReplTupleSeq(rel, LockTupleExclusive,
+										 remoteslot, localslot);
+	}
+
+	/*
+	 * localslot should now contain the reference to the old tuple that is yet
+	 * to be updated
+	 */
+	if (found)
+	{
+		EvalPlanQualSetSlot(&epqstate, localslot);
+
+		ExecSimpleRelationDelete(resultRelInfo, estate, &epqstate, localslot);
+	}
+	else
+	{
+		elog(WARNING, "tuple to delete not found");
+		ret = -1;
+	}
+
+	/* Cleanup. */
+	ExecCloseIndices(resultRelInfo);
+	EvalPlanQualEnd(&epqstate);
+	ExecResetTupleTable(estate->es_tupleTable, false);
+	FreeExecutorState(estate);
+	table_close(rel, NoLock);
+
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+
+	return ret;
+}
+
 int ra_executePGDDL(PG_DDL * pgddl)
 {
 	return spi_execute(pgddl->ddlquery);
@@ -343,6 +466,12 @@ int ra_executePGDML(PG_DML * pgdml)
 											 pgdml->tableoid);
 		}
 		case 'd':
+		{
+			if (synchdb_dml_use_spi)
+				return spi_execute(pgdml->dmlquery);
+			else
+				return synchdb_handle_delete(pgdml->columnValuesBefore, pgdml->tableoid);
+		}
 		default:
 		{
 			/* all others, use SPI to execute regardless what synchdb_dml_use_spi is */
