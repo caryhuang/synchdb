@@ -20,6 +20,7 @@
 #include "storage/fd.h"
 #include "miscadmin.h"
 #include "utils/wait_event.h"
+#include "utils/guc.h"
 #include "varatt.h"
 
 PG_MODULE_MAGIC;
@@ -63,6 +64,10 @@ typedef struct _SynchdbSharedState
 
 /* Pointer to shared-memory state. */
 static SynchdbSharedState *sdb_state = NULL;
+
+/* GUC variables */
+int	synchdb_worker_naptime = 5;
+bool synchdb_dml_use_spi = false;
 
 static int dbz_engine_stop(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
 {
@@ -381,6 +386,30 @@ static void prepare_bgw(BackgroundWorker * worker, char * hostname,
 
 void _PG_init(void)
 {
+	DefineCustomIntVariable("synchdb.naptime",
+							"Duration between each data polling (in seconds).",
+							NULL,
+							&synchdb_worker_naptime,
+							5,
+							1,
+							INT_MAX,
+							PGC_SIGHUP,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomBoolVariable("synchdb.dml_use_spi",
+							 "switch to use SPI to handle DML operations. Default false",
+							 NULL,
+							 &synchdb_dml_use_spi,
+							 false,
+							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	/* create a pg_synchdb directory under $PGDATA to store connector meta data */
 	if (MakePGDirectory(SYNCHDB_METADATA_DIR) < 0)
 	{
@@ -410,7 +439,6 @@ void _PG_fini(void)
 void
 synchdb_engine_main(Datum main_arg)
 {
-	int delay_in_ms = 5000;		/* todo: make configurable */
 //	char hostname[256] = {0}, user[256] = {0}, pwd[256] = {0}, src_db[256] = {0}, dst_db[256] = {0};
 	char * hostname = NULL, * user = NULL, * pwd = NULL, * src_db = NULL, * dst_db = NULL, * table = NULL;
 	char * args = NULL, * tmp = NULL;
@@ -560,9 +588,16 @@ synchdb_engine_main(Datum main_arg)
 
 	while (!ShutdownRequestPending)
 	{
+		/* In case of a SIGHUP, just reload the configuration. */
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
+
 		(void) WaitLatch(MyLatch,
 						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-						 delay_in_ms,
+						 synchdb_worker_naptime * 1000,
 						 PG_WAIT_EXTENSION);
 
 		dbz_engine_get_change(jvm, env, &cls, &obj);
