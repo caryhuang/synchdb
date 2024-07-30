@@ -920,53 +920,57 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 		}
 		case 'd':
 		{
-			/* --- Convert to use SPI to handler DML --- */
-			appendStringInfo(&strinfo, "DELETE FROM %s.%s WHERE ", dbzdml->db, dbzdml->table);
-			foreach(cell, dbzdml->columnValuesBefore)
+			if (synchdb_dml_use_spi)
 			{
-				DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
-				char * data;
+				/* --- Convert to use SPI to handler DML --- */
+				appendStringInfo(&strinfo, "DELETE FROM %s.%s WHERE ", dbzdml->db, dbzdml->table);
+				foreach(cell, dbzdml->columnValuesBefore)
+				{
+					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+					char * data;
 
-				appendStringInfo(&strinfo, "%s = ", colval->name);
-				data = processDataByType(colval->value, colval->datatype, true);
-				if (data != NULL)
-				{
-					appendStringInfo(&strinfo, "%s", data);
-					pfree(data);
+					appendStringInfo(&strinfo, "%s = ", colval->name);
+					data = processDataByType(colval->value, colval->datatype, true);
+					if (data != NULL)
+					{
+						appendStringInfo(&strinfo, "%s", data);
+						pfree(data);
+					}
+					else
+					{
+						appendStringInfo(&strinfo, "%s", "null");
+					}
+					appendStringInfo(&strinfo, " AND ");
 				}
-				else
-				{
-					appendStringInfo(&strinfo, "%s", "null");
-				}
-				appendStringInfo(&strinfo, " AND ");
+				/* remove extra " AND " */
+				strinfo.data[strinfo.len - 5] = '\0';
+				strinfo.len = strinfo.len - 5;
+
+				appendStringInfo(&strinfo, ";");
 			}
-			/* remove extra " AND " */
-			strinfo.data[strinfo.len - 5] = '\0';
-			strinfo.len = strinfo.len - 5;
-
-			appendStringInfo(&strinfo, ";");
-
-			/* --- Convert to use Heap AM to handler DML --- */
-			foreach(cell, dbzdml->columnValuesBefore)
+			else
 			{
-				DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
-				PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
-
-				char * data = processDataByType(colval->value, colval->datatype, false);
-
-				if (data != NULL)
+				/* --- Convert to use Heap AM to handler DML --- */
+				foreach(cell, dbzdml->columnValuesBefore)
 				{
-					pgcolval->value = pstrdup(data);
-					pfree(data);
+					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+
+					char * data = processDataByType(colval->value, colval->datatype, false);
+
+					if (data != NULL)
+					{
+						pgcolval->value = pstrdup(data);
+						pfree(data);
+					}
+					else
+						pgcolval->value = pstrdup("NULL");
+
+					pgcolval->datatype = colval->datatype;
+					pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval);
 				}
-				else
-					pgcolval->value = pstrdup("NULL");
-
-				pgcolval->datatype = colval->datatype;
-				pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval);
+				pgdml->columnValuesAfter = NULL;
 			}
-			pgdml->columnValuesAfter = NULL;
-
 			break;
 		}
 		case 'u':
