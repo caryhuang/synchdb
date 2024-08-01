@@ -9,6 +9,7 @@
 #define SYNCHDB_REPLICATION_AGENT_H_
 
 #include "executor/tuptable.h"
+#include "synchdb.h"
 
 /* data structures representing PostgreSQL data formats */
 typedef struct pg_ddl
@@ -35,7 +36,7 @@ typedef struct pg_dml
 	List * columnValuesAfter;	/* list of PG_DML_COLUMN_VALUE */
 } PG_DML;
 
-int ra_executePGDDL(PG_DDL * pgddl);
-int ra_executePGDML(PG_DML * pgdml);
+int ra_executePGDDL(PG_DDL * pgddl, ConnectorType type);
+int ra_executePGDML(PG_DML * pgdml, ConnectorType type);
 
 #endif /* SYNCHDB_REPLICATION_AGENT_H_ */

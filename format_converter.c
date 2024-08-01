@@ -17,10 +17,12 @@
 #include <time.h>
 #include "access/xact.h"
 #include "utils/snapmgr.h"
+#include "synchdb.h"
 
 extern bool synchdb_dml_use_spi;
 
-static void remove_double_quotes(StringInfoData * str)
+static void
+remove_double_quotes(StringInfoData * str)
 {
 	char *src = str->data, *dst = str->data;
 	int newlen = 0;
@@ -38,7 +40,8 @@ static void remove_double_quotes(StringInfoData * str)
 	str->len = newlen;
 }
 
-static int getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout)
+static int
+getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout)
 {
 	Datum * datum_elems = NULL;
 	char * str_elems = NULL, * p = path;
@@ -54,7 +57,7 @@ static int getPathElementString(Jsonb * jb, char * path, StringInfoData * strinf
 	}
 	if (strstr(pathcopy, "."))
 	{
-		/* count how many elements are in path*/
+		/* count how many elements are in path */
 		while (*p != '\0')
 		{
 			if (*p == '.')
@@ -113,7 +116,8 @@ static int getPathElementString(Jsonb * jb, char * path, StringInfoData * strinf
     	resetStringInfo(strinfoout);
 		JsonbToCString(strinfoout, &resjb->root, VARSIZE(resjb));
 
-		/* note: buf.data includes double quotes and escape char \.
+		/*
+		 * note: buf.data includes double quotes and escape char \.
 		 * We need to remove them
 		 */
 		remove_double_quotes(strinfoout);
@@ -125,7 +129,8 @@ static int getPathElementString(Jsonb * jb, char * path, StringInfoData * strinf
 	return 0;
 }
 
-static Jsonb * getPathElementJsonb(Jsonb * jb, char * path)
+static Jsonb *
+getPathElementJsonb(Jsonb * jb, char * path)
 {
 	Datum * datum_elems = NULL;
 	char * str_elems = NULL, * p = path;
@@ -193,7 +198,8 @@ static Jsonb * getPathElementJsonb(Jsonb * jb, char * path)
 	return out;
 }
 
-static void destroyDBZDDL(DBZ_DDL * ddlinfo)
+static void
+destroyDBZDDL(DBZ_DDL * ddlinfo)
 {
 	if (ddlinfo)
 	{
@@ -212,7 +218,8 @@ static void destroyDBZDDL(DBZ_DDL * ddlinfo)
 	}
 }
 
-static void destroyPGDDL(PG_DDL * ddlinfo)
+static void
+destroyPGDDL(PG_DDL * ddlinfo)
 {
 	if (ddlinfo)
 	{
@@ -222,7 +229,8 @@ static void destroyPGDDL(PG_DDL * ddlinfo)
 	}
 }
 
-static void destroyPGDML(PG_DML * dmlinfo)
+static void
+destroyPGDML(PG_DML * dmlinfo)
 {
 	if (dmlinfo)
 	{
@@ -238,7 +246,8 @@ static void destroyPGDML(PG_DML * dmlinfo)
 	}
 }
 
-static void destroyDBZDML(DBZ_DML * dmlinfo)
+static void
+destroyDBZDML(DBZ_DML * dmlinfo)
 {
 	if (dmlinfo)
 	{
@@ -258,7 +267,8 @@ static void destroyDBZDML(DBZ_DML * dmlinfo)
 	}
 }
 
-static DBZ_DDL * parseDBZDDL(Jsonb * jb)
+static DBZ_DDL *
+parseDBZDDL(Jsonb * jb)
 {
 	Jsonb * ddlpayload = NULL;
 	JsonbIterator *it;
@@ -274,7 +284,8 @@ static DBZ_DDL * parseDBZDDL(Jsonb * jb)
 	StringInfoData strinfo;
 	initStringInfo(&strinfo);
 
-	/* todo: we only support parsing 1 set of DDL for now using hardcoded
+	/*
+	 * todo: we only support parsing 1 set of DDL for now using hardcoded
 	 * array index 0. Need to remove this limitation later
 	 */
     getPathElementString(jb, "payload.tableChanges.0.id", &strinfo);
@@ -372,7 +383,6 @@ static DBZ_DDL * parseDBZDDL(Jsonb * jb)
 								value = pnstrdup("NULL", strlen("NULL"));
 								break;
 							case jbvString:
-	//							strvalue = pnstrdup(v.val.string.val, v.val.string.len);
 								value = pnstrdup(v.val.string.val, v.val.string.len);
 								elog(DEBUG2, "String Value: %s", value);
 								break;
@@ -452,7 +462,6 @@ static DBZ_DDL * parseDBZDDL(Jsonb * jb)
 					}
 
 					/* note: other key - value pairs ignored for now */
-
 					pfree(key);
 					pfree(value);
 					key = NULL;
@@ -486,7 +495,8 @@ static DBZ_DDL * parseDBZDDL(Jsonb * jb)
  * 'database.schema_table'. If the id format is 'database.table'
  * then no transformation is applied.
  */
-static void splitIdString(char * id, char ** db, char ** schema, char ** table)
+static void
+splitIdString(char * id, char ** db, char ** schema, char ** table)
 {
 	int dotCount = 0;
 	char *p = NULL;
@@ -513,7 +523,8 @@ static void splitIdString(char * id, char ** db, char ** schema, char ** table)
 	}
 }
 
-static void transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData * strinfo)
+static void
+transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData * strinfo)
 {
 	switch (conntype)
 	{
@@ -536,7 +547,7 @@ static void transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, St
 			else if (!strcasecmp(col->typeName, "ENUM"))
 			{
 				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
-				col->length = 0;	/* this prevents adding a fixed size for TEXT */
+				col->length = 0;
 			}
 			else if (!strcmp(col->typeName, "GEOMETRY"))
 				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
@@ -577,7 +588,7 @@ static void transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, St
 
 			/* set the length to 0 to prevent adding a fixed size for non-string columne types */
 			if (strcasecmp(col->typeName, "varchar") && strcasecmp(col->typeName, "char") && col->length > 0)
-				col->length = 0;	/* this prevents adding a fixed size for types that are not varchar or char */
+				col->length = 0;
 
 			break;
 		}
@@ -590,7 +601,8 @@ static void transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, St
 	}
 }
 
-static PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
+static PG_DDL *
+convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 {
 	PG_DDL * pgddl = (PG_DDL*) palloc0(sizeof(PG_DDL));
 	ListCell * cell;
@@ -624,9 +636,14 @@ static PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		/* database and table must be present. schema is optional */
 		if (!db || !table)
 		{
-			elog(WARNING, "malformed id field in dbz change event: %s", dbzddl->id);
-			pfree(strinfo.data);
-			return NULL;
+			/* save the error */
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "malformed id field in dbz change event: %s",
+					dbzddl->id);
+			set_shm_connector_errmsg(type, msg);
+
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
 		}
 
 		/* database mapped to schema */
@@ -659,6 +676,7 @@ static PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				appendStringInfo(&strinfo, "NOT NULL ");
 			}
+
 			/* does it have defaults? */
 			if (col->defaultValueExpression && strlen(col->defaultValueExpression) > 0
 					&& !col->autoIncremented)
@@ -693,7 +711,8 @@ static PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
  * this function performs necessary data conversions to convert input data
  * as string and output a processed string based on type
  */
-static char * processDataByType(char * in, Oid type, bool addquote)
+static char *
+processDataByType(char * in, Oid type, bool addquote, ConnectorType conntype)
 {
 	char * out = NULL;
 
@@ -764,12 +783,12 @@ static char * processDataByType(char * in, Oid type, bool addquote)
 				out = (char *) palloc0(strlen(in) + 1);
 				strncpy(out, in, strlen(in));
 			}
-			elog(WARNING, "out str %s", out);
 			break;
 		}
 		case DATEOID:
 		{
-			/* DBZ uses number of days since epoch 1970-01-01 to represent a date.
+			/*
+			 * DBZ uses number of days since epoch 1970-01-01 to represent a date.
 			 * to decode, we need to add this number to epoch to get the final
 			 * date value and converts it to string as output
 			 */
@@ -813,13 +832,18 @@ static char * processDataByType(char * in, Oid type, bool addquote)
 		case TIMETZOID:
 		default:
 		{
-			elog(ERROR, "unsupported data type %d", type);
+			/* todo: support more */
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "unsupported data type %d", type);
+			set_shm_connector_errmsg(conntype, msg);
+			elog(ERROR, "%s", msg);
 		}
 	}
 	return out;
 }
 
-static int list_sort_cmp (const ListCell *a, const ListCell *b)
+static int
+list_sort_cmp(const ListCell *a, const ListCell *b)
 {
 	DBZ_DML_COLUMN_VALUE * colvala = (DBZ_DML_COLUMN_VALUE *) lfirst(a);
 	DBZ_DML_COLUMN_VALUE * colvalb = (DBZ_DML_COLUMN_VALUE *) lfirst(b);
@@ -837,7 +861,8 @@ static int list_sort_cmp (const ListCell *a, const ListCell *b)
  * a string of tuples following PostgreSQL replication wire protocol and send this
  * stream directly to PostgreSQL's logical replication APIs to handle.
  */
-static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
+static PG_DML *
+convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 {
 	PG_DML * pgdml = (PG_DML*) palloc0(sizeof(PG_DML));
 	ListCell * cell, * cell2;
@@ -850,9 +875,6 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 	pgdml->op = dbzdml->op;
 	pgdml->tableoid = dbzdml->tableoid;
 
-	/* todo: right now, we convert to both SPI and heap DML processing mode. We should choose
-	 * one type of conversion only instead of both. This should be controlled by a GUC later
-	 */
 	switch(dbzdml->op)
 	{
 		case 'r':
@@ -874,7 +896,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 				foreach(cell, dbzdml->columnValuesAfter)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
-					char * data = processDataByType(colval->value, colval->datatype, true);
+					char * data = processDataByType(colval->value, colval->datatype, true, type);
 
 					if (data != NULL)
 					{
@@ -900,7 +922,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval->value, colval->datatype, false);
+					char * data = processDataByType(colval->value, colval->datatype, false, type);
 
 					if (data != NULL)
 					{
@@ -930,7 +952,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval->value, colval->datatype, true);
+					data = processDataByType(colval->value, colval->datatype, true, type);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s", data);
@@ -956,7 +978,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval->value, colval->datatype, false);
+					char * data = processDataByType(colval->value, colval->datatype, false, type);
 
 					if (data != NULL)
 					{
@@ -985,7 +1007,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval->value, colval->datatype, true);
+					data = processDataByType(colval->value, colval->datatype, true, type);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s,", data);
@@ -1007,7 +1029,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval->value, colval->datatype, true);
+					data = processDataByType(colval->value, colval->datatype, true, type);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s", data);
@@ -1028,7 +1050,6 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 			}
 			else
 			{
-				/* todo: change to forboth instead of 2 foreach */
 				/* --- Convert to use Heap AM to handler DML --- */
 				forboth(cell, dbzdml->columnValuesAfter, cell2, dbzdml->columnValuesBefore)
 				{
@@ -1037,7 +1058,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 					PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 					PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval_after->value, colval_after->datatype, false);
+					char * data = processDataByType(colval_after->value, colval_after->datatype, false, type);
 
 					if (data != NULL)
 					{
@@ -1050,7 +1071,7 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 					pgcolval_after->datatype = colval_after->datatype;
 					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
 
-					data = processDataByType(colval_before->value, colval_before->datatype, false);
+					data = processDataByType(colval_before->value, colval_before->datatype, false, type);
 
 					if (data != NULL)
 					{
@@ -1083,7 +1104,8 @@ static PG_DML * convert2PGDML(DBZ_DML * dbzdml)
 	return pgdml;
 }
 
-static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
+static DBZ_DML *
+parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 {
 	StringInfoData strinfo;
 	Jsonb * dmlpayload = NULL;
@@ -1145,23 +1167,23 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 	schemaoid = get_namespace_oid(dbzdml->db, false);
 	if (!OidIsValid(schemaoid))
 	{
-		elog(WARNING, "no valid OID found for schema '%s'", dbzdml->db);
-		destroyDBZDML(dbzdml);
-		if(strinfo.data)
-			pfree(strinfo.data);
+		char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+		snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->db);
+		set_shm_connector_errmsg(type, msg);
 
-		return NULL;
+		/* trigger pg's error shutdown routine */
+		elog(ERROR, "%s", msg);
 	}
 
 	dbzdml->tableoid = get_relname_relid(dbzdml->table, schemaoid);
 	if (!OidIsValid(dbzdml->tableoid))
 	{
-		elog(WARNING, "no valid OID found for table '%s'", dbzdml->table);
-		destroyDBZDML(dbzdml);
-		if(strinfo.data)
-			pfree(strinfo.data);
+		char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+		snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", dbzdml->table);
+		set_shm_connector_errmsg(type, msg);
 
-		return NULL;
+		/* trigger pg's error shutdown routine */
+		elog(ERROR, "%s", msg);
 	}
 
 	elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", dbzdml->db, dbzdml->table, dbzdml->tableoid);
@@ -1177,7 +1199,8 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 							 &hash_ctl,
 							 HASH_ELEM | HASH_CONTEXT);
 
-	/* get the column data type IDs for all columns from PostgreSQL catalog
+	/*
+	 * get the column data type IDs for all columns from PostgreSQL catalog
 	 * The type IDs are stored in typeidhash temporarily for the parser
 	 * below to look up
 	 */
@@ -1704,7 +1727,8 @@ static DBZ_DML * parseDBZDML(Jsonb * jb, char op)
 	return dbzdml;
 }
 
-ConnectorType fc_get_connector_type(const char * connector)
+ConnectorType
+fc_get_connector_type(const char * connector)
 {
 	if (!strcasecmp(connector, "mysql"))
 	{
@@ -1725,7 +1749,8 @@ ConnectorType fc_get_connector_type(const char * connector)
 	}
 }
 
-int fc_processDBZChangeEvent(const char * event)
+int
+fc_processDBZChangeEvent(const char * event)
 {
 	Datum jsonb_datum;
 	Jsonb *jb;
@@ -1752,34 +1777,41 @@ int fc_processDBZChangeEvent(const char * event)
 
     	/* (1) parse */
     	elog(WARNING, "parsing DBZ DDL change event...");
+    	set_shm_connector_state(type, STATE_PARSING);
     	dbzddl = parseDBZDDL(jb);
     	if (!dbzddl)
     	{
     		elog(WARNING, "malformed DDL event");
+    		set_shm_connector_state(type, STATE_SYNCING);
     		return -1;
     	}
     	elog(WARNING, "converting to PG DDL change event...");
 
     	/* (2) convert */
+    	set_shm_connector_state(type, STATE_CONVERTING);
     	pgddl = convert2PGDDL(dbzddl, type);
     	if (!pgddl)
     	{
     		elog(WARNING, "failed to convert DBZ DDL to PG DDL change event");
+    		set_shm_connector_state(type, STATE_SYNCING);
     		destroyDBZDDL(dbzddl);
     		return -1;
     	}
 
     	/* (3) execute */
     	elog(WARNING, "executing PG DDL change event...");
-    	if(ra_executePGDDL(pgddl))
+    	set_shm_connector_state(type, STATE_EXECUTING);
+    	if(ra_executePGDDL(pgddl, type))
     	{
     		elog(WARNING, "failed to execute PG DDL change event");
+    		set_shm_connector_state(type, STATE_SYNCING);
     		destroyDBZDDL(dbzddl);
     		destroyPGDDL(pgddl);
     		return -1;
     	}
 
     	/* (4) clean up */
+    	set_shm_connector_state(type, STATE_SYNCING);
     	elog(WARNING, "execution completed. Clean up...");
     	destroyDBZDDL(dbzddl);
     	destroyPGDDL(pgddl);
@@ -1792,37 +1824,43 @@ int fc_processDBZChangeEvent(const char * event)
     	elog(WARNING, "this is DML change event");
 
     	/* (1) parse */
-    	dbzdml = parseDBZDML(jb, strinfo.data[0]);
+    	set_shm_connector_state(type, STATE_PARSING);
+    	dbzdml = parseDBZDML(jb, strinfo.data[0], type);
     	if (!dbzdml)
 		{
 			elog(WARNING, "malformed DNL event");
+			set_shm_connector_state(type, STATE_SYNCING);
 			return -1;
 		}
 
     	/* (2) convert */
-    	pgdml = convert2PGDML(dbzdml);
+    	set_shm_connector_state(type, STATE_CONVERTING);
+    	pgdml = convert2PGDML(dbzdml, type);
     	if (!pgdml)
     	{
     		elog(WARNING, "failed to convert DBZ DML to PG DML change event");
+    		set_shm_connector_state(type, STATE_SYNCING);
     		destroyDBZDML(dbzdml);
     		return -1;
     	}
 
     	/* (3) execute */
+    	set_shm_connector_state(type, STATE_EXECUTING);
     	elog(WARNING, "executing PG DML change event...");
-    	if(ra_executePGDML(pgdml))
+    	if(ra_executePGDML(pgdml, type))
     	{
     		elog(WARNING, "failed to execute PG DML change event");
+    		set_shm_connector_state(type, STATE_SYNCING);
         	destroyDBZDML(dbzdml);
         	destroyPGDML(pgdml);
     		return -1;
     	}
 
     	/* (4) clean up */
+    	set_shm_connector_state(type, STATE_SYNCING);
     	elog(WARNING, "execution completed. Clean up...");
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);
     }
-
 	return 0;
 }
