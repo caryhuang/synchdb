@@ -10,15 +10,7 @@
 
 #include "nodes/pg_list.h"
 #include "replication_agent.h"
-
-typedef enum _connectorType
-{
-	TYPE_UNDEF = 0,
-	TYPE_MYSQL,
-	TYPE_ORACLE,
-	TYPE_SQLSERVER,
-
-} ConnectorType;
+#include "synchdb.h"
 
 /* data structures representing DBZ change events */
 typedef struct dbz_ddl_column
@@ -39,7 +31,7 @@ typedef struct dbz_ddl
 	char * id;
 	char * type;
 	char * primaryKeyColumnNames;
-	List * columns;	/* list of DBZ_DDL_COLUMN */
+	List * columns;		/* list of DBZ_DDL_COLUMN */
 } DBZ_DDL;
 
 typedef struct
