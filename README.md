@@ -1,13 +1,14 @@
+
 ## Introduction
 
-SynchDB is a PostgreSQL extension designed to replicate data from one or more heterogeneous databases (such as MySQL, MS SQLServer, Oracle, etc.) directly to PostgreSQL in a fast and reliable way. PostgreSQL serves as the destination from multiple heterogeneous database sources. No middleware or third party software is required to orchestrate the data synchronization between heterogeneous databases and PostgreSQL. SynchDB extension itself is capable of handling all the data synchronization needs.
+SynchDB is a PostgreSQL extension designed to replicate data from one or more heterogeneous databases (such as MySQL, MS SQLServer, Oracle, etc.) directly to PostgreSQL in a fast and reliable way. PostgreSQL serves as the destination from multiple heterogeneous database sources. No middleware or third-party software is required to orchestrate the data synchronization between heterogeneous databases and PostgreSQL. SynchDB extension itself is capable of handling all the data synchronization needs.
 
 It provides two key work modes that can be invoked using the built-in SQL functions:
 * Sync mode (for initial data synchronization)
 * Follow mode (for replicate incremental changes after initial sync)
 
-*Sync mode* copies tables from heterogeneous database into PostgreSQL, including its schema, indexes, triggers, other table properties as well as current data it holds.
-*Follow mode* subscribes to tables in a heterogeneous database to obtain incremental changes and apply them to the same tables in PostgreSQL, similar to PostgreSQL logical replication
+**Sync mode** copies tables from heterogeneous database into PostgreSQL, including its schema, indexes, triggers, other table properties as well as current data it holds.
+**Follow mode** subscribes to tables in a heterogeneous database to obtain incremental changes and apply them to the same tables in PostgreSQL, similar to PostgreSQL logical replication
 
 ## Requirement
 The following software is required to build and run SynchDB. The versions listed are the versions tested during development. Older versions may still work.
@@ -153,7 +154,6 @@ We can start a sample MySQL database for testing using docker compose. The user 
 ```
 docker compose -f synchdb-mysql-test.yaml up -d
 ```
-
 Login to MySQL as `root` and grant permissions to user `mysqluser` to perform real-time CDC
 ```
 mysql -h 127.0.0.1 -u root -p
@@ -168,7 +168,6 @@ Exit mysql client tool:
 ```
 \q
 ```
-
 ### Prepare a sample SQL Server Database
 We can start a sample SQL Server database for testing using docker compose. The user credentials are described in the `synchdb-sqlserver-test.yaml` file
 ```
@@ -206,7 +205,6 @@ Run some simple queries:
 
 ### Prepare a sample PostgreSQL database
 Initialize and start a new PostgreSQL database:
-
 ```
 initdb -D synchdbtest
 pg_ctl -D synchdbtest -l logfile start
@@ -330,7 +328,7 @@ Refer to the architecture diagram for a visual representation of the components 
 * A java application utilizing Debezium embedded library.
 * Supports various connector implementations to replicate change data from various database types such as MySQL, Oracle, SQL Server, etc.
 * Invoked by `SynchDB Worker` to initialize Debezium embedded library and receive change data.
-* Send the change data to `SynchDB Worker` in generalized JSON format for further processeing.
+* Send the change data to `SynchDB Worker` in generalized JSON format for further processing.
 
 ### SynchDB Launcher
 * Responsible for creating and destroying SynchDB workers using PostgreSQL's background worker APIs.
@@ -348,8 +346,8 @@ Refer to the architecture diagram for a visual representation of the components 
 * Produces raw HeapTupleData which can be fed directly to Heap Access Method within PostgreSQL for faster executions.
 
 ### Replication Agent
-* Processes the outputs from `Format Converter`.
-* `Format Converter` will produce HeapTupleData format outputs, then `Replication Agent` will invoke PostgreSQL's heap access method routines to handle them.
+* Processes the outputs from **`Format Converter`**.
+* **`Format Converter`** will produce HeapTupleData format outputs, then **`Replication Agent`** will invoke PostgreSQL's heap access method routines to handle them.
 
 ### Table Sync Agent
 * Design details and implementation are not available yet. TBD
