@@ -9,6 +9,7 @@
 #include "fmgr.h"
 #include "utils/builtins.h"
 #include <jni.h>
+#include <unistd.h>
 #include "format_converter.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
