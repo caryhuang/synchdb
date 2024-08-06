@@ -219,7 +219,7 @@ static TupleDesc
 synchdb_state_tupdesc(void)
 {
 	TupleDesc	tupdesc;
-	AttrNumber	attrnum = 4;
+	AttrNumber	attrnum = 5;
 	AttrNumber	a = 0;
 
 	tupdesc = CreateTemplateTupleDesc(attrnum);
@@ -229,6 +229,7 @@ synchdb_state_tupdesc(void)
 	TupleDescInitEntry(tupdesc, ++a, "pid", INT4OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "state", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "err", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "last_commit_offset", TEXTOID, -1, 0);
 
 	Assert(a == maxattr);
 	return BlessTupleDesc(tupdesc);
@@ -378,6 +379,9 @@ get_shm_connector_name(ConnectorType type)
 pid_t
 get_shm_connector_pid(ConnectorType type)
 {
+	if (!sdb_state)
+		return InvalidPid;
+
 	switch(type)
 	{
 		case TYPE_MYSQL:
@@ -403,6 +407,9 @@ get_shm_connector_pid(ConnectorType type)
 void
 set_shm_connector_pid(ConnectorType type, pid_t pid)
 {
+	if (!sdb_state)
+		return;
+
 	switch(type)
 	{
 		case TYPE_MYSQL:
@@ -431,6 +438,9 @@ set_shm_connector_pid(ConnectorType type, pid_t pid)
 const char *
 get_shm_connector_errmsg(ConnectorType type)
 {
+	if (!sdb_state)
+		return "no error";
+
 	switch(type)
 	{
 		case TYPE_MYSQL:
@@ -509,6 +519,9 @@ set_shm_connector_errmsg(ConnectorType type, char * err)
 const char *
 get_shm_connector_state(ConnectorType type)
 {
+	if (!sdb_state)
+		return "stopped";
+
 	switch(type)
 	{
 		case TYPE_MYSQL:
@@ -527,6 +540,9 @@ get_shm_connector_state(ConnectorType type)
 void
 set_shm_connector_state(ConnectorType type, ConnectorState state)
 {
+	if (!sdb_state)
+		return;
+
 	switch(type)
 	{
 		case TYPE_MYSQL:
@@ -552,6 +568,74 @@ set_shm_connector_state(ConnectorType type, ConnectorState state)
 	}
 }
 
+void
+set_shm_offset_info(ConnectorType type, DBZ_OFFSET_INFO * offsetinfo)
+{
+	if (!offsetinfo)
+		return;
+
+	if (!sdb_state)
+		return;
+
+	switch(type)
+	{
+		case TYPE_MYSQL:
+		{
+			memset(sdb_state->mysqlinfo.offsetstr, 0, SYNCHDB_ERRMSG_SIZE);
+			snprintf(sdb_state->mysqlinfo.offsetstr, SYNCHDB_ERRMSG_SIZE,
+					"%s|%s|%s|%s|%s", offsetinfo->mysqlOffset.file, offsetinfo->mysqlOffset.pos,
+					offsetinfo->mysqlOffset.row, offsetinfo->mysqlOffset.server_id,
+					offsetinfo->mysqlOffset.ts_sec);
+			break;
+		}
+		case TYPE_ORACLE:
+		{
+			memset(sdb_state->oracleinfo.offsetstr, 0, SYNCHDB_ERRMSG_SIZE);
+			snprintf(sdb_state->oracleinfo.offsetstr, SYNCHDB_ERRMSG_SIZE, "%s", "n/a");
+			break;
+		}
+		case TYPE_SQLSERVER:
+		{
+			memset(sdb_state->sqlserverinfo.offsetstr, 0, SYNCHDB_ERRMSG_SIZE);
+			snprintf(sdb_state->sqlserverinfo.offsetstr, SYNCHDB_ERRMSG_SIZE,
+					"%s|%s|%s", offsetinfo->sqlserverOffset.change_lsn,
+					offsetinfo->sqlserverOffset.commit_lsn,
+					offsetinfo->sqlserverOffset.event_serial_number);
+			break;
+		}
+		/* todo: support more dbz connector types here */
+		default:
+		{
+			break;
+		}
+	}
+}
+
+const char *
+get_shm_offset_info(ConnectorType type)
+{
+	if (!sdb_state)
+		return "n/a";
+
+	switch(type)
+	{
+		case TYPE_MYSQL:
+			return (strlen(sdb_state->mysqlinfo.offsetstr) == 0 ?
+					"no offset": sdb_state->mysqlinfo.offsetstr);
+		case TYPE_ORACLE:
+			return (strlen(sdb_state->oracleinfo.offsetstr) == 0 ?
+					"no offset": sdb_state->oracleinfo.offsetstr);
+		case TYPE_SQLSERVER:
+			return (strlen(sdb_state->sqlserverinfo.offsetstr) == 0 ?
+					"no offset": sdb_state->sqlserverinfo.offsetstr);
+		/* todo: support more dbz connector types here */
+		default:
+		{
+			break;
+		}
+	}
+	return "n/a";
+}
 void _PG_init(void)
 {
 	DefineCustomIntVariable("synchdb.naptime",
@@ -988,8 +1072,8 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	 */
 	if (*idx < 3)
 	{
-		Datum		values[4];
-		bool		nulls[4] = {0};
+		Datum		values[5];
+		bool		nulls[5] = {0};
 		HeapTuple	tuple;
 
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
@@ -997,6 +1081,7 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 		values[1] = Int32GetDatum((int)get_shm_connector_pid((*idx + 1)));
 		values[2] = CStringGetTextDatum(get_shm_connector_state((*idx + 1)));
 		values[3] = CStringGetTextDatum(get_shm_connector_errmsg((*idx + 1)));
+		values[4] = CStringGetTextDatum(get_shm_offset_info((*idx + 1)));
 		LWLockRelease(&sdb_state->lock);
 
 		*idx +=1;
