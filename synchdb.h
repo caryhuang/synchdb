@@ -32,12 +32,53 @@ typedef enum _connectorState
 	STATE_EXECUTING,	/* conversion done, try to execute it on pg */
 } ConnectorState;
 
+/*
+ * offset parameters are all declared as char * because synchdb
+ * does not process them. Rather, it stores the last successful
+ * offset parameters and synchronize them to DBZ's meta offset
+ * files as strings.
+ */
+typedef struct dbz_mysql_offset
+{
+	char * ts_sec;
+	char * file;
+	char * pos;
+	char * row;
+	char * server_id;
+} DBZ_MYSQL_OFFSET;
+
+typedef struct dbz_oracle_offset
+{
+	/* todo */
+	int todo;
+} DBZ_ORACLE_OFFSET;
+
+typedef struct dbz_sqlserver_offset
+{
+	char * event_serial_number;
+	char * commit_lsn;
+	char * change_lsn;
+} DBZ_SQLSERVER_OFFSET;
+
+typedef struct dbz_offset_info
+{
+	ConnectorType type;
+	union
+	{
+		DBZ_MYSQL_OFFSET mysqlOffset;
+		DBZ_ORACLE_OFFSET oracleOffset;
+		DBZ_SQLSERVER_OFFSET sqlserverOffset;
+	};
+} DBZ_OFFSET_INFO;
+
 typedef struct _MysqlStateInfo
 {
 	/* todo */
 	pid_t pid;
 	ConnectorState state;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
+	char offsetstr[SYNCHDB_ERRMSG_SIZE];
+
 } MysqlStateInfo;
 
 typedef struct _OracleStateInfo
@@ -46,6 +87,7 @@ typedef struct _OracleStateInfo
 	pid_t pid;
 	ConnectorState state;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
+	char offsetstr[SYNCHDB_ERRMSG_SIZE];
 } OracleStateInfo;
 
 typedef struct _SqlserverStateInfo
@@ -54,6 +96,7 @@ typedef struct _SqlserverStateInfo
 	pid_t pid;
 	ConnectorState state;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
+	char offsetstr[SYNCHDB_ERRMSG_SIZE];
 } SqlserverStateInfo;
 
 /* Shared state information for synchdb bgworker. */
@@ -73,6 +116,7 @@ void set_shm_connector_errmsg(ConnectorType type, char * err);
 const char * get_shm_connector_errmsg(ConnectorType type);
 void set_shm_connector_state(ConnectorType type, ConnectorState state);
 const char * get_shm_connector_state(ConnectorType type);
-
+void set_shm_offset_info(ConnectorType type, DBZ_OFFSET_INFO * offsetinfo);
+const char * get_shm_offset_info(ConnectorType type);
 
 #endif /* SYNCHDB_SYNCHDB_H_ */

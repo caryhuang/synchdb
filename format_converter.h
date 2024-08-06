@@ -12,7 +12,6 @@
 #include "replication_agent.h"
 #include "synchdb.h"
 
-/* data structures representing DBZ change events */
 typedef struct dbz_ddl_column
 {
 	char * name;

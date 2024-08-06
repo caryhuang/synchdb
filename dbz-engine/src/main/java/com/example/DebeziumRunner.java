@@ -12,6 +12,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import java.io.File;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
+import java.io.FileInputStream;
+import java.io.ObjectInputStream;
+import java.io.FileOutputStream;
+import java.io.ObjectOutputStream;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,15 +30,14 @@ public class DebeziumRunner {
 	private List<String> changeEvents = new ArrayList<>();
 	private DebeziumEngine<ChangeEvent<String, String>> engine;
 	private ExecutorService executor;
- 
+	final int TYPE_MYSQL = 1;
+	final int TYPE_ORACLE = 2;
+	final int TYPE_SQLSERVER = 3;
+
 	public void startEngine(String hostname, int port, String user, String password, String database, String table, int connectorType) throws Exception
 	{
-        final int TYPE_MYSQL = 1;
-		final int TYPE_ORACLE = 2;
-		final int TYPE_SQLSERVER = 3;
 		String offsetfile = "/dev/shm/offsets.dat";
 		String schemahistoryfile = "/dev/shm/schemahistory.dat";
-		String targ = user + "@" + hostname + "_" + port;
 
 		Properties props = new Properties();
         // Set Debezium properties...
@@ -38,22 +47,22 @@ public class DebeziumRunner {
 			case TYPE_MYSQL:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.mysql.MySqlConnector");
-				offsetfile = "pg_synchdb/mysql_" + targ + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/mysql_" + targ + "_schemahistory.dat";
+				offsetfile = "pg_synchdb/mysql_offsets.dat";
+				schemahistoryfile = "pg_synchdb/mysql_schemahistory.dat";
 				break;
 			}
 			case TYPE_ORACLE:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
-				offsetfile = "pg_synchdb/oracle_" + targ + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/oracle_" + targ + "_schemahistory.dat";
+				offsetfile = "pg_synchdb/oracle_offsets.dat";
+				schemahistoryfile = "pg_synchdb/oracle_schemahistory.dat";
 				break;
 			}
 			case TYPE_SQLSERVER:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");
-				offsetfile = "pg_synchdb/sqlserver_" + targ + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/sqlserver_" + targ + "_schemahistory.dat";
+				offsetfile = "pg_synchdb/sqlserver_offsets.dat";
+				schemahistoryfile = "pg_synchdb/sqlserver_schemahistory.dat";
 
 				/* sqlserver requires database - cannot be null */
 				if (database.equals("null"))
@@ -169,9 +178,123 @@ public class DebeziumRunner {
         }
 		*/
     }
+	
+	public String getConnectorOffset(int connectorType)
+	{
+		return "todo";
+	}
 
+	public void setConnectorOffset(int connectorType, String offsetstring)
+	{
+		File inputFile = null;
+		File outputFile = null;
+		String key = null;
+		String value = null;
+		Map<byte[], byte[]> rawData = new HashMap<>();
+		Map<ByteBuffer, ByteBuffer> originalData = null;
+
+		switch (connectorType)
+		{
+			case TYPE_MYSQL:
+			{
+				inputFile = new File("pg_synchdb/mysql_offsets.dat");
+				outputFile = new File("pg_synchdb/mysql_offsets.datout");
+				key = "[\"engine\",{\"server\":\"my-app-connector\"}]";
+
+				originalData = readOffsetFile(inputFile);	
+				String[] elements = offsetstring.split("\\|");
+				value = "{\"file\":" + "\"" + elements[0] + "\"," +
+						"\"pos\":" + elements[1] + "," +
+					   	"\"row\":" + elements[2] + "," +
+						"\"server_id\":" + elements[3] + "," +
+						"\"ts_sec\":" + elements[4] + "}";
+				break;
+			}
+			case TYPE_ORACLE:
+			{
+				inputFile = new File("pg_synchdb/oracle_offsets.dat");
+				outputFile = new File("pg_synchdb/oracle_offsets.datout");
+				originalData = readOffsetFile(inputFile);
+				/* todo */
+				break;
+			}
+			case TYPE_SQLSERVER:
+			{
+				inputFile = new File("pg_synchdb/sqlserver_offsets.dat");
+				outputFile = new File("pg_synchdb/sqlserver_offsets.datout");
+				key = "[\"engine\",{\"server\":\"my-app-connector\"}]";
+				originalData = readOffsetFile(inputFile);
+				
+				String[] elements = offsetstring.split("\\|");
+				value = "{\"change_lsn\":" + "\"" + elements[0] + "\"," +
+						"\"commit_lsn\":" + "\"" + elements[1] + "\"," +
+						"\"event_serial_number\":" + "\"" + elements[2] + "\"}";
+				break;
+			}
+		}
+
+		ByteBuffer keyBuffer = ByteBuffer.wrap(key.getBytes(StandardCharsets.US_ASCII));
+		ByteBuffer valueBuffer = ByteBuffer.wrap(value.getBytes(StandardCharsets.US_ASCII));
+		for (Map.Entry<ByteBuffer, ByteBuffer> entry : originalData.entrySet())
+		{
+			System.out.println("Entry Key: " + StandardCharsets.UTF_8.decode(entry.getKey()).toString());
+			System.out.println("Entry Val: " + StandardCharsets.UTF_8.decode(entry.getValue()).toString());
+			System.out.println("New Key: " + key);
+			System.out.println("New Val: " + value);
+			if (entry.getKey().equals(keyBuffer))
+			{
+				//System.out.println("found");
+				rawData.put(entry.getKey().array(), valueBuffer.array());
+			}
+			else
+			{
+				/* todo: somehow it always returns not found. we still add the existing key
+				 * rather than the new key
+				 */
+				//System.out.println("not found");
+				rawData.put(entry.getKey().array(), valueBuffer.array());
+				//rawData.put(keyBuffer.array(), valueBuffer.array());
+			}
+		}
+		writeOffsetFile(outputFile, rawData);
+	}
+	
+	public Map<ByteBuffer, ByteBuffer> readOffsetFile(File inputFile) {
+        Map<ByteBuffer, ByteBuffer> originalData = new HashMap<>();
+
+        try (FileInputStream fileIn = new FileInputStream(inputFile);
+             ObjectInputStream objectIn = new ObjectInputStream(fileIn)) {
+            Object obj = objectIn.readObject();
+            if (!(obj instanceof HashMap)) {
+                throw new IllegalStateException("Expected HashMap but found " + obj.getClass());
+            }
+            Map<byte[], byte[]> raw = (Map<byte[], byte[]>) obj;
+            for (Map.Entry<byte[], byte[]> mapEntry : raw.entrySet()) {
+                ByteBuffer key = (mapEntry.getKey() != null) ? ByteBuffer.wrap(mapEntry.getKey()) : null;
+                ByteBuffer value = (mapEntry.getValue() != null) ? ByteBuffer.wrap(mapEntry.getValue()) : null;
+                originalData.put(key, value);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+        return originalData;
+    }
+
+    public void writeOffsetFile(File outputFile, Map<byte[], byte[]> rawData) {
+        try (FileOutputStream fileOut = new FileOutputStream(outputFile);
+             ObjectOutputStream objectOut = new ObjectOutputStream(fileOut)) {
+                objectOut.writeObject(rawData);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
 	public static void main(String[] args)
 	{
+		/* testing codes */
+
+		/* ---------- 1) dbz runner test ---------- */
+		/*
 		DebeziumRunner runner = new DebeziumRunner();
         try
 		{
@@ -184,6 +307,45 @@ public class DebeziumRunner {
         }
 		List<String> res = runner.getChangeEvents();
 		System.out.println("there are " + res.size() + " change events");
+		*/
+
+		/* ---------- 2) offset update test ---------- */
+		/*
+		DebeziumRunner runner = new DebeziumRunner();
+		File inputFile = new File(args[0]);
+		File outputFile = new File(args[1]);
+		String newKey = args[2];
+		String newValue = (args.length == 4) ? args[3] : null;
+		Map<ByteBuffer, ByteBuffer> originalData = runner.readOffsetFile(inputFile);
+		Map<byte[], byte[]> rawData = new HashMap<>();
+
+
+		ByteBuffer keyBuffer = ByteBuffer.wrap(newKey.getBytes(StandardCharsets.US_ASCII));
+		ByteBuffer valueBuffer = (newValue != null) ? ByteBuffer.wrap(newValue.getBytes(StandardCharsets.US_ASCII)) : null;
+
+		for (Map.Entry<ByteBuffer, ByteBuffer> entry : originalData.entrySet()) {
+			    System.out.println("Entry Key: " + StandardCharsets.UTF_8.decode(entry.getKey()).toString());
+			    System.out.println("Entry Val: " + StandardCharsets.UTF_8.decode(entry.getValue()).toString());
+			if (newValue != null) {
+				if (entry.getKey().equals(keyBuffer)) {
+					// update value
+					System.out.println("update value");
+					rawData.put(entry.getKey().array(), valueBuffer.array());
+				} else {
+					// insert new entry
+					System.out.println("insert value");
+					rawData.put(keyBuffer.array(), valueBuffer.array());
+				}
+			} else {
+				//rawData.put(entry.getKey().array(), valueBuffer.array());
+				originalData.remove(keyBuffer);
+			}
+		}
+
+		runner.writeOffsetFile(outputFile, rawData);
+		*/
+		DebeziumRunner runner = new DebeziumRunner();
+		runner.setConnectorOffset(1, "mysql-bin.000003|33048|1|223344|1722965389");
+
     }
-	
 }
