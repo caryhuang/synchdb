@@ -42,10 +42,16 @@ SynchdbSharedState *sdb_state = NULL;
 int	synchdb_worker_naptime = 5;
 bool synchdb_dml_use_spi = false;
 
+/* JNI stuff - static to this source file */
+static JavaVM *jvm = NULL;		/* represents java vm instance */
+static JNIEnv *env = NULL;		/* represents JNI run-time environment */
+static jclass cls; 	/* represents debezium runner java class */
+static jobject obj;	/* represents debezium runner java class object */
+
 PGDLLEXPORT void synchdb_engine_main(Datum main_arg);
 
 static int
-dbz_engine_stop(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
+dbz_engine_stop(void)
 {
 	jmethodID stopEngine;
 	jobject stopEngineObj;
@@ -55,32 +61,45 @@ dbz_engine_stop(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
         elog(WARNING, "jvm not initialized");
         return -1;
     }
-	if (!obj)
+	if (!env)
     {
-        elog(WARNING, "debezium runner object not initialized");
+        elog(WARNING, "jvm env not initialized");
         return -1;
     }
 
-    if (!cls)
-    {
-        elog(WARNING, "debezium runner class not initialized");
-        return -1;
-    }
-
-    stopEngine = (*env)->GetMethodID(env, *cls, "stopEngine", "()V");
+    stopEngine = (*env)->GetMethodID(env, cls, "stopEngine", "()V");
     if (stopEngine == NULL)
     {
         elog(WARNING, "Failed to find stopEngine method");
         return -1;
     }
 
-    stopEngineObj = (*env)->CallObjectMethod(env, *obj, stopEngine);
+    stopEngineObj = (*env)->CallObjectMethod(env, obj, stopEngine);
     if (stopEngineObj == NULL)
     {
         elog(WARNING, "Failed to call stop engine");
         return -1;
     }
     return 0;
+}
+
+static int
+dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj)
+{
+	*cls = (*env)->FindClass(env, "com/example/DebeziumRunner");
+	if (cls == NULL)
+	{
+		elog(WARNING, "Failed to find class");
+		return -1;
+	}
+
+	*obj = (*env)->AllocObject(env, *cls);
+	if (obj == NULL)
+	{
+		elog(WARNING, "Failed to allocate object");
+		return -1;
+	}
+	return 0;
 }
 
 static int
@@ -167,8 +186,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
 
 static int
 dbz_engine_start(char * hostname, unsigned int port, char * user,
-				 char * pwd, char * db, char * table, ConnectorType connectorType,
-				 JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
+				 char * pwd, char * db, char * table, ConnectorType connectorType)
 {
 	jmethodID mid;
 	jstring jHostname, jUser, jPassword, jDatabase, jTable;
@@ -179,25 +197,17 @@ dbz_engine_start(char * hostname, unsigned int port, char * user,
     	return -1;
 	}
 
-	*cls = (*env)->FindClass(env, "com/example/DebeziumRunner");
-	if (cls == NULL)
+	if (!env)
 	{
-		elog(WARNING, "Failed to find class");
-		return -1;
+		elog(WARNING, "jvm env not initialized");
+    	return -1;
 	}
 
-	mid = (*env)->GetMethodID(env, *cls, "startEngine",
+	mid = (*env)->GetMethodID(env, cls, "startEngine",
 			"(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
 	if (mid == NULL)
 	{
 		elog(WARNING, "Failed to find method");
-		return -1;
-	}
-
-	*obj = (*env)->AllocObject(env, *cls);
-	if (obj == NULL)
-	{
-		elog(WARNING, "Failed to allocate object");
 		return -1;
 	}
 
@@ -207,8 +217,60 @@ dbz_engine_start(char * hostname, unsigned int port, char * user,
 	jDatabase = (*env)->NewStringUTF(env, db);
 	jTable = (*env)->NewStringUTF(env, table);
 
-	(*env)->CallVoidMethod(env, *obj, mid, jHostname, port, jUser, jPassword, jDatabase, jTable, connectorType);
+	(*env)->CallVoidMethod(env, obj, mid, jHostname, port, jUser, jPassword, jDatabase, jTable, connectorType);
+
+	(*env)->DeleteLocalRef(env, jHostname);
+	(*env)->DeleteLocalRef(env, jUser);
+	(*env)->DeleteLocalRef(env, jPassword);
+	(*env)->DeleteLocalRef(env, jDatabase);
+	(*env)->DeleteLocalRef(env, jTable);
 	return 0;
+}
+
+static char *
+dbz_engine_get_offset(ConnectorType connectorType)
+{
+	jmethodID getoffsets;
+    jstring jdb, result;
+    char * resultStr, *db;
+    const char * tmp;
+
+    if (!jvm)
+    {
+        elog(WARNING, "jvm not initialized");
+		return NULL;
+    }
+
+    if (!env)
+    {
+        elog(WARNING, "jvm env not initialized");
+		return NULL;
+    }
+
+    if (connectorType == TYPE_SQLSERVER)
+    {
+    	db = sdb_state->sqlserverinfo.srcdb;
+    }
+
+	getoffsets = (*env)->GetMethodID(env, cls, "getConnectorOffset",
+			"(ILjava/lang/String;)Ljava/lang/String;");
+    if (getoffsets == NULL)
+    {
+        elog(WARNING, "Failed to find getConnectorOffset method");
+        return NULL;
+    }
+
+	jdb = (*env)->NewStringUTF(env, db);
+
+	result = (jstring)(*env)->CallObjectMethod(env, obj, getoffsets, (int)connectorType, jdb);
+	tmp = (*env)->GetStringUTFChars(env, result, NULL);
+	if (tmp && strlen(tmp) > 0)
+		resultStr = pstrdup(tmp);
+	else
+		resultStr = pstrdup("no offset");
+	(*env)->ReleaseStringUTFChars(env, result, tmp);
+
+    return resultStr;
 }
 
 /*
@@ -229,7 +291,7 @@ synchdb_state_tupdesc(void)
 	TupleDescInitEntry(tupdesc, ++a, "pid", INT4OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "state", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "err", TEXTOID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "last_commit_offset", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "last_dbz_offset", TEXTOID, -1, 0);
 
 	Assert(a == maxattr);
 	return BlessTupleDesc(tupdesc);
@@ -270,13 +332,12 @@ synchdb_detach_shmem(int code, Datum arg)
 	elog(WARNING, "synchdb detach shm ... connector type %d, code %d",
 			DatumGetUInt32(arg), code);
 
-	set_shm_connector_state(DatumGetUInt32(arg), STATE_STOPPED);
-
 	enginepid = get_shm_connector_pid(DatumGetUInt32(arg));
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	if (enginepid == MyProcPid)
+	{
 		set_shm_connector_pid(DatumGetUInt32(arg), InvalidPid);
-	LWLockRelease(&sdb_state->lock);
+		set_shm_connector_state(DatumGetUInt32(arg), STATE_STOPPED);
+	}
 }
 
 static void
@@ -410,6 +471,7 @@ set_shm_connector_pid(ConnectorType type, pid_t pid)
 	if (!sdb_state)
 		return;
 
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	switch(type)
 	{
 		case TYPE_MYSQL:
@@ -433,6 +495,43 @@ set_shm_connector_pid(ConnectorType type, pid_t pid)
 			break;
 		}
 	}
+	LWLockRelease(&sdb_state->lock);
+}
+
+void
+set_shm_connector_dbs(ConnectorType type, char * srcdb, char * dstdb)
+{
+	if (!sdb_state)
+		return;
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	switch(type)
+	{
+		case TYPE_MYSQL:
+		{
+			snprintf(sdb_state->mysqlinfo.srcdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", srcdb);
+			snprintf(sdb_state->mysqlinfo.dstdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", dstdb);
+			break;
+		}
+		case TYPE_ORACLE:
+		{
+			snprintf(sdb_state->oracleinfo.srcdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", srcdb);
+			snprintf(sdb_state->oracleinfo.dstdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", dstdb);
+			break;
+		}
+		case TYPE_SQLSERVER:
+		{
+			snprintf(sdb_state->sqlserverinfo.srcdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", srcdb);
+			snprintf(sdb_state->sqlserverinfo.dstdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", dstdb);
+			break;
+		}
+		/* todo: support more dbz connector types here */
+		default:
+		{
+			break;
+		}
+	}
+	LWLockRelease(&sdb_state->lock);
 }
 
 const char *
@@ -467,6 +566,7 @@ set_shm_connector_errmsg(ConnectorType type, char * err)
 	if (!sdb_state)
 		return;
 
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	switch(type)
 	{
 		case TYPE_MYSQL:
@@ -514,6 +614,7 @@ set_shm_connector_errmsg(ConnectorType type, char * err)
 			break;
 		}
 	}
+	LWLockRelease(&sdb_state->lock);
 }
 
 const char *
@@ -543,6 +644,7 @@ set_shm_connector_state(ConnectorType type, ConnectorState state)
 	if (!sdb_state)
 		return;
 
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	switch(type)
 	{
 		case TYPE_MYSQL:
@@ -566,14 +668,20 @@ set_shm_connector_state(ConnectorType type, ConnectorState state)
 			break;
 		}
 	}
+	LWLockRelease(&sdb_state->lock);
 }
 
+/* TODO: set_shm_dbz_offset:
+ * This method reads from dbz's offset file per connector type, which does not
+ * reflect the real-time offset of dbz engine. If we were to resume from this point
+ * due to an error, there may be duplicate values after the resume in which we must
+ * handle. In the future, we will need to explore a more accurate way to find out
+ * the offset managed within dbz so we could freely resume from any reference not
+ * just at the flushed locations
+ */
 void
-set_shm_offset_info(ConnectorType type, DBZ_OFFSET_INFO * offsetinfo)
+set_shm_dbz_offset(ConnectorType type)
 {
-	if (!offsetinfo)
-		return;
-
 	if (!sdb_state)
 		return;
 
@@ -581,26 +689,23 @@ set_shm_offset_info(ConnectorType type, DBZ_OFFSET_INFO * offsetinfo)
 	{
 		case TYPE_MYSQL:
 		{
-			memset(sdb_state->mysqlinfo.offsetstr, 0, SYNCHDB_ERRMSG_SIZE);
-			snprintf(sdb_state->mysqlinfo.offsetstr, SYNCHDB_ERRMSG_SIZE,
-					"%s|%s|%s|%s|%s", offsetinfo->mysqlOffset.file, offsetinfo->mysqlOffset.pos,
-					offsetinfo->mysqlOffset.row, offsetinfo->mysqlOffset.server_id,
-					offsetinfo->mysqlOffset.ts_sec);
+			memset(sdb_state->mysqlinfo.dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
+			snprintf(sdb_state->mysqlinfo.dbzoffset, SYNCHDB_ERRMSG_SIZE, "%s",
+					dbz_engine_get_offset(type));
 			break;
 		}
 		case TYPE_ORACLE:
 		{
-			memset(sdb_state->oracleinfo.offsetstr, 0, SYNCHDB_ERRMSG_SIZE);
-			snprintf(sdb_state->oracleinfo.offsetstr, SYNCHDB_ERRMSG_SIZE, "%s", "n/a");
+			memset(sdb_state->oracleinfo.dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
+			snprintf(sdb_state->oracleinfo.dbzoffset, SYNCHDB_ERRMSG_SIZE, "%s",
+					dbz_engine_get_offset(type));
 			break;
 		}
 		case TYPE_SQLSERVER:
 		{
-			memset(sdb_state->sqlserverinfo.offsetstr, 0, SYNCHDB_ERRMSG_SIZE);
-			snprintf(sdb_state->sqlserverinfo.offsetstr, SYNCHDB_ERRMSG_SIZE,
-					"%s|%s|%s", offsetinfo->sqlserverOffset.change_lsn,
-					offsetinfo->sqlserverOffset.commit_lsn,
-					offsetinfo->sqlserverOffset.event_serial_number);
+			memset(sdb_state->sqlserverinfo.dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
+			snprintf(sdb_state->sqlserverinfo.dbzoffset, SYNCHDB_ERRMSG_SIZE, "%s",
+					dbz_engine_get_offset(type));
 			break;
 		}
 		/* todo: support more dbz connector types here */
@@ -612,7 +717,7 @@ set_shm_offset_info(ConnectorType type, DBZ_OFFSET_INFO * offsetinfo)
 }
 
 const char *
-get_shm_offset_info(ConnectorType type)
+get_shm_dbz_offset(ConnectorType type)
 {
 	if (!sdb_state)
 		return "n/a";
@@ -620,14 +725,14 @@ get_shm_offset_info(ConnectorType type)
 	switch(type)
 	{
 		case TYPE_MYSQL:
-			return (strlen(sdb_state->mysqlinfo.offsetstr) == 0 ?
-					"no offset": sdb_state->mysqlinfo.offsetstr);
+			return (strlen(sdb_state->mysqlinfo.dbzoffset) == 0 ?
+					"no offset": sdb_state->mysqlinfo.dbzoffset);
 		case TYPE_ORACLE:
-			return (strlen(sdb_state->oracleinfo.offsetstr) == 0 ?
-					"no offset": sdb_state->oracleinfo.offsetstr);
+			return (strlen(sdb_state->oracleinfo.dbzoffset) == 0 ?
+					"no offset": sdb_state->oracleinfo.dbzoffset);
 		case TYPE_SQLSERVER:
-			return (strlen(sdb_state->sqlserverinfo.offsetstr) == 0 ?
-					"no offset": sdb_state->sqlserverinfo.offsetstr);
+			return (strlen(sdb_state->sqlserverinfo.dbzoffset) == 0 ?
+					"no offset": sdb_state->sqlserverinfo.dbzoffset);
 		/* todo: support more dbz connector types here */
 		default:
 		{
@@ -636,6 +741,7 @@ get_shm_offset_info(ConnectorType type)
 	}
 	return "n/a";
 }
+
 void _PG_init(void)
 {
 	DefineCustomIntVariable("synchdb.naptime",
@@ -702,10 +808,6 @@ synchdb_engine_main(Datum main_arg)
 	int ret;
 	const char * dbzpath = getenv("DBZ_ENGINE_DIR");
 	char javaopt[512] = {0}, defaultdbzpath[512] = {0};
-	JavaVM *jvm = NULL;		/* represents java vm instance */
-	JNIEnv *env = NULL;		/* represents JNI run-time environment */
-	jclass cls; 	/* represents debezium runner java class */
-	jobject obj;	/* represents debezium runner java class object */
 
 	/* Parse the arguments from bgw_extra and main_arg */
 	connectorType = DatumGetUInt32(main_arg);
@@ -767,10 +869,8 @@ synchdb_engine_main(Datum main_arg)
 	 * synchdb workers
 	 */
 	enginepid = get_shm_connector_pid(connectorType);
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	if (enginepid != InvalidPid)
 	{
-		LWLockRelease(&sdb_state->lock);
 		ereport(LOG,
 				(errmsg("synchdb mysql worker (%u) is already running under PID %d",
 						connectorType,
@@ -778,12 +878,12 @@ synchdb_engine_main(Datum main_arg)
 		return;
 	}
 	set_shm_connector_pid(connectorType, MyProcPid);
-	LWLockRelease(&sdb_state->lock);
 
 	elog(WARNING, "synchdb_engine_main starting ...");
 
 	set_shm_connector_state(connectorType, STATE_INITIALIZING);
 	set_shm_connector_errmsg(connectorType, NULL);
+	set_shm_connector_dbs(connectorType, src_db, dst_db);
 
 	if (!dbzpath)
 	{
@@ -834,8 +934,19 @@ synchdb_engine_main(Datum main_arg)
 		return;
 	}
 
-	ret = dbz_engine_start(hostname, port, user, pwd, src_db, table, connectorType,
-						   jvm, env, &cls, &obj);
+	ret = dbz_engine_init(env, &cls, &obj);
+	if (ret < 0 )
+	{
+		elog(WARNING, "Failed to initialize dbz engine");
+		set_shm_connector_errmsg(connectorType, "Failed to initialize dbz engine");
+		return;
+	}
+
+
+//	dbz_engine_set_offset(connectorType, src_db, jvm, env, &cls, &obj);
+//	elog(WARNING, "offset %s", dbz_engine_get_offset(connectorType, src_db));
+
+	ret = dbz_engine_start(hostname, port, user, pwd, src_db, table, connectorType);
 	if (ret < 0)
 	{
 		elog(WARNING, "Failed to start dbz engine");
@@ -865,7 +976,7 @@ synchdb_engine_main(Datum main_arg)
 	}
 
 	elog(WARNING, "synchdb_engine_main shutting down");
-	ret = dbz_engine_stop(jvm, env, &cls, &obj);
+	ret = dbz_engine_stop();
 	if (ret)
 	{
 		elog(WARNING, "failed to call dbz engine stop method");
@@ -1081,7 +1192,7 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 		values[1] = Int32GetDatum((int)get_shm_connector_pid((*idx + 1)));
 		values[2] = CStringGetTextDatum(get_shm_connector_state((*idx + 1)));
 		values[3] = CStringGetTextDatum(get_shm_connector_errmsg((*idx + 1)));
-		values[4] = CStringGetTextDatum(get_shm_offset_info((*idx + 1)));
+		values[4] = CStringGetTextDatum(get_shm_dbz_offset((*idx + 1)));
 		LWLockRelease(&sdb_state->lock);
 
 		*idx +=1;

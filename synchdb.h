@@ -11,6 +11,7 @@
 #include "storage/lwlock.h"
 
 #define SYNCHDB_ERRMSG_SIZE 128
+#define SYNCHDB_MAX_DB_NAME_SIZE 64
 
 typedef enum _connectorType
 {
@@ -77,7 +78,9 @@ typedef struct _MysqlStateInfo
 	pid_t pid;
 	ConnectorState state;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
-	char offsetstr[SYNCHDB_ERRMSG_SIZE];
+	char dbzoffset[SYNCHDB_ERRMSG_SIZE];
+	char srcdb[SYNCHDB_MAX_DB_NAME_SIZE];
+	char dstdb[SYNCHDB_MAX_DB_NAME_SIZE];
 
 } MysqlStateInfo;
 
@@ -87,7 +90,9 @@ typedef struct _OracleStateInfo
 	pid_t pid;
 	ConnectorState state;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
-	char offsetstr[SYNCHDB_ERRMSG_SIZE];
+	char dbzoffset[SYNCHDB_ERRMSG_SIZE];
+	char srcdb[SYNCHDB_MAX_DB_NAME_SIZE];
+	char dstdb[SYNCHDB_MAX_DB_NAME_SIZE];
 } OracleStateInfo;
 
 typedef struct _SqlserverStateInfo
@@ -96,7 +101,9 @@ typedef struct _SqlserverStateInfo
 	pid_t pid;
 	ConnectorState state;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
-	char offsetstr[SYNCHDB_ERRMSG_SIZE];
+	char dbzoffset[SYNCHDB_ERRMSG_SIZE];
+	char srcdb[SYNCHDB_MAX_DB_NAME_SIZE];
+	char dstdb[SYNCHDB_MAX_DB_NAME_SIZE];
 } SqlserverStateInfo;
 
 /* Shared state information for synchdb bgworker. */
@@ -116,7 +123,8 @@ void set_shm_connector_errmsg(ConnectorType type, char * err);
 const char * get_shm_connector_errmsg(ConnectorType type);
 void set_shm_connector_state(ConnectorType type, ConnectorState state);
 const char * get_shm_connector_state(ConnectorType type);
-void set_shm_offset_info(ConnectorType type, DBZ_OFFSET_INFO * offsetinfo);
-const char * get_shm_offset_info(ConnectorType type);
+void set_shm_connector_dbs(ConnectorType type, char * srcdb, char * dstdb);
+void set_shm_dbz_offset(ConnectorType type);
+const char * get_shm_dbz_offset(ConnectorType type);
 
 #endif /* SYNCHDB_SYNCHDB_H_ */
