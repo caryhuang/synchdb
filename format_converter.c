@@ -199,50 +199,6 @@ getPathElementJsonb(Jsonb * jb, char * path)
 }
 
 static void
-destroyOffsetInfo(DBZ_OFFSET_INFO * offset)
-{
-	if (!offset)
-		return;
-
-	switch(offset->type)
-	{
-		 case TYPE_MYSQL:
-		 {
-			 if (offset->mysqlOffset.file)
-				 pfree(offset->mysqlOffset.file);
-			 if (offset->mysqlOffset.pos)
-				 pfree(offset->mysqlOffset.pos);
-			 if (offset->mysqlOffset.row)
-				 pfree(offset->mysqlOffset.row);
-			 if (offset->mysqlOffset.server_id)
-				 pfree(offset->mysqlOffset.server_id);
-			 if (offset->mysqlOffset.ts_sec)
-				 pfree(offset->mysqlOffset.ts_sec);
-			 break;
-		 }
-		 case TYPE_ORACLE:
-		 {
-			 /* todo */
-			 break;
-		 }
-		 case TYPE_SQLSERVER:
-		 {
-			 if (offset->sqlserverOffset.change_lsn)
-				 pfree(offset->sqlserverOffset.change_lsn);
-			 if (offset->sqlserverOffset.commit_lsn)
-				 pfree(offset->sqlserverOffset.commit_lsn);
-			 if (offset->sqlserverOffset.event_serial_number)
-				 pfree(offset->sqlserverOffset.event_serial_number);
-			 break;
-		 }
-		 default:
-		 {
-			 break;
-		 }
-	}
-	pfree(offset);
-}
-static void
 destroyDBZDDL(DBZ_DDL * ddlinfo)
 {
 	if (ddlinfo)
@@ -1771,57 +1727,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	return dbzdml;
 }
 
-static DBZ_OFFSET_INFO *
-get_offset_info(ConnectorType type, Jsonb * jb)
-{
-	StringInfoData strinfo;
-	DBZ_OFFSET_INFO * offset = NULL;
-
-	initStringInfo(&strinfo);
-	offset = (DBZ_OFFSET_INFO *) palloc0(sizeof(DBZ_OFFSET_INFO));
-	offset->type = type;
-
-	switch (offset->type)
-	{
-		case TYPE_MYSQL:
-		{
-		    getPathElementString(jb, "payload.source.file", &strinfo);
-		    offset->mysqlOffset.file = pstrdup(strinfo.data);
-		    getPathElementString(jb, "payload.source.pos", &strinfo);
-		    offset->mysqlOffset.pos = pstrdup(strinfo.data);
-		    getPathElementString(jb, "payload.source.row", &strinfo);
-		    offset->mysqlOffset.row = pstrdup(strinfo.data);
-		    getPathElementString(jb, "payload.source.server_id", &strinfo);
-		    offset->mysqlOffset.server_id = pstrdup(strinfo.data);
-		    getPathElementString(jb, "payload.source.ts_ms", &strinfo);
-		    offset->mysqlOffset.ts_sec = pstrdup(strinfo.data);
-		    /* truncate last 3 bytes to make it in seconds */
-		    offset->mysqlOffset.ts_sec[strlen(offset->mysqlOffset.ts_sec) -3] = '\0';
-			break;
-		}
-		case TYPE_ORACLE:
-		{
-			break;
-		}
-		case TYPE_SQLSERVER:
-		{
-		    getPathElementString(jb, "payload.source.change_lsn", &strinfo);
-		    offset->sqlserverOffset.change_lsn = pstrdup(strinfo.data);
-		    getPathElementString(jb, "payload.source.commit_lsn", &strinfo);
-		    offset->sqlserverOffset.commit_lsn = pstrdup(strinfo.data);
-		    getPathElementString(jb, "payload.source.event_serial_no", &strinfo);
-		    offset->sqlserverOffset.event_serial_number = pstrdup(strinfo.data);
-			break;
-		}
-		default:
-		{
-			elog(ERROR, "connector type %d not supported", offset->type);
-			break;
-		}
-	}
-	return offset;
-}
-
 ConnectorType
 fc_get_connector_type(const char * connector)
 {
@@ -1851,7 +1756,6 @@ fc_processDBZChangeEvent(const char * event)
 	Jsonb *jb;
 	StringInfoData strinfo;
 	ConnectorType type;
-	DBZ_OFFSET_INFO * offsetinfo;
 
 	initStringInfo(&strinfo);
 
@@ -1861,7 +1765,6 @@ fc_processDBZChangeEvent(const char * event)
     getPathElementString(jb, "payload.source.connector", &strinfo);
 
     type = fc_get_connector_type(strinfo.data);
-    offsetinfo = get_offset_info(type, jb);
 
     getPathElementString(jb, "payload.ddl", &strinfo);
     getPathElementString(jb, "payload.op", &strinfo);
@@ -1891,7 +1794,6 @@ fc_processDBZChangeEvent(const char * event)
     		elog(WARNING, "failed to convert DBZ DDL to PG DDL change event");
     		set_shm_connector_state(type, STATE_SYNCING);
     		destroyDBZDDL(dbzddl);
-    		destroyOffsetInfo(offsetinfo);
     		return -1;
     	}
 
@@ -1904,19 +1806,17 @@ fc_processDBZChangeEvent(const char * event)
     		set_shm_connector_state(type, STATE_SYNCING);
     		destroyDBZDDL(dbzddl);
     		destroyPGDDL(pgddl);
-    		destroyOffsetInfo(offsetinfo);
     		return -1;
     	}
 
     	/* (4) update offset */
-       	set_shm_offset_info(type, offsetinfo);
+       	set_shm_dbz_offset(type);
 
     	/* (5) clean up */
     	set_shm_connector_state(type, STATE_SYNCING);
     	elog(WARNING, "execution completed. Clean up...");
     	destroyDBZDDL(dbzddl);
     	destroyPGDDL(pgddl);
-    	destroyOffsetInfo(offsetinfo);
     }
     else
     {
@@ -1943,7 +1843,6 @@ fc_processDBZChangeEvent(const char * event)
     		elog(WARNING, "failed to convert DBZ DML to PG DML change event");
     		set_shm_connector_state(type, STATE_SYNCING);
     		destroyDBZDML(dbzdml);
-    		destroyOffsetInfo(offsetinfo);
     		return -1;
     	}
 
@@ -1956,19 +1855,17 @@ fc_processDBZChangeEvent(const char * event)
     		set_shm_connector_state(type, STATE_SYNCING);
         	destroyDBZDML(dbzdml);
         	destroyPGDML(pgdml);
-        	destroyOffsetInfo(offsetinfo);
     		return -1;
     	}
 
     	/* (4) update offset */
-       	set_shm_offset_info(type, offsetinfo);
+       	set_shm_dbz_offset(type);
 
        	/* (5) clean up */
     	set_shm_connector_state(type, STATE_SYNCING);
     	elog(WARNING, "execution completed. Clean up...");
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);
-    	destroyOffsetInfo(offsetinfo);
     }
 	return 0;
 }

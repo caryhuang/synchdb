@@ -40,15 +40,18 @@ public class DebeziumRunner {
 		String schemahistoryfile = "/dev/shm/schemahistory.dat";
 
 		Properties props = new Properties();
-        // Set Debezium properties...
+
+        /* Setting connector specific properties */
         props.setProperty("name", "engine");
 		switch(connectorType)
 		{
 			case TYPE_MYSQL:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.mysql.MySqlConnector");
+				props.setProperty("database.server.id", "223344");	/* todo: make configurable */
 				offsetfile = "pg_synchdb/mysql_offsets.dat";
 				schemahistoryfile = "pg_synchdb/mysql_schemahistory.dat";
+
 				break;
 			}
 			case TYPE_ORACLE:
@@ -61,28 +64,21 @@ public class DebeziumRunner {
 			case TYPE_SQLSERVER:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");
+				props.setProperty("database.encrypt", "false");	/* todo: enable tls */
 				offsetfile = "pg_synchdb/sqlserver_offsets.dat";
 				schemahistoryfile = "pg_synchdb/sqlserver_schemahistory.dat";
-
-				/* sqlserver requires database - cannot be null */
-				if (database.equals("null"))
-					logger.error("database cannot be null");
-				else
-					props.setProperty("database.names", database);
-
-				props.setProperty("database.encrypt", "false");
 				break;
 			}
 		}
-		props.setProperty("offset.storage", "org.apache.kafka.connect.storage.FileOffsetBackingStore");
-		props.setProperty("offset.storage.file.filename", offsetfile);
-		props.setProperty("offset.flush.interval.ms", "60000");
 		
-		/* begin connector properties */
+		/* setting common properties */
 		if (database.equals("null"))
 			logger.warn("database is null - skip setting database.include.list property");
 		else
+		{
 			props.setProperty("database.include.list", database);
+			props.setProperty("database.names", database);
+		}
 
 		if (table.equals("null"))
 			logger.warn("table is null - skip setting table.include.list property");
@@ -93,12 +89,13 @@ public class DebeziumRunner {
 		props.setProperty("database.port", String.valueOf(port));
 		props.setProperty("database.user", user);
 		props.setProperty("database.password", password);
-		props.setProperty("database.server.id", "223344");
-		props.setProperty("topic.prefix", "my-app-connector");
+		props.setProperty("topic.prefix", "synchdb-connector");
 		props.setProperty("schema.history.internal", "io.debezium.storage.file.history.FileSchemaHistory");
 		props.setProperty("schema.history.internal.file.filename", schemahistoryfile);
+		props.setProperty("offset.storage", "org.apache.kafka.connect.storage.FileOffsetBackingStore");
+		props.setProperty("offset.storage.file.filename", offsetfile);
+		props.setProperty("offset.flush.interval.ms", "60000");
 
-        // Set other required properties...
 		logger.info("Hello from DebeziumRunner class!");
 
 		engine = DebeziumEngine.create(Json.class)
@@ -179,84 +176,111 @@ public class DebeziumRunner {
 		*/
     }
 	
-	public String getConnectorOffset(int connectorType)
-	{
-		return "todo";
-	}
-
-	public void setConnectorOffset(int connectorType, String offsetstring)
+	public String getConnectorOffset(int connectorType, String db)
 	{
 		File inputFile = null;
-		File outputFile = null;
-		String key = null;
-		String value = null;
-		Map<byte[], byte[]> rawData = new HashMap<>();
 		Map<ByteBuffer, ByteBuffer> originalData = null;
+		String ret = "NULL";
+		String key = null;
 
 		switch (connectorType)
 		{
 			case TYPE_MYSQL:
 			{
 				inputFile = new File("pg_synchdb/mysql_offsets.dat");
-				outputFile = new File("pg_synchdb/mysql_offsets.datout");
-				key = "[\"engine\",{\"server\":\"my-app-connector\"}]";
-
-				originalData = readOffsetFile(inputFile);	
-				String[] elements = offsetstring.split("\\|");
-				value = "{\"file\":" + "\"" + elements[0] + "\"," +
-						"\"pos\":" + elements[1] + "," +
-					   	"\"row\":" + elements[2] + "," +
-						"\"server_id\":" + elements[3] + "," +
-						"\"ts_sec\":" + elements[4] + "}";
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 				break;
 			}
 			case TYPE_ORACLE:
 			{
 				inputFile = new File("pg_synchdb/oracle_offsets.dat");
-				outputFile = new File("pg_synchdb/oracle_offsets.datout");
-				originalData = readOffsetFile(inputFile);
 				/* todo */
 				break;
 			}
 			case TYPE_SQLSERVER:
 			{
 				inputFile = new File("pg_synchdb/sqlserver_offsets.dat");
-				outputFile = new File("pg_synchdb/sqlserver_offsets.datout");
-				key = "[\"engine\",{\"server\":\"my-app-connector\"}]";
-				originalData = readOffsetFile(inputFile);
-				
-				String[] elements = offsetstring.split("\\|");
-				value = "{\"change_lsn\":" + "\"" + elements[0] + "\"," +
-						"\"commit_lsn\":" + "\"" + elements[1] + "\"," +
-						"\"event_serial_number\":" + "\"" + elements[2] + "\"}";
+				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
 				break;
 			}
 		}
 
+		if (!inputFile.exists())
+        {
+            logger.warn("dbz offset file does not exist yet. Skipping");
+			ret = "offset file not flushed yet";
+            return ret;
+        }
+
+		ByteBuffer keyBuffer = ByteBuffer.wrap(key.getBytes(StandardCharsets.US_ASCII));
+		originalData = readOffsetFile(inputFile);
+		for (Map.Entry<ByteBuffer, ByteBuffer> entry : originalData.entrySet())
+		{
+			if (entry.getKey().equals(keyBuffer))
+			{
+				ret = StandardCharsets.UTF_8.decode(entry.getValue()).toString();
+				logger.warn("offset = " + ret);
+			}
+			else
+			{
+				//logger.warn("key entry not found");
+			}
+		}
+		return ret;
+	}
+
+	public void setConnectorOffset(String filename, int type, String db, String newvalue)
+	{
+		File inputFile = new File(filename);
+		String key = null;
+		String value = newvalue;
+		Map<byte[], byte[]> rawData = new HashMap<>();
+		Map<ByteBuffer, ByteBuffer> originalData = null;
+
+		
+		switch (type)
+		{
+			case TYPE_MYSQL:
+			{
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
+				break;
+			}
+			case TYPE_ORACLE:
+			{
+				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
+				/* todo */
+				break;
+			}
+			case TYPE_SQLSERVER:
+			{
+				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
+				break;
+			}
+		}
+
+		if (!inputFile.exists())
+		{
+			logger.warn("dbz offset file does not exist yet. Skip setting offset");
+			return;
+		}
+
+		originalData = readOffsetFile(inputFile);	
 		ByteBuffer keyBuffer = ByteBuffer.wrap(key.getBytes(StandardCharsets.US_ASCII));
 		ByteBuffer valueBuffer = ByteBuffer.wrap(value.getBytes(StandardCharsets.US_ASCII));
 		for (Map.Entry<ByteBuffer, ByteBuffer> entry : originalData.entrySet())
 		{
-			System.out.println("Entry Key: " + StandardCharsets.UTF_8.decode(entry.getKey()).toString());
-			System.out.println("Entry Val: " + StandardCharsets.UTF_8.decode(entry.getValue()).toString());
-			System.out.println("New Key: " + key);
-			System.out.println("New Val: " + value);
 			if (entry.getKey().equals(keyBuffer))
 			{
-				//System.out.println("found");
+				logger.warn("updating existing offset record: " + key + " with new value: " + value);
 				rawData.put(entry.getKey().array(), valueBuffer.array());
 			}
 			else
 			{
-				/* todo: somehow it always returns not found. we still add the existing key
-				 * rather than the new key
-				 */
-				//System.out.println("not found");
-				rawData.put(entry.getKey().array(), valueBuffer.array());
-				//rawData.put(keyBuffer.array(), valueBuffer.array());
+				logger.warn("inserting new offset record: " + key + " with new value: " + value);
+				rawData.put(keyBuffer.array(), valueBuffer.array());
 			}
 		}
-		writeOffsetFile(outputFile, rawData);
+		writeOffsetFile(inputFile, rawData);
 	}
 	
 	public Map<ByteBuffer, ByteBuffer> readOffsetFile(File inputFile) {
@@ -344,8 +368,17 @@ public class DebeziumRunner {
 
 		runner.writeOffsetFile(outputFile, rawData);
 		*/
+		String filename = args[0];
+		int type = Integer.parseInt(args[1]);
+		String db = args[2];
+		String value = args[3];
+
 		DebeziumRunner runner = new DebeziumRunner();
-		runner.setConnectorOffset(1, "mysql-bin.000003|33048|1|223344|1722965389");
+		runner.setConnectorOffset(filename, type, db, value);
+		//runner.getConnectorOffset(1,null);
+		//runner.getConnectorOffset(3,"testDB");
+		//runner.setConnectorOffset(1, "mysql-bin.000003|40603|1|223344|1723067034", null);
+		//runner.setConnectorOffset(3, "0000006d:00000e20:0007|0000006d:00000e20:0007|4567", "testDB");
 
     }
 }
