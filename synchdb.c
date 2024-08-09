@@ -685,6 +685,7 @@ set_shm_dbz_offset(ConnectorType type)
 	if (!sdb_state)
 		return;
 
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	switch(type)
 	{
 		case TYPE_MYSQL:
@@ -714,6 +715,7 @@ set_shm_dbz_offset(ConnectorType type)
 			break;
 		}
 	}
+	LWLockRelease(&sdb_state->lock);
 }
 
 const char *
