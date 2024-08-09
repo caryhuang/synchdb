@@ -33,6 +33,7 @@ PG_FUNCTION_INFO_V1(synchdb_start_engine_bgw);
 PG_FUNCTION_INFO_V1(synchdb_get_state);
 PG_FUNCTION_INFO_V1(synchdb_pause_engine);
 PG_FUNCTION_INFO_V1(synchdb_resume_engine);
+PG_FUNCTION_INFO_V1(synchdb_set_offset);
 
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
 #define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
@@ -414,6 +415,8 @@ connectorStateAsString(ConnectorState state)
 			return "converting";
 		case STATE_EXECUTING:
 			return "executing";
+		case STATE_OFFSET_UPDATE:
+			return "updating offset";
 	}
 	return "UNKNOWN";
 }
@@ -454,12 +457,51 @@ reset_shm_request_state(ConnectorType type)
 	LWLockRelease(&sdb_state->lock);
 }
 
+static int
+dbz_engine_set_offset(ConnectorType connectorType, char * db, char * offset, char * file)
+{
+	jmethodID setoffsets;
+	jstring joffsetstr, jdb, jfile;
+
+	if (!jvm)
+	{
+		elog(WARNING, "jvm not initialized");
+		return -1;
+	}
+
+	if (!env)
+	{
+		elog(WARNING, "jvm env not initialized");
+		return -1;
+	}
+
+	setoffsets = (*env)->GetMethodID(env, cls, "setConnectorOffset",
+			"(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
+	if (setoffsets == NULL)
+	{
+		elog(WARNING, "Failed to find setConnectorOffset method");
+		return -1;
+	}
+
+	joffsetstr = (*env)->NewStringUTF(env, offset);
+	jdb = (*env)->NewStringUTF(env, db);
+	jfile = (*env)->NewStringUTF(env, file);
+
+	(*env)->CallVoidMethod(env, obj, setoffsets, jfile, (int)connectorType, jdb, joffsetstr);
+
+	(*env)->DeleteLocalRef(env, joffsetstr);
+	(*env)->DeleteLocalRef(env, jdb);
+	(*env)->DeleteLocalRef(env, jfile);
+	return 0;
+}
+
 static void
 processRequestInterrupt(char * hostname, unsigned int port, char * user,
 		 char * pwd, char * db, char * table, ConnectorType type)
 {
 	SynchdbRequest * req, *reqcopy;
 	ConnectorState * currstate, *currstatecopy;
+	char * srcdb, * offsetfile;
 	int ret;
 
 	if (!sdb_state)
@@ -471,14 +513,20 @@ processRequestInterrupt(char * hostname, unsigned int port, char * user,
 		case TYPE_MYSQL:
 			req = &(sdb_state->mysqlinfo.req);
 			currstate = &(sdb_state->mysqlinfo.state);
+			srcdb = sdb_state->mysqlinfo.srcdb;
+			offsetfile = SYNCHDB_MYSQL_OFFSET_FILE;
 			break;
 		case TYPE_ORACLE:
 			req = &(sdb_state->oracleinfo.req);
-			currstate = &(sdb_state->mysqlinfo.state);
+			currstate = &(sdb_state->oracleinfo.state);
+			srcdb = sdb_state->oracleinfo.srcdb;
+			offsetfile = SYNCHDB_ORACLE_OFFSET_FILE;
 			break;
 		case TYPE_SQLSERVER:
 			req = &(sdb_state->sqlserverinfo.req);
-			currstate = &(sdb_state->mysqlinfo.state);
+			currstate = &(sdb_state->sqlserverinfo.state);
+			srcdb = sdb_state->sqlserverinfo.srcdb;
+			offsetfile = SYNCHDB_SQLSERVER_OFFSET_FILE;
 			break;
 		/* todo: support more dbz connector types here */
 		default:
@@ -508,7 +556,7 @@ processRequestInterrupt(char * hostname, unsigned int port, char * user,
 	else if (reqcopy->reqstate == STATE_PAUSED && *currstatecopy == STATE_SYNCING)
 	{
 		/* we can only transition to STATE_PAUSED from STATE_SYNCING */
-		elog(WARNING, "request to transition to state: %s from current state: %s",
+		elog(WARNING, "request to transition to state: '%s' from current state: '%s'",
 				connectorStateAsString(reqcopy->reqstate),
 				connectorStateAsString(*currstatecopy));
 
@@ -528,7 +576,7 @@ processRequestInterrupt(char * hostname, unsigned int port, char * user,
 	else if (reqcopy->reqstate == STATE_SYNCING && *currstatecopy == STATE_PAUSED)
 	{
 		/* we can only transition to STATE_SYNCING from STATE_PAUSED */
-		elog(WARNING, "request to transition to state: %s from current state: %s",
+		elog(WARNING, "request to transition to state: '%s' from current state: '%s'",
 				connectorStateAsString(reqcopy->reqstate),
 				connectorStateAsString(*currstatecopy));
 
@@ -545,6 +593,30 @@ processRequestInterrupt(char * hostname, unsigned int port, char * user,
 			return;
 		}
 		set_shm_connector_state(type, STATE_SYNCING);
+	}
+	else if (reqcopy->reqstate == STATE_OFFSET_UPDATE && *currstatecopy == STATE_PAUSED)
+	{
+		/* we can only update offset when dbz engine is paused */
+		elog(WARNING, "request to transition to state: '%s' from current state: '%s'",
+				connectorStateAsString(reqcopy->reqstate),
+				connectorStateAsString(*currstatecopy));
+
+		/* set current state to STATE_OFFSET_UPDATE as requested */
+		set_shm_connector_state(type, STATE_OFFSET_UPDATE);
+
+		ret = dbz_engine_set_offset(type, srcdb, reqcopy->reqdata, offsetfile);
+		if (ret < 0)
+		{
+			elog(WARNING, "Failed to set offset to dbz engine");
+			reset_shm_request_state(type);
+			set_shm_connector_state(type, STATE_PAUSED);
+			pfree(reqcopy);
+			pfree(currstatecopy);
+			return;
+		}
+
+		/* after new offset is set, change state back to STATE_PAUSED */
+		set_shm_connector_state(type, STATE_PAUSED);
 	}
 	else
 	{
@@ -1522,3 +1594,78 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_INT32(0);
 }
+
+Datum
+synchdb_set_offset(PG_FUNCTION_ARGS)
+{
+	char * connector = text_to_cstring(PG_GETARG_TEXT_P(0));
+	char * offsetstr = text_to_cstring(PG_GETARG_TEXT_P(1));
+	ConnectorType type = fc_get_connector_type(connector);
+	ConnectorState currstate, currreqstate;
+	SynchdbRequest * req;
+	pid_t pid;
+
+	if (type == TYPE_UNDEF)
+		elog(ERROR, "unsupported connector type");
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		elog(ERROR, "failed to init or attach to synchdb shared memory");
+
+	pid = get_shm_connector_pid(type);
+	if (pid == InvalidPid)
+	{
+		elog(WARNING, "dbz connector (%s) is not running", connector);
+		PG_RETURN_INT32(1);
+	}
+
+	currstate = get_shm_connector_state_enum(type);
+	if (currstate != STATE_PAUSED)
+	{
+		elog(WARNING, "dbz connector (%s) is not in paused state. "
+				"Use synchdb_pause_engine() to pause it first", connector);
+		PG_RETURN_INT32(1);
+	}
+
+	/* point to the right construct based on type */
+	switch(type)
+	{
+		case TYPE_MYSQL:
+			req = &(sdb_state->mysqlinfo.req);
+			break;
+		case TYPE_ORACLE:
+			req = &(sdb_state->oracleinfo.req);
+			break;
+		case TYPE_SQLSERVER:
+			req = &(sdb_state->sqlserverinfo.req);
+			break;
+		/* todo: support more dbz connector types here */
+		default:
+			break;
+	}
+
+	/* an active state change request is currently in progress */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	currreqstate = req->reqstate;
+	LWLockRelease(&sdb_state->lock);
+
+	if (currreqstate != STATE_UNDEF)
+	{
+		elog(WARNING, "an active request is currently active");
+		PG_RETURN_INT32(1);
+	}
+	else
+	{
+		elog(WARNING, "send update offset request interrupt to dbz connector (%s)", connector);
+		LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+		req->reqstate = STATE_OFFSET_UPDATE;
+		strncpy(req->reqdata, offsetstr, SYNCHDB_ERRMSG_SIZE);
+		LWLockRelease(&sdb_state->lock);
+	}
+	PG_RETURN_INT32(0);
+}
+
