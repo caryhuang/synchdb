@@ -33,11 +33,18 @@ typedef enum _connectorState
 	STATE_EXECUTING,	/* conversion done, try to execute it on pg */
 } ConnectorState;
 
+typedef struct _SynchdbRequest
+{
+	ConnectorState reqstate;
+	char reqdata[SYNCHDB_ERRMSG_SIZE];
+} SynchdbRequest;
+
 typedef struct _MysqlStateInfo
 {
 	/* todo */
 	pid_t pid;
 	ConnectorState state;
+	SynchdbRequest req;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
 	char dbzoffset[SYNCHDB_ERRMSG_SIZE];
 	char srcdb[SYNCHDB_MAX_DB_NAME_SIZE];
@@ -49,6 +56,7 @@ typedef struct _OracleStateInfo
 	/* todo */
 	pid_t pid;
 	ConnectorState state;
+	SynchdbRequest req;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
 	char dbzoffset[SYNCHDB_ERRMSG_SIZE];
 	char srcdb[SYNCHDB_MAX_DB_NAME_SIZE];
@@ -60,6 +68,7 @@ typedef struct _SqlserverStateInfo
 	/* todo */
 	pid_t pid;
 	ConnectorState state;
+	SynchdbRequest req;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
 	char dbzoffset[SYNCHDB_ERRMSG_SIZE];
 	char srcdb[SYNCHDB_MAX_DB_NAME_SIZE];
@@ -86,5 +95,6 @@ const char * get_shm_connector_state(ConnectorType type);
 void set_shm_connector_dbs(ConnectorType type, char * srcdb, char * dstdb);
 void set_shm_dbz_offset(ConnectorType type);
 const char * get_shm_dbz_offset(ConnectorType type);
+ConnectorState get_shm_connector_state_enum(ConnectorType type);
 
 #endif /* SYNCHDB_SYNCHDB_H_ */
