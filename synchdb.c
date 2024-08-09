@@ -31,6 +31,8 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(synchdb_stop_engine_bgw);
 PG_FUNCTION_INFO_V1(synchdb_start_engine_bgw);
 PG_FUNCTION_INFO_V1(synchdb_get_state);
+PG_FUNCTION_INFO_V1(synchdb_pause_engine);
+PG_FUNCTION_INFO_V1(synchdb_resume_engine);
 
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
 #define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
@@ -416,6 +418,148 @@ connectorStateAsString(ConnectorState state)
 	return "UNKNOWN";
 }
 
+static void
+reset_shm_request_state(ConnectorType type)
+{
+	if (!sdb_state)
+		return;
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	switch(type)
+	{
+		case TYPE_MYSQL:
+		{
+			sdb_state->mysqlinfo.req.reqstate = STATE_UNDEF;
+			memset(sdb_state->mysqlinfo.req.reqdata, 0, SYNCHDB_ERRMSG_SIZE);
+			break;
+		}
+		case TYPE_ORACLE:
+		{
+			sdb_state->oracleinfo.req.reqstate = STATE_UNDEF;
+			memset(sdb_state->oracleinfo.req.reqdata, 0, SYNCHDB_ERRMSG_SIZE);
+			break;
+		}
+		case TYPE_SQLSERVER:
+		{
+			sdb_state->sqlserverinfo.req.reqstate = STATE_UNDEF;
+			memset(sdb_state->sqlserverinfo.req.reqdata, 0, SYNCHDB_ERRMSG_SIZE);
+			break;
+		}
+		/* todo: support more dbz connector types here */
+		default:
+		{
+			break;
+		}
+	}
+	LWLockRelease(&sdb_state->lock);
+}
+
+static void
+processRequestInterrupt(char * hostname, unsigned int port, char * user,
+		 char * pwd, char * db, char * table, ConnectorType type)
+{
+	SynchdbRequest * req, *reqcopy;
+	ConnectorState * currstate, *currstatecopy;
+	int ret;
+
+	if (!sdb_state)
+		return;
+
+	/* point to the right construct based on type */
+	switch(type)
+	{
+		case TYPE_MYSQL:
+			req = &(sdb_state->mysqlinfo.req);
+			currstate = &(sdb_state->mysqlinfo.state);
+			break;
+		case TYPE_ORACLE:
+			req = &(sdb_state->oracleinfo.req);
+			currstate = &(sdb_state->mysqlinfo.state);
+			break;
+		case TYPE_SQLSERVER:
+			req = &(sdb_state->sqlserverinfo.req);
+			currstate = &(sdb_state->mysqlinfo.state);
+			break;
+		/* todo: support more dbz connector types here */
+		default:
+		{
+			set_shm_connector_errmsg(type, "unsupported connector type");
+			elog(ERROR, "unsupported connector type");
+			break;
+		}
+	}
+
+	/*
+	 * make a copy of requested state, its data and curr state to avoid holding locks
+	 * for too long. Currently we support 1 request at any one time.
+	 */
+	reqcopy = palloc0(sizeof(SynchdbRequest));
+	currstatecopy = palloc0(sizeof(ConnectorState));
+
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	memcpy(reqcopy, req, sizeof(SynchdbRequest));
+	memcpy(currstatecopy, currstate, sizeof(ConnectorState));
+	LWLockRelease(&sdb_state->lock);
+
+	if (reqcopy->reqstate == STATE_UNDEF)
+	{
+		/* no requests, do nothing */
+	}
+	else if (reqcopy->reqstate == STATE_PAUSED && *currstatecopy == STATE_SYNCING)
+	{
+		/* we can only transition to STATE_PAUSED from STATE_SYNCING */
+		elog(WARNING, "request to transition to state: %s from current state: %s",
+				connectorStateAsString(reqcopy->reqstate),
+				connectorStateAsString(*currstatecopy));
+
+		/* shutdown dbz engine */
+		elog(WARNING, "shut down dbz engine...");
+		ret = dbz_engine_stop();
+		if (ret)
+		{
+			elog(WARNING, "failed to stop dbz engine...");
+			reset_shm_request_state(type);
+			pfree(reqcopy);
+			pfree(currstatecopy);
+			return;
+		}
+		set_shm_connector_state(type, STATE_PAUSED);
+	}
+	else if (reqcopy->reqstate == STATE_SYNCING && *currstatecopy == STATE_PAUSED)
+	{
+		/* we can only transition to STATE_SYNCING from STATE_PAUSED */
+		elog(WARNING, "request to transition to state: %s from current state: %s",
+				connectorStateAsString(reqcopy->reqstate),
+				connectorStateAsString(*currstatecopy));
+
+		/* restart dbz engine */
+		elog(WARNING, "restart dbz engine...");
+
+		ret = dbz_engine_start(hostname, port, user, pwd, db, table, type);
+		if (ret < 0)
+		{
+			elog(WARNING, "Failed to restart dbz engine");
+			reset_shm_request_state(type);
+			pfree(reqcopy);
+			pfree(currstatecopy);
+			return;
+		}
+		set_shm_connector_state(type, STATE_SYNCING);
+	}
+	else
+	{
+		/* unsupported request state combinations */
+		elog(WARNING, "No action performed: request state: %s, current state: %s",
+				connectorStateAsString(reqcopy->reqstate),
+				connectorStateAsString(*currstatecopy));
+	}
+
+	/* reset request state so we can receive more requests to process */
+	reset_shm_request_state(type);
+	pfree(reqcopy);
+	pfree(currstatecopy);
+}
+
 /* public functions to access / change synchdb parameters in shared memory */
 const char *
 get_shm_connector_name(ConnectorType type)
@@ -638,6 +782,27 @@ get_shm_connector_state(ConnectorType type)
 	return connectorStateAsString(STATE_UNDEF);
 }
 
+ConnectorState
+get_shm_connector_state_enum(ConnectorType type)
+{
+	if (!sdb_state)
+		return STATE_UNDEF;
+
+	switch(type)
+	{
+		case TYPE_MYSQL:
+			return (sdb_state->mysqlinfo.state);
+		case TYPE_ORACLE:
+			return (sdb_state->oracleinfo.state);
+		case TYPE_SQLSERVER:
+			return (sdb_state->sqlserverinfo.state);
+		/* todo: support more dbz connector types here */
+		default:
+			break;
+	}
+	return STATE_UNDEF;
+}
+
 void
 set_shm_connector_state(ConnectorType type, ConnectorState state)
 {
@@ -654,7 +819,7 @@ set_shm_connector_state(ConnectorType type, ConnectorState state)
 		}
 		case TYPE_ORACLE:
 		{
-			sdb_state->sqlserverinfo.state = state;
+			sdb_state->oracleinfo.state = state;
 			break;
 		}
 		case TYPE_SQLSERVER:
@@ -803,6 +968,7 @@ synchdb_engine_main(Datum main_arg)
 	char * args = NULL, * tmp = NULL;
 	unsigned int port, connectorType;
 	pid_t enginepid;
+	ConnectorState currstate;
 
 	/* jvm */
 	JavaVMInitArgs vm_args;
@@ -966,12 +1132,36 @@ synchdb_engine_main(Datum main_arg)
 			ProcessConfigFile(PGC_SIGHUP);
 		}
 
+		/*
+		 * check if there is any request interrupt to process. It may change the current
+		 * state synchdb is currently in
+		 */
+		processRequestInterrupt(hostname, port, user, pwd, src_db, table, connectorType);
+
+		/* based on current state, do what it needs to do */
+		currstate = get_shm_connector_state_enum(connectorType);
+		switch(currstate)
+		{
+			case STATE_SYNCING:
+			{
+				/* syncing: actively try to get changes from dbz */
+				dbz_engine_get_change(jvm, env, &cls, &obj);
+				break;
+			}
+			case STATE_PAUSED:
+			{
+				/* paused: do nothing */
+				break;
+			}
+			/* todo */
+			default:
+				break;
+		}
+
 		(void) WaitLatch(MyLatch,
 						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
 						 synchdb_worker_naptime * 1000,
 						 PG_WAIT_EXTENSION);
-
-		dbz_engine_get_change(jvm, env, &cls, &obj);
 
 		/* Reset the latch, loop. */
 		ResetLatch(MyLatch);
@@ -1203,4 +1393,132 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
 	}
 	SRF_RETURN_DONE(funcctx);
+}
+
+Datum
+synchdb_pause_engine(PG_FUNCTION_ARGS)
+{
+	SynchdbRequest * req;
+	ConnectorState currreqstate;
+	char * connector = text_to_cstring(PG_GETARG_TEXT_P(0));
+	ConnectorType type = fc_get_connector_type(connector);
+	pid_t pid;
+
+	if (type == TYPE_UNDEF)
+		elog(ERROR, "unsupported connector type");
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		elog(ERROR, "failed to init or attach to synchdb shared memory");
+
+	pid = get_shm_connector_pid(type);
+	if (pid == InvalidPid)
+	{
+		elog(WARNING, "dbz connector (%s) is not running", connector);
+		PG_RETURN_INT32(1);
+	}
+
+	/* point to the right construct based on type */
+	switch(type)
+	{
+		case TYPE_MYSQL:
+			req = &(sdb_state->mysqlinfo.req);
+			break;
+		case TYPE_ORACLE:
+			req = &(sdb_state->oracleinfo.req);
+			break;
+		case TYPE_SQLSERVER:
+			req = &(sdb_state->sqlserverinfo.req);
+			break;
+		/* todo: support more dbz connector types here */
+		default:
+			break;
+	}
+
+	/* an active state change request is currently in progress */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	currreqstate = req->reqstate;
+	LWLockRelease(&sdb_state->lock);
+
+	if (currreqstate != STATE_UNDEF)
+	{
+		elog(WARNING, "an active state change request is currently active");
+		PG_RETURN_INT32(1);
+	}
+	else
+	{
+		elog(WARNING, "send pause request interrupt to dbz connector (%s)", connector);
+		LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+		req->reqstate = STATE_PAUSED;
+		LWLockRelease(&sdb_state->lock);
+	}
+	PG_RETURN_INT32(0);
+}
+
+Datum
+synchdb_resume_engine(PG_FUNCTION_ARGS)
+{
+	SynchdbRequest * req;
+	ConnectorState currreqstate;
+	char * connector = text_to_cstring(PG_GETARG_TEXT_P(0));
+	ConnectorType type = fc_get_connector_type(connector);
+	pid_t pid;
+
+	if (type == TYPE_UNDEF)
+		elog(ERROR, "unsupported connector type");
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		elog(ERROR, "failed to init or attach to synchdb shared memory");
+
+	pid = get_shm_connector_pid(type);
+	if (pid == InvalidPid)
+	{
+		elog(WARNING, "dbz connector (%s) is not running", connector);
+		PG_RETURN_INT32(1);
+	}
+
+	/* point to the right construct based on type */
+	switch(type)
+	{
+		case TYPE_MYSQL:
+			req = &(sdb_state->mysqlinfo.req);
+			break;
+		case TYPE_ORACLE:
+			req = &(sdb_state->oracleinfo.req);
+			break;
+		case TYPE_SQLSERVER:
+			req = &(sdb_state->sqlserverinfo.req);
+			break;
+		/* todo: support more dbz connector types here */
+		default:
+			break;
+	}
+
+	/* an active state change request is currently in progress */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	currreqstate = req->reqstate;
+	LWLockRelease(&sdb_state->lock);
+
+	if (currreqstate != STATE_UNDEF)
+	{
+		elog(WARNING, "an active state change request is currently active");
+		PG_RETURN_INT32(1);
+	}
+	else
+	{
+		elog(WARNING, "send resume request interrupt to dbz connector (%s)", connector);
+		LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+		req->reqstate = STATE_SYNCING;
+		LWLockRelease(&sdb_state->lock);
+	}
+	PG_RETURN_INT32(0);
 }
