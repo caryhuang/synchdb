@@ -22,3 +22,7 @@ LANGUAGE C IMMUTABLE STRICT;
 CREATE OR REPLACE FUNCTION synchdb_resume_engine(text) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_set_offset(text, text) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;

@@ -13,6 +13,10 @@
 #define SYNCHDB_ERRMSG_SIZE 128
 #define SYNCHDB_MAX_DB_NAME_SIZE 64
 
+#define SYNCHDB_MYSQL_OFFSET_FILE "pg_synchdb/mysql_offsets.dat"
+#define SYNCHDB_ORACLE_OFFSET_FILE "pg_synchdb/oracle_offsets.dat"
+#define SYNCHDB_SQLSERVER_OFFSET_FILE "pg_synchdb/sqlserver_offsets.dat"
+
 typedef enum _connectorType
 {
 	TYPE_UNDEF = 0,
@@ -31,6 +35,7 @@ typedef enum _connectorState
 	STATE_PARSING,		/* got a change event, try to parse it */
 	STATE_CONVERTING,	/* parsing done, try to convert it to pg */
 	STATE_EXECUTING,	/* conversion done, try to execute it on pg */
+	STATE_OFFSET_UPDATE,/* in this state when user requests offset update */
 } ConnectorState;
 
 typedef struct _SynchdbRequest
