@@ -1,5 +1,5 @@
 services:
-  sqlserver2019:
+  sqlserver-ssl-2019:
     image: mcr.microsoft.com/mssql/server:2019-latest
     platform: linux/amd64
     ports:
