@@ -1,0 +1,16 @@
+services:
+  sqlserver2019:
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    platform: linux/amd64
+    ports:
+      - 1433:1433
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_PID=Standard
+      - SA_PASSWORD=Password!
+      - MSSQL_AGENT_ENABLED=true
+      - MSSQL_TLS_CERT=/etc/ssl/certs/synchdb-combined-cert.pem
+      - MSSQL_TLS_KEY=/etc/ssl/private/synchdb-private.key
+    volumes:
+      - ./synchdb-combined-cert.pem:/etc/ssl/certs/synchdb-combined-cert.pem:ro
+      - ./synchdb-private.key:/etc/ssl/private/synchdb-private.key:ro

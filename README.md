@@ -37,18 +37,9 @@ git clone https://github.com/Hornetlabs/synchdb.git
 
 ### Prepare Tools
 #### Maven
-Once Maven is downloaded (for example, apache-maven-3.9.8-bin.tar.gz), extract it:
+If you are working on Ubuntu 22.04.4 LTS, install the Maven as below:
 ```
-tar xzvf apache-maven-3.9.8-bin.tar.gz -C /home/$USER
-```
-Add `mvn` to your $PATH environment variable so you can use `mvn` anywhere in the system:
-```
-export PATH=$PATH:/home/$USER/apache-maven-3.9.8/bin
-```
-
-Optionally, you can also add the above export command in .bashrc file so so it is automatically run when you log in to system.
-```
-echo "export PATH=$PATH:/home/$USER/apache-maven-3.9.8/bin" >> /home/$USER/.bashrc
+sudo apt install maven
 ```
 
 if you are using MacOS, you can use the brew command to install maven (refer (here)[https://brew.sh/] for how to install Homebrew) without any other settings:
@@ -56,31 +47,15 @@ if you are using MacOS, you can use the brew command to install maven (refer (he
 brew install maven
 ```
 
-#### Install Java SDK
-Once java is downloaded (for example, jdk-22_linux-x64_bin.tar.gz), extract it:
+#### Install Java SDK (OpenJDK)
+If you are working on Ubuntu 22.04.4 LTS, install the OpenJDK  as below:
 ```
-tar xzvf jdk-22_linux-x64_bin.tar.gz -C /home/$USER
+sudo apt install openjdk-21-jdk
 ```
-
-Add Java binaries to your $PATH environment variable so you can use Java tools anywhere in the system:
-```
-export PATH=$PATH:/home/$USER/jdk-22.0.1/bin
-```
-
-Optionally, you can also add the above export command in .bashrc file so it is automatically run when you log in to system
-```
-echo "export PATH=$PATH:/home/$USER/jdk-22.0.1/bin" >> /home/$USER/.bashrc
-```
-
-#### Install Java SDK on MacOS
 
 If you are working on MacOS, please install the JDK with brew command:
 ```
 brew install openjdk@22
-```
-If you need to have openjdk@22 first in your PATH, run:
-```
-echo 'export PATH="/opt/homebrew/opt/openjdk@22/bin:$PATH"' >> ~/.zshrc
 ```
 
 ### Build and Install PostgreSQL
@@ -123,11 +98,20 @@ sudo make install
 
 ### Configure your Linker (Ubuntu)
 Lastly, we also need to tell your system's linker where the newly added Java library is located in your system.
-Modify the below JDK directory as needed based on your JDK installation.
+
 ```
-sudo echo "/usr/lib/jdk-22.0.1/lib" >> /etc/ld.so.conf.d/x86_64-linux-gnu.conf
-sudo echo "/usr/lib/jdk-22.0.1/lib/server" >> /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+# Dynamically set JDK paths
+JAVA_PATH=$(which java)
+JDK_HOME_PATH=$(readlink -f ${JAVA_PATH} | sed 's:/bin/java::')
+JDK_LIB_PATH=${JDK_HOME_PATH}/lib
+
+echo $JDK_LIB_PATH
+echo $JDK_LIB_PATH/server
+
+sudo echo "$JDK_LIB_PATH" ｜ sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+sudo echo "$JDK_LIB_PATH/server" | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
 ```
+Note, for mac with M1/M2 chips, you need to the two lines into /etc/ld.so.conf.d/aarch64-linux-gnu.conf
 
 Run ldconfig to reload:
 ```
@@ -154,6 +138,7 @@ We can start a sample MySQL database for testing using docker compose. The user 
 ```
 docker compose -f synchdb-mysql-test.yaml up -d
 ```
+
 Login to MySQL as `root` and grant permissions to user `mysqluser` to perform real-time CDC
 ```
 mysql -h 127.0.0.1 -u root -p
@@ -173,6 +158,7 @@ We can start a sample SQL Server database for testing using docker compose. The 
 ```
 docker compose -f synchdb-sqlserver-test.yaml up -d
 ```
+use synchdb-sqlserver-withssl-test.yaml file for the SQL Server with SSL certificate enabled.
 
 You may not have SQL Server client tool installed, you could login to SQL Server container to access its client tool.
 
@@ -196,7 +182,7 @@ Build the database according to the schema:
 /opt/mssql-tools/bin/sqlcmd -U sa -P $SA_PASSWORD -i /inventory.sql
 ```
 
-Run some simple queries:
+Run some simple queries (add -N -C if you are using SSL enabled SQL Server):
 ```
 /opt/mssql-tools/bin/sqlcmd -U sa -P $SA_PASSWORD -d testDB -Q "insert into orders(order_date, purchaser, quantity, product_id) values( '2024-01-01', 1003, 2, 107)"
 
