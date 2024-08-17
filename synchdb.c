@@ -1,8 +1,20 @@
 /*
  * synchdb.c
  *
- *  Created on: Jun. 24, 2024
- *      Author: caryh
+ * Implementation of SynchDB functionality for PostgreSQL
+ *
+ * This file contains the core functionality for the SynchDB extension,
+ * including background worker management, JNI interactions with the
+ * Debezium engine, and shared memory state management.
+ *
+ * Key components:
+ * - JNI setup and interaction with Debezium
+ * - Background worker management
+ * - Shared memory state management
+ * - User-facing functions for controlling SynchDB
+ *
+ * Copyright (c) 2024 Hornetlabs Technology, Inc.
+ *
  */
 
 #include "postgres.h"
@@ -28,6 +40,7 @@
 
 PG_MODULE_MAGIC;
 
+/* Function declarations for user-facing functions */
 PG_FUNCTION_INFO_V1(synchdb_stop_engine_bgw);
 PG_FUNCTION_INFO_V1(synchdb_start_engine_bgw);
 PG_FUNCTION_INFO_V1(synchdb_get_state);
@@ -35,257 +48,464 @@ PG_FUNCTION_INFO_V1(synchdb_pause_engine);
 PG_FUNCTION_INFO_V1(synchdb_resume_engine);
 PG_FUNCTION_INFO_V1(synchdb_set_offset);
 
+/* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
 #define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
+#define MAX_PATH_LENGTH 1024
+#define MAX_JAVA_OPTION_LENGTH 512
 
-/* Pointer to shared-memory state. */
-SynchdbSharedState *sdb_state = NULL;
+/* Global variables */
+SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
 
 /* GUC variables */
-int	synchdb_worker_naptime = 5;
+int synchdb_worker_naptime = 5;
 bool synchdb_dml_use_spi = false;
 
-/* JNI stuff - static to this source file */
-static JavaVM *jvm = NULL;		/* represents java vm instance */
-static JNIEnv *env = NULL;		/* represents JNI run-time environment */
-static jclass cls; 	/* represents debezium runner java class */
-static jobject obj;	/* represents debezium runner java class object */
+/* JNI-related variables */
+static JavaVM *jvm = NULL; /* represents java vm instance */
+static JNIEnv *env = NULL; /* represents JNI run-time environment */
+static jclass cls;		   /* represents debezium runner java class */
+static jobject obj;		   /* represents debezium runner java class object */
 
+/* Function declarations */
 PGDLLEXPORT void synchdb_engine_main(Datum main_arg);
 
+/* Static function prototypes */
+static int dbz_engine_stop(void);
+static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
+static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj);
+static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType);
+static char *dbz_engine_get_offset(ConnectorType connectorType);
+static TupleDesc synchdb_state_tupdesc(void);
+static void synchdb_init_shmem(void);
+static void synchdb_detach_shmem(int code, Datum arg);
+static void prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector);
+static const char *connectorStateAsString(ConnectorState state);
+static void reset_shm_request_state(ConnectorType type);
+static int dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file);
+static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type);
+static bool parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo);
+static bool setup_environment(ConnectorType connectorType, const char *dst_db);
+static bool initialize_jvm(ConnectorType connectorType);
+static bool start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo);
+static void main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo);
+static void cleanup(ConnectorType connectorType);
+
+const char *connectorTypeToString(ConnectorType type)
+{
+	switch (type)
+	{
+	case TYPE_UNDEF:
+		return "UNDEFINED";
+	case TYPE_MYSQL:
+		return "MYSQL";
+	case TYPE_ORACLE:
+		return "ORACLE";
+	case TYPE_SQLSERVER:
+		return "SQLSERVER";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+/*
+ * dbz_engine_stop - Stop the Debezium engine
+ *
+ * This function stops the Debezium engine by calling the stopEngine method
+ * on the DebeziumRunner object.
+ *
+ * @return: 0 on success, -1 on failure
+ */
 static int
 dbz_engine_stop(void)
 {
 	jmethodID stopEngine;
-	jobject stopEngineObj;
+	jthrowable exception;
 
 	if (!jvm)
-    {
-        elog(WARNING, "jvm not initialized");
-        return -1;
-    }
+	{
+		elog(ERROR, "jvm not initialized");
+		return -1;
+	}
 	if (!env)
-    {
-        elog(WARNING, "jvm env not initialized");
-        return -1;
-    }
-
-    stopEngine = (*env)->GetMethodID(env, cls, "stopEngine", "()V");
-    if (stopEngine == NULL)
-    {
-        elog(WARNING, "Failed to find stopEngine method");
-        return -1;
-    }
-
-    stopEngineObj = (*env)->CallObjectMethod(env, obj, stopEngine);
-    if (stopEngineObj == NULL)
-    {
-        elog(WARNING, "Failed to call stop engine");
-        return -1;
-    }
-    return 0;
-}
-
-static int
-dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj)
-{
-	*cls = (*env)->FindClass(env, "com/example/DebeziumRunner");
-	if (cls == NULL)
 	{
-		elog(WARNING, "Failed to find class");
+		elog(ERROR, "jvm env not initialized");
 		return -1;
 	}
 
-	*obj = (*env)->AllocObject(env, *cls);
-	if (obj == NULL)
+	/* Find the stopEngine method */
+	stopEngine = (*env)->GetMethodID(env, cls, "stopEngine", "()V");
+	if (stopEngine == NULL)
 	{
-		elog(WARNING, "Failed to allocate object");
+		elog(ERROR, "Failed to find stopEngine method");
 		return -1;
 	}
+
+	(*env)->CallVoidMethod(env, obj, stopEngine);
+
+	/* Check for exceptions */
+	exception = (*env)->ExceptionOccurred(env);
+	if (exception)
+	{
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		elog(ERROR, "Exception occurred while stopping Debezium engine");
+		return -1;
+	}
+
 	return 0;
 }
 
+/*
+ * dbz_engine_init - Initialize the Debezium engine
+ *
+ * This function initializes the Debezium engine by finding the DebeziumRunner
+ * class and allocating an instance of it. It handles JNI interactions and
+ * exception checking.
+ *
+ * @param env: JNI environment pointer
+ * @param cls: Pointer to store the found Java class
+ * @param obj: Pointer to store the allocated Java object
+ *
+ * @return: 0 on success, -1 on failure
+ */
+static int
+dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj)
+{
+	elog(DEBUG1, "dbz_engine_init - Starting initialization");
+
+	/* Find the DebeziumRunner class */
+	*cls = (*env)->FindClass(env, "com/example/DebeziumRunner");
+	if (*cls == NULL)
+	{
+		if ((*env)->ExceptionCheck(env))
+		{
+			(*env)->ExceptionDescribe(env);
+			(*env)->ExceptionClear(env);
+		}
+		elog(ERROR, "Failed to find com.example.DebeziumRunner class");
+		return -1;
+	}
+
+	elog(DEBUG1, "dbz_engine_init - Class found, allocating object");
+
+	/* Allocate an instance of the DebeziumRunner class */
+	*obj = (*env)->AllocObject(env, *cls);
+	if (*obj == NULL)
+	{
+		if ((*env)->ExceptionCheck(env))
+		{
+			(*env)->ExceptionDescribe(env);
+			(*env)->ExceptionClear(env);
+		}
+		elog(ERROR, "Failed to allocate DBZ Runner object");
+		return -1;
+	}
+
+	elog(DEBUG1, "dbz_engine_init - Object allocated successfully");
+
+	return 0;
+}
+
+/*
+ * dbz_engine_get_change - Retrieve and process change events from the Debezium engine
+ *
+ * This function retrieves change events from the Debezium engine and processes them.
+ *
+ * @param jvm: Pointer to the Java VM
+ * @param env: Pointer to the JNI environment
+ * @param cls: Pointer to the DebeziumRunner class
+ * @param obj: Pointer to the DebeziumRunner object
+ *
+ * @return: 0 on success, -1 on failure
+ */
 static int
 dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
 {
 	jmethodID getChangeEvents, sizeMethod, getMethod;
 	jobject changeEventsList;
-    jint size;
-    jclass listClass;
+	jint size;
+	jclass listClass;
+	jobject event;
+	const char *eventStr;
 
-    if (!jvm)
-    {
-        elog(WARNING, "jvm not initialized");
+	/* Validate input parameters */
+	if (!jvm || !env || !cls || !obj)
+	{
+		elog(ERROR, "dbz_engine_get_change: Invalid input parameters");
 		return -1;
-    }
-
-	if (!obj)
-	{
-        elog(WARNING, "debezium runner object not initialized");
-        return -1;
 	}
 
-	if (!cls)
+	/* Get the getChangeEvents method */
+	getChangeEvents = (*env)->GetMethodID(env, *cls, "getChangeEvents", "()Ljava/util/List;");
+	if (getChangeEvents == NULL)
 	{
-        elog(WARNING, "debezium runner class not initialized");
-        return -1;
+		elog(ERROR, "Failed to find getChangeEvents method");
+		return -1;
 	}
 
-    getChangeEvents = (*env)->GetMethodID(env, *cls, "getChangeEvents", "()Ljava/util/List;");
-    if (getChangeEvents == NULL)
-    {
-        elog(WARNING, "Failed to find getChangeEvents method");
-        return -1;
-    }
+	/* Call getChangeEvents method */
+	changeEventsList = (*env)->CallObjectMethod(env, *obj, getChangeEvents);
 
-    changeEventsList = (*env)->CallObjectMethod(env, *obj, getChangeEvents);
-    if (changeEventsList == NULL)
-    {
-        return -1;
-    }
+	if ((*env)->ExceptionCheck(env))
+	{
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		elog(ERROR, "Exception occurred while calling getChangeEvents");
+		return -1;
+	}
 
-    listClass = (*env)->FindClass(env, "java/util/List");
-    if (listClass == NULL)
-    {
-        elog(WARNING, "Failed to find java list class");
-        return -1;
-    }
+	if (changeEventsList == NULL)
+	{
+		elog(WARNING, "dbz_engine_get_change: getChangeEvents returned null");
+		return -1;
+	}
 
-    sizeMethod = (*env)->GetMethodID(env, listClass, "size", "()I");
-    if (sizeMethod == NULL)
-    {
-        elog(WARNING, "Failed to find java list.size method");
-        return -1;
-    }
+	/* Get List class and methods */
+	listClass = (*env)->FindClass(env, "java/util/List");
+	if (listClass == NULL)
+	{
+		elog(ERROR, "Failed to find java list class");
+		return -1;
+	}
 
-    getMethod = (*env)->GetMethodID(env, listClass, "get", "(I)Ljava/lang/Object;");
-    if (getMethod == NULL)
-    {
-        elog(WARNING, "Failed to find java list.get method");
-        return -1;
-    }
+	sizeMethod = (*env)->GetMethodID(env, listClass, "size", "()I");
+	if (sizeMethod == NULL)
+	{
+		elog(ERROR, "Failed to find java list.size method");
+		return -1;
+	}
 
-    size = (*env)->CallIntMethod(env, changeEventsList, sizeMethod);
-    for (jint i = 0; i < size; i++)
-    {
-        jobject event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, i);
+	getMethod = (*env)->GetMethodID(env, listClass, "get", "(I)Ljava/lang/Object;");
+	if (getMethod == NULL)
+	{
+		elog(ERROR, "Failed to find java list.get method");
+		return -1;
+	}
+
+	/* Process change events */
+	size = (*env)->CallIntMethod(env, changeEventsList, sizeMethod);
+	elog(DEBUG1, "dbz_engine_get_change: Retrieved %d change events", size);
+
+	for (int i = 0; i < size; i++)
+	{
+		event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, i);
 		if (event == NULL)
 		{
-			elog(WARNING, "got a NULL DBZ Event at index %d\n", i);
+			elog(WARNING, "dbz_engine_get_change: Received NULL event at index %d", i);
 			continue;
 		}
-		else
+
+		eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
+		if (eventStr == NULL)
 		{
-			const char *eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
-        	elog(WARNING, "DBZ Event: %s\n", eventStr);
-
-        	fc_processDBZChangeEvent(eventStr);
-
-        	(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
+			elog(WARNING, "dbz_engine_get_change: Failed to get string for event at index %d", i);
+			(*env)->DeleteLocalRef(env, event);
+			continue;
 		}
-    }
-    return 0;
+
+		elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
+
+		if (fc_processDBZChangeEvent(eventStr) != 0)
+		{
+			elog(WARNING, "dbz_engine_get_change: Failed to process event at index %d", i);
+		}
+
+		(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
+		(*env)->DeleteLocalRef(env, event);
+	}
+
+	(*env)->DeleteLocalRef(env, changeEventsList);
+	(*env)->DeleteLocalRef(env, listClass);
+	return 0;
 }
 
+/*
+ * dbz_engine_start - Start the Debezium engine
+ *
+ * This function starts the Debezium engine with the provided connection information.
+ *
+ * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
+ * @param connectorType: The type of connector to start
+ *
+ * @return: 0 on success, -1 on failure
+ */
 static int
-dbz_engine_start(char * hostname, unsigned int port, char * user,
-				 char * pwd, char * db, char * table, ConnectorType connectorType)
+dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType)
 {
 	jmethodID mid;
 	jstring jHostname, jUser, jPassword, jDatabase, jTable;
+	jthrowable exception;
 
+	elog(LOG, "dbz_engine_start: Starting dbz engine %s:%d ", connInfo->hostname, connInfo->port);
 	if (!jvm)
 	{
-		elog(WARNING, "jvm not initialized");
-    	return -1;
+		elog(ERROR, "jvm not initialized");
+		return -1;
 	}
 
 	if (!env)
 	{
-		elog(WARNING, "jvm env not initialized");
-    	return -1;
-	}
-
-	mid = (*env)->GetMethodID(env, cls, "startEngine",
-			"(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
-	if (mid == NULL)
-	{
-		elog(WARNING, "Failed to find method");
+		elog(ERROR, "jvm env not initialized");
 		return -1;
 	}
 
-	jHostname = (*env)->NewStringUTF(env, hostname);
-	jUser = (*env)->NewStringUTF(env, user);
-	jPassword = (*env)->NewStringUTF(env, pwd);
-	jDatabase = (*env)->NewStringUTF(env, db);
-	jTable = (*env)->NewStringUTF(env, table);
+	/* Find the startEngine method */
+	mid = (*env)->GetMethodID(env, cls, "startEngine",
+							  "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
+	if (mid == NULL)
+	{
+		elog(ERROR, "Failed to find startEngine method");
+		return -1;
+	}
 
-	(*env)->CallVoidMethod(env, obj, mid, jHostname, port, jUser, jPassword, jDatabase, jTable, connectorType);
+	/* Create Java strings from C strings */
+	jHostname = (*env)->NewStringUTF(env, connInfo->hostname);
+	jUser = (*env)->NewStringUTF(env, connInfo->user);
+	jPassword = (*env)->NewStringUTF(env, connInfo->pwd);
+	jDatabase = (*env)->NewStringUTF(env, connInfo->src_db);
+	jTable = (*env)->NewStringUTF(env, connInfo->table);
 
-	(*env)->DeleteLocalRef(env, jHostname);
-	(*env)->DeleteLocalRef(env, jUser);
-	(*env)->DeleteLocalRef(env, jPassword);
-	(*env)->DeleteLocalRef(env, jDatabase);
-	(*env)->DeleteLocalRef(env, jTable);
-	return 0;
+	/* Call the Java method */
+	(*env)->CallVoidMethod(env, obj, mid, jHostname, connInfo->port, jUser, jPassword, jDatabase, jTable, connectorType);
+
+	/* Check for exceptions */
+	exception = (*env)->ExceptionOccurred(env);
+	if (exception)
+	{
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		elog(ERROR, "Exception occurred while starting Debezium engine");
+		goto cleanup;
+	}
+
+	elog(LOG, "Debezium engine started successfully for %s connector", connectorTypeToString(connectorType));
+
+cleanup:
+	/* Clean up local references */
+	if (jHostname)
+		(*env)->DeleteLocalRef(env, jHostname);
+	if (jUser)
+		(*env)->DeleteLocalRef(env, jUser);
+	if (jPassword)
+		(*env)->DeleteLocalRef(env, jPassword);
+	if (jDatabase)
+		(*env)->DeleteLocalRef(env, jDatabase);
+	if (jTable)
+		(*env)->DeleteLocalRef(env, jTable);
+
+	return exception ? -1 : 0;
 }
 
+/*
+ * dbz_engine_get_offset - Get the current offset from the Debezium engine
+ *
+ * This function retrieves the current offset for a specific connector type
+ * from the Debezium engine.
+ *
+ * @param connectorType: The type of connector to get the offset for
+ *
+ * @return: The offset as a string (caller must free), or NULL on failure
+ */
 static char *
 dbz_engine_get_offset(ConnectorType connectorType)
 {
 	jmethodID getoffsets;
-    jstring jdb, result;
-    char * resultStr, *db;
-    const char * tmp;
+	jstring jdb, result;
+	char *resultStr = NULL;
+	char *db = NULL;
+	const char *tmp;
+	jthrowable exception;
 
-    if (!jvm)
-    {
-        elog(WARNING, "jvm not initialized");
+	if (!jvm)
+	{
+		elog(ERROR, "jvm not initialized");
 		return NULL;
-    }
+	}
 
-    if (!env)
-    {
-        elog(WARNING, "jvm env not initialized");
+	if (!env)
+	{
+		elog(ERROR, "jvm env not initialized");
 		return NULL;
-    }
+	}
 
-    if (connectorType == TYPE_SQLSERVER)
-    {
-    	db = sdb_state->sqlserverinfo.srcdb;
-    }
+	/* Get the source database name based on connector type */
+	switch (connectorType)
+	{
+	case TYPE_SQLSERVER:
+		db = sdb_state->sqlserverinfo.srcdb;
+		break;
+	case TYPE_MYSQL:
+		db = sdb_state->mysqlinfo.srcdb;
+		break;
+	case TYPE_ORACLE:
+		db = sdb_state->oracleinfo.srcdb;
+		break;
+	default:
+		elog(ERROR, "Unsupported connector type: %d", connectorType);
+		return NULL;
+	}
+
+	if (!db)
+	{
+		elog(ERROR, "Source database name not set for connector type: %d", connectorType);
+		return NULL;
+	}
 
 	getoffsets = (*env)->GetMethodID(env, cls, "getConnectorOffset",
-			"(ILjava/lang/String;)Ljava/lang/String;");
-    if (getoffsets == NULL)
-    {
-        elog(WARNING, "Failed to find getConnectorOffset method");
-        return NULL;
-    }
+									 "(ILjava/lang/String;)Ljava/lang/String;");
+	if (getoffsets == NULL)
+	{
+		elog(WARNING, "Failed to find getConnectorOffset method");
+		return NULL;
+	}
 
 	jdb = (*env)->NewStringUTF(env, db);
 
 	result = (jstring)(*env)->CallObjectMethod(env, obj, getoffsets, (int)connectorType, jdb);
+	/* Check for exceptions */
+	exception = (*env)->ExceptionOccurred(env);
+	if (exception)
+	{
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		elog(ERROR, "Exception occurred while getting connector offset");
+		(*env)->DeleteLocalRef(env, jdb);
+		return NULL;
+	}
+
+	/* Convert Java string to C string */
 	tmp = (*env)->GetStringUTFChars(env, result, NULL);
 	if (tmp && strlen(tmp) > 0)
 		resultStr = pstrdup(tmp);
 	else
 		resultStr = pstrdup("no offset");
-	(*env)->ReleaseStringUTFChars(env, result, tmp);
 
-    return resultStr;
+	/* Clean up */
+	(*env)->ReleaseStringUTFChars(env, result, tmp);
+	(*env)->DeleteLocalRef(env, jdb);
+	(*env)->DeleteLocalRef(env, result);
+
+	elog(DEBUG1, "Retrieved offset for %s connector: %s", connectorTypeToString(connectorType), resultStr);
+
+	return resultStr;
 }
 
 /*
- * Helper function to construct whichever TupleDesc we need for a particular
- * call.
+ * synchdb_state_tupdesc - Create a TupleDesc for SynchDB state information
+ *
+ * This function constructs a TupleDesc that describes the structure of
+ * the tuple returned by SynchDB state queries. It defines the columns
+ * that will be present in the result set.
+ *
+ * Returns: A blessed TupleDesc, or NULL on failure
  */
 static TupleDesc
 synchdb_state_tupdesc(void)
 {
-	TupleDesc	tupdesc;
-	AttrNumber	attrnum = 5;
-	AttrNumber	a = 0;
+	TupleDesc tupdesc;
+	AttrNumber attrnum = 5;
+	AttrNumber a = 0;
 
 	tupdesc = CreateTemplateTupleDesc(attrnum);
 
@@ -301,14 +521,16 @@ synchdb_state_tupdesc(void)
 }
 
 /*
+ * synchdb_init_shmem - Initialize or attach to synchdb shared memory
+ *
  * Allocate and initialize synchdb related shared memory, if not already
- * done, and set up backend-local pointer to that state.  Returns true if an
- * existing shared memory segment was found.
+ * done, and set up backend-local pointer to that state.
+ *
  */
 static void
 synchdb_init_shmem(void)
 {
-	bool		found;
+	bool found;
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	sdb_state = ShmemInitStruct("synchdb",
@@ -327,13 +549,23 @@ synchdb_init_shmem(void)
 	LWLockRegisterTranche(sdb_state->lock.tranche, "synchdb");
 }
 
+/*
+ * synchdb_detach_shmem - Detach from synchdb shared memory
+ *
+ * This function is responsible for detaching a process from the synchdb shared memory.
+ * It updates the shared memory state if the current process is the one registered for
+ * the specified connector type.
+ *
+ * @param code: An integer representing the exit code or reason for detachment
+ * @param arg: A Datum containing the connector type as an unsigned integer
+ */
 static void
 synchdb_detach_shmem(int code, Datum arg)
 {
 	pid_t enginepid;
 
-	elog(WARNING, "synchdb detach shm ... connector type %d, code %d",
-			DatumGetUInt32(arg), code);
+	elog(LOG, "synchdb detach shm ... connector type %d, code %d",
+		 DatumGetUInt32(arg), code);
 
 	enginepid = get_shm_connector_pid(DatumGetUInt32(arg));
 	if (enginepid == MyProcPid)
@@ -343,45 +575,55 @@ synchdb_detach_shmem(int code, Datum arg)
 	}
 }
 
+/*
+ * prepare_bgw - Prepare a background worker for synchdb
+ *
+ * This function sets up a BackgroundWorker structure with the appropriate
+ * information based on the connector type and connection details.
+ *
+ * @param worker: Pointer to the BackgroundWorker structure to be prepared
+ * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
+ * @param connector: String representing the connector type
+ */
 static void
-prepare_bgw(BackgroundWorker * worker, char * hostname,
-			unsigned int port, char * user, char * pwd, char * src_db,
-			char * dst_db, char * table, char * connector)
+prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector)
+
 {
 	ConnectorType type = fc_get_connector_type(connector);
-	switch(type)
+
+	switch (type)
 	{
-		case TYPE_MYSQL:
-		{
-			worker->bgw_main_arg = UInt32GetDatum(TYPE_MYSQL);
-			snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: mysql@%s:%u", hostname, port);
-			strcpy(worker->bgw_type, "synchdb engine: mysql");
-			break;
-		}
-		case TYPE_ORACLE:
-		{
-			worker->bgw_main_arg = UInt32GetDatum(TYPE_ORACLE);
-			snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: oracle@%s:%u", hostname, port);
-			strcpy(worker->bgw_type, "synchdb engine: oracle");
-			break;
-		}
-		case TYPE_SQLSERVER:
-		{
-			worker->bgw_main_arg = UInt32GetDatum(TYPE_SQLSERVER);
-			snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: sqlserver@%s:%u", hostname, port);
-			strcpy(worker->bgw_type, "synchdb engine: sqlserver");
-			break;
-		}
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			elog(ERROR, "unsupported connector type");
-			break;
-		}
+	case TYPE_MYSQL:
+	{
+		worker->bgw_main_arg = UInt32GetDatum(TYPE_MYSQL);
+		snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: mysql@%s:%u", connInfo->hostname, connInfo->port);
+		strcpy(worker->bgw_type, "synchdb engine: mysql");
+		break;
+	}
+	case TYPE_ORACLE:
+	{
+		worker->bgw_main_arg = UInt32GetDatum(TYPE_ORACLE);
+		snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: oracle@%s:%u", connInfo->hostname, connInfo->port);
+		strcpy(worker->bgw_type, "synchdb engine: oracle");
+		break;
+	}
+	case TYPE_SQLSERVER:
+	{
+		worker->bgw_main_arg = UInt32GetDatum(TYPE_SQLSERVER);
+		snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: sqlserver@%s:%u", connInfo->hostname, connInfo->port);
+		strcpy(worker->bgw_type, "synchdb engine: sqlserver");
+		break;
+	}
+	/* todo: support more dbz connector types here */
+	default:
+	{
+		elog(ERROR, "unsupported connector type");
+		break;
+	}
 	}
 	/* append destination database to worker->bgw_name for clarity */
 	strcat(worker->bgw_name, " -> ");
-	strcat(worker->bgw_name, dst_db);
+	strcat(worker->bgw_name, connInfo->dst_db);
 
 	/*
 	 * Format the extra args into the bgw_extra field
@@ -390,78 +632,109 @@ prepare_bgw(BackgroundWorker * worker, char * hostname,
 	 * pass these args to background worker?
 	 */
 	snprintf(worker->bgw_extra, BGW_EXTRALEN, "%s:%u:%s:%s:%s:%s:%s",
-			hostname, port, user, pwd, src_db, dst_db, table);
+			 connInfo->hostname, connInfo->port, connInfo->user, connInfo->pwd,
+			 connInfo->src_db, connInfo->dst_db, connInfo->table);
 }
+
 /*
- * SynchdbWorkerStateAsString
+ * connectorStateAsString - Convert ConnectorState to string representation
  */
 static const char *
 connectorStateAsString(ConnectorState state)
 {
 	switch (state)
 	{
-		case STATE_UNDEF:
-		case STATE_STOPPED:
-			return "stopped";
-		case STATE_INITIALIZING:
-			return "initializing";
-		case STATE_PAUSED:
-			return "paused";
-		case STATE_SYNCING:
-			return "syncing";
-		case STATE_PARSING:
-			return "parsing";
-		case STATE_CONVERTING:
-			return "converting";
-		case STATE_EXECUTING:
-			return "executing";
-		case STATE_OFFSET_UPDATE:
-			return "updating offset";
+	case STATE_UNDEF:
+	case STATE_STOPPED:
+		return "stopped";
+	case STATE_INITIALIZING:
+		return "initializing";
+	case STATE_PAUSED:
+		return "paused";
+	case STATE_SYNCING:
+		return "syncing";
+	case STATE_PARSING:
+		return "parsing";
+	case STATE_CONVERTING:
+		return "converting";
+	case STATE_EXECUTING:
+		return "executing";
+	case STATE_OFFSET_UPDATE:
+		return "updating offset";
 	}
 	return "UNKNOWN";
 }
 
+/*
+ * reset_shm_request_state - Reset the shared memory request state for a connector
+ *
+ * This function resets the request state and clears the request data for a
+ * specific connector type in shared memory.
+ *
+ * @param type: The type of connector whose request state should be reset
+ */
 static void
 reset_shm_request_state(ConnectorType type)
 {
 	if (!sdb_state)
+	{
+		elog(WARNING, "Shared memory state is not initialized");
 		return;
+	}
+
+	elog(DEBUG1, "Reset request state for %s connector", connectorTypeToString(type));
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	switch(type)
+
+	switch (type)
 	{
-		case TYPE_MYSQL:
-		{
-			sdb_state->mysqlinfo.req.reqstate = STATE_UNDEF;
-			memset(sdb_state->mysqlinfo.req.reqdata, 0, SYNCHDB_ERRMSG_SIZE);
-			break;
-		}
-		case TYPE_ORACLE:
-		{
-			sdb_state->oracleinfo.req.reqstate = STATE_UNDEF;
-			memset(sdb_state->oracleinfo.req.reqdata, 0, SYNCHDB_ERRMSG_SIZE);
-			break;
-		}
-		case TYPE_SQLSERVER:
-		{
-			sdb_state->sqlserverinfo.req.reqstate = STATE_UNDEF;
-			memset(sdb_state->sqlserverinfo.req.reqdata, 0, SYNCHDB_ERRMSG_SIZE);
-			break;
-		}
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			break;
-		}
+	case TYPE_MYSQL:
+	{
+		sdb_state->mysqlinfo.req.reqstate = STATE_UNDEF;
+		memset(sdb_state->mysqlinfo.req.reqdata, 0, SYNCHDB_ERRMSG_SIZE);
+		break;
+	}
+	case TYPE_ORACLE:
+	{
+		sdb_state->oracleinfo.req.reqstate = STATE_UNDEF;
+		memset(sdb_state->oracleinfo.req.reqdata, 0, SYNCHDB_ERRMSG_SIZE);
+		break;
+	}
+	case TYPE_SQLSERVER:
+	{
+		sdb_state->sqlserverinfo.req.reqstate = STATE_UNDEF;
+		memset(sdb_state->sqlserverinfo.req.reqdata, 0, SYNCHDB_ERRMSG_SIZE);
+		break;
+	}
+	/* todo: support more dbz connector types here */
+	default:
+	{
+		elog(WARNING, "Unsupported connector type: %d", type);
+		break;
+	}
 	}
 	LWLockRelease(&sdb_state->lock);
 }
 
+/*
+ * dbz_engine_set_offset - Set the offset for the Debezium engine
+ *
+ * This function interacts with the Java VM to set the offset for a specific
+ * Debezium connector.
+ *
+ * @param connectorType: The type of connector
+ * @param db: The database name
+ * @param offset: The offset to set
+ * @param file: The file to store the offset
+ *
+ * @return: 0 on success, -1 on failure
+ */
 static int
-dbz_engine_set_offset(ConnectorType connectorType, char * db, char * offset, char * file)
+dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file)
 {
 	jmethodID setoffsets;
 	jstring joffsetstr, jdb, jfile;
+	jthrowable exception;
 
 	if (!jvm)
 	{
@@ -475,66 +748,90 @@ dbz_engine_set_offset(ConnectorType connectorType, char * db, char * offset, cha
 		return -1;
 	}
 
+	/* Find the setConnectorOffset method */
 	setoffsets = (*env)->GetMethodID(env, cls, "setConnectorOffset",
-			"(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
+									 "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
 	if (setoffsets == NULL)
 	{
-		elog(WARNING, "Failed to find setConnectorOffset method");
+		elog(ERROR, "Failed to find setConnectorOffset method");
 		return -1;
 	}
 
+	/* Create Java strings from C strings */
 	joffsetstr = (*env)->NewStringUTF(env, offset);
 	jdb = (*env)->NewStringUTF(env, db);
 	jfile = (*env)->NewStringUTF(env, file);
 
+	/* Call the Java method */
 	(*env)->CallVoidMethod(env, obj, setoffsets, jfile, (int)connectorType, jdb, joffsetstr);
 
+	/* Check for exceptions */
+	exception = (*env)->ExceptionOccurred(env);
+	if (exception)
+	{
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		elog(ERROR, "Exception occurred while setting connector offset");
+		return -1;
+	}
+
+	/* Clean up local references */
 	(*env)->DeleteLocalRef(env, joffsetstr);
 	(*env)->DeleteLocalRef(env, jdb);
 	(*env)->DeleteLocalRef(env, jfile);
+
+	elog(LOG, "Successfully set offset for connector type %d", connectorType);
 	return 0;
 }
 
+/**
+ * processRequestInterrupt - Handles state transition requests for SynchDB connectors
+ *
+ * This function processes requests to change the state of a SynchDB connector,
+ * such as pausing, resuming, or updating offsets.
+ *
+ * @param connInfo: Pointer to the connection information
+ * @param type: The type of connector being processed
+ */
 static void
-processRequestInterrupt(char * hostname, unsigned int port, char * user,
-		 char * pwd, char * db, char * table, ConnectorType type)
+processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type)
 {
-	SynchdbRequest * req, *reqcopy;
-	ConnectorState * currstate, *currstatecopy;
-	char * srcdb, * offsetfile;
+	SynchdbRequest *req, *reqcopy;
+	ConnectorState *currstate, *currstatecopy;
+	char *srcdb, *offsetfile;
 	int ret;
 
 	if (!sdb_state)
 		return;
 
-	/* point to the right construct based on type */
-	switch(type)
+	/* Select the appropriate state information based on connector type */
+	switch (type)
 	{
-		case TYPE_MYSQL:
-			req = &(sdb_state->mysqlinfo.req);
-			currstate = &(sdb_state->mysqlinfo.state);
-			srcdb = sdb_state->mysqlinfo.srcdb;
-			offsetfile = SYNCHDB_MYSQL_OFFSET_FILE;
-			break;
-		case TYPE_ORACLE:
-			req = &(sdb_state->oracleinfo.req);
-			currstate = &(sdb_state->oracleinfo.state);
-			srcdb = sdb_state->oracleinfo.srcdb;
-			offsetfile = SYNCHDB_ORACLE_OFFSET_FILE;
-			break;
-		case TYPE_SQLSERVER:
-			req = &(sdb_state->sqlserverinfo.req);
-			currstate = &(sdb_state->sqlserverinfo.state);
-			srcdb = sdb_state->sqlserverinfo.srcdb;
-			offsetfile = SYNCHDB_SQLSERVER_OFFSET_FILE;
-			break;
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			set_shm_connector_errmsg(type, "unsupported connector type");
-			elog(ERROR, "unsupported connector type");
-			break;
-		}
+	case TYPE_MYSQL:
+		req = &(sdb_state->mysqlinfo.req);
+		currstate = &(sdb_state->mysqlinfo.state);
+		srcdb = sdb_state->mysqlinfo.srcdb;
+		offsetfile = SYNCHDB_MYSQL_OFFSET_FILE;
+		break;
+	case TYPE_ORACLE:
+		req = &(sdb_state->oracleinfo.req);
+		currstate = &(sdb_state->oracleinfo.state);
+		srcdb = sdb_state->oracleinfo.srcdb;
+		offsetfile = SYNCHDB_ORACLE_OFFSET_FILE;
+		break;
+	case TYPE_SQLSERVER:
+		req = &(sdb_state->sqlserverinfo.req);
+		currstate = &(sdb_state->sqlserverinfo.state);
+		srcdb = sdb_state->sqlserverinfo.srcdb;
+		offsetfile = SYNCHDB_SQLSERVER_OFFSET_FILE;
+		break;
+	/* todo: support more dbz connector types here */
+	default:
+	{
+		set_shm_connector_errmsg(type, "unsupported connector type");
+		elog(ERROR, "unsupported connector type");
+		break;
+	}
 	}
 
 	/*
@@ -549,6 +846,7 @@ processRequestInterrupt(char * hostname, unsigned int port, char * user,
 	memcpy(currstatecopy, currstate, sizeof(ConnectorState));
 	LWLockRelease(&sdb_state->lock);
 
+	/* Process the request based on current and requested states */
 	if (reqcopy->reqstate == STATE_UNDEF)
 	{
 		/* no requests, do nothing */
@@ -556,11 +854,11 @@ processRequestInterrupt(char * hostname, unsigned int port, char * user,
 	else if (reqcopy->reqstate == STATE_PAUSED && *currstatecopy == STATE_SYNCING)
 	{
 		/* we can only transition to STATE_PAUSED from STATE_SYNCING */
-		elog(WARNING, "request to transition to state: '%s' from current state: '%s'",
-				connectorStateAsString(reqcopy->reqstate),
-				connectorStateAsString(*currstatecopy));
+		elog(LOG, "Pausing %s connector. Current state: %s, Requested state: %s",
+			 connectorTypeToString(type),
+			 connectorStateAsString(*currstatecopy),
+			 connectorStateAsString(reqcopy->reqstate));
 
-		/* shutdown dbz engine */
 		elog(WARNING, "shut down dbz engine...");
 		ret = dbz_engine_stop();
 		if (ret)
@@ -575,15 +873,16 @@ processRequestInterrupt(char * hostname, unsigned int port, char * user,
 	}
 	else if (reqcopy->reqstate == STATE_SYNCING && *currstatecopy == STATE_PAUSED)
 	{
-		/* we can only transition to STATE_SYNCING from STATE_PAUSED */
-		elog(WARNING, "request to transition to state: '%s' from current state: '%s'",
-				connectorStateAsString(reqcopy->reqstate),
-				connectorStateAsString(*currstatecopy));
+		/* Handle resume request, we can only transition to STATE_SYNCING from STATE_PAUSED */
+		elog(LOG, "Resuming %s connector. Current state: %s, Requested state: %s",
+			 connectorTypeToString(type),
+			 connectorStateAsString(*currstatecopy),
+			 connectorStateAsString(reqcopy->reqstate));
 
 		/* restart dbz engine */
 		elog(WARNING, "restart dbz engine...");
 
-		ret = dbz_engine_start(hostname, port, user, pwd, db, table, type);
+		ret = dbz_engine_start(connInfo, type);
 		if (ret < 0)
 		{
 			elog(WARNING, "Failed to restart dbz engine");
@@ -596,18 +895,17 @@ processRequestInterrupt(char * hostname, unsigned int port, char * user,
 	}
 	else if (reqcopy->reqstate == STATE_OFFSET_UPDATE && *currstatecopy == STATE_PAUSED)
 	{
-		/* we can only update offset when dbz engine is paused */
-		elog(WARNING, "request to transition to state: '%s' from current state: '%s'",
-				connectorStateAsString(reqcopy->reqstate),
-				connectorStateAsString(*currstatecopy));
+		/* Handle offset update request */
+		elog(LOG, "Updating offset for %s connector. Current state: %s, Requested state: %s",
+			 connectorTypeToString(type),
+			 connectorStateAsString(*currstatecopy),
+			 connectorStateAsString(reqcopy->reqstate));
 
-		/* set current state to STATE_OFFSET_UPDATE as requested */
 		set_shm_connector_state(type, STATE_OFFSET_UPDATE);
-
 		ret = dbz_engine_set_offset(type, srcdb, reqcopy->reqdata, offsetfile);
 		if (ret < 0)
 		{
-			elog(WARNING, "Failed to set offset to dbz engine");
+			elog(WARNING, "Failed to set offset for %s connector", connectorTypeToString(type));
 			reset_shm_request_state(type);
 			set_shm_connector_state(type, STATE_PAUSED);
 			pfree(reqcopy);
@@ -621,9 +919,10 @@ processRequestInterrupt(char * hostname, unsigned int port, char * user,
 	else
 	{
 		/* unsupported request state combinations */
-		elog(WARNING, "No action performed: request state: %s, current state: %s",
-				connectorStateAsString(reqcopy->reqstate),
-				connectorStateAsString(*currstatecopy));
+		elog(WARNING, "Invalid state transition requested for %s connector. Current state: %s, Requested state: %s",
+			 connectorTypeToString(type),
+			 connectorStateAsString(*currstatecopy),
+			 connectorStateAsString(reqcopy->reqstate));
 	}
 
 	/* reset request state so we can receive more requests to process */
@@ -632,120 +931,363 @@ processRequestInterrupt(char * hostname, unsigned int port, char * user,
 	pfree(currstatecopy);
 }
 
+/**
+ * parse_arguments - Parses and validates arguments for the SynchDB engine
+ *
+ * This function extracts connection information from the background worker's
+ * extra data and validates the required fields.
+ *
+ * @param main_arg: The main argument containing the connector type
+ * @param connectorType: Pointer to store the parsed connector type
+ * @param connInfo: Pointer to store the parsed connection information
+ * @return: true if parsing is successful, false otherwise
+ */
+static bool parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo)
+{
+	char *args, *tmp;
+
+	/* Extract connector type from main argument */
+	*connectorType = DatumGetUInt32(main_arg);
+
+	/* Copy and parse the extra arguments */
+	args = pstrdup(MyBgworkerEntry->bgw_extra);
+
+	/* Parse individual fields */
+	tmp = strtok(args, ":");
+	if (tmp)
+		connInfo->hostname = pstrdup(tmp);
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		connInfo->port = atoi(tmp);
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		connInfo->user = pstrdup(tmp);
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		connInfo->pwd = pstrdup(tmp);
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		connInfo->src_db = pstrdup(tmp);
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		connInfo->dst_db = pstrdup(tmp);
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		connInfo->table = pstrdup(tmp);
+
+	pfree(args);
+
+	/* Validate required fields */
+	if (!connInfo->hostname || !connInfo->user || !connInfo->pwd || !connInfo->dst_db)
+	{
+		elog(ERROR, "Missing required arguments for SynchDB engine initialization");
+		return false;
+	}
+
+	/* Log parsed arguments (TODO: consider removing or obfuscating sensitive data in production) */
+	elog(LOG, "SynchDB engine initialized with: host %s, port %u, user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s)",
+		 connInfo->hostname, connInfo->port, connInfo->user,
+		 connInfo->src_db ? connInfo->src_db : "N/A",
+		 connInfo->dst_db,
+		 connInfo->table ? connInfo->table : "N/A",
+		 *connectorType, connectorTypeToString(*connectorType));
+
+	return true;
+}
+
+/**
+ * setup_environment - Prepares the environment for the SynchDB background worker
+ *
+ * This function sets up signal handlers, initializes the database connection,
+ * sets up shared memory, and checks for existing worker processes.
+ *
+ * @param connectorType: The type of connector being set up
+ * @param dst_db: The name of the destination database to connect to
+ * @return: true if setup is successful, false if worker is already running
+ */
+static bool setup_environment(ConnectorType connectorType, const char *dst_db)
+{
+	pid_t enginepid;
+
+	/* Establish signal handlers */
+	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
+	pqsignal(SIGHUP, SignalHandlerForConfigReload);
+	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
+
+	/* Unblock signals to allow handling */
+	BackgroundWorkerUnblockSignals();
+
+	/* Connect to current database: NULL user - bootstrap superuser is used */
+	BackgroundWorkerInitializeConnection(dst_db, NULL, 0);
+
+	/* Initialize or attach to SynchDB shared memory */
+	synchdb_init_shmem();
+
+	/* Set up cleanup handler for shared memory */
+	on_shmem_exit(synchdb_detach_shmem, UInt32GetDatum(connectorType));
+
+	/* Check if the worker is already running */
+	enginepid = get_shm_connector_pid(connectorType);
+	if (enginepid != InvalidPid)
+	{
+		ereport(LOG,
+				(errmsg("synchdb %s worker (%u) is already running under PID %d",
+						connectorTypeToString(connectorType),
+						connectorType,
+						(int)enginepid)));
+		return false;
+	}
+
+	/* Register this process as the worker for this connector type */
+	set_shm_connector_pid(connectorType, MyProcPid);
+
+	elog(LOG, "Environment setup completed for SynchDB %s worker (type %u)",
+		 connectorTypeToString(connectorType), connectorType);
+	return true;
+}
+
+/**
+ * initialize_jvm - Initialize the Java Virtual Machine and Debezium engine
+ *
+ * This function sets up the Java environment, locates the Debezium engine JAR file,
+ * creates a Java VM, and initializes the Debezium engine.
+ *
+ * @param connectorType: The type of connector being initialized
+ * @return: true if initialization is successful, false otherwise
+ */
+static bool initialize_jvm(ConnectorType connectorType)
+{
+	JavaVMInitArgs vm_args;
+	JavaVMOption options[2];
+	char javaopt[MAX_JAVA_OPTION_LENGTH] = {0};
+	char jar_path[MAX_PATH_LENGTH] = {0};
+	const char *dbzpath = getenv("DBZ_ENGINE_DIR");
+	int ret;
+
+	/* Determine the path to the Debezium engine JAR file */
+	if (dbzpath)
+	{
+		snprintf(jar_path, sizeof(jar_path), "%s/%s", dbzpath, DBZ_ENGINE_JAR_FILE);
+	}
+	else
+	{
+		snprintf(jar_path, sizeof(jar_path), "%s/dbz_engine/%s", pkglib_path, DBZ_ENGINE_JAR_FILE);
+	}
+
+	/* Check if the JAR file exists */
+	if (access(jar_path, F_OK) == -1)
+	{
+		elog(ERROR, "Cannot find DBZ engine jar file at %s", jar_path);
+		set_shm_connector_errmsg(connectorType, "Cannot find DBZ engine jar file");
+		return false;
+	}
+
+	/* Set up Java classpath */
+	snprintf(javaopt, sizeof(javaopt), "-Djava.class.path=%s", jar_path);
+	elog(INFO, "Initializing DBZ engine with JAR file: %s", jar_path);
+
+	/* Configure JVM options */
+	options[0].optionString = javaopt;
+	options[1].optionString = "-Xrs"; // Reduce use of OS signals by JVM
+	vm_args.version = JNI_VERSION_21;
+	vm_args.nOptions = 2;
+	vm_args.options = options;
+	vm_args.ignoreUnrecognized = JNI_FALSE;
+
+	/* Create the Java VM */
+	ret = JNI_CreateJavaVM(&jvm, (void **)&env, &vm_args);
+	if (ret < 0 || !env)
+	{
+		elog(ERROR, "Failed to create Java VM (return code: %d)", ret);
+		set_shm_connector_errmsg(connectorType, "Unable to Launch JVM");
+		return false;
+	}
+
+	elog(INFO, "Java VM created successfully");
+
+	/* Initialize the Debezium engine */
+	ret = dbz_engine_init(env, &cls, &obj);
+	if (ret < 0)
+	{
+		elog(ERROR, "Failed to initialize Debezium engine");
+		set_shm_connector_errmsg(connectorType, "Failed to initialize Debezium engine");
+		return false;
+	}
+
+	elog(INFO, "Debezium engine initialized successfully");
+	return true;
+}
+
+/**
+ * start_debezium_engine - Starts the Debezium engine for a given connector
+ *
+ * This function initiates the Debezium engine using the provided connection
+ * information and sets the connector state to SYNCING upon successful start.
+ *
+ * @param connectorType: The type of connector being started
+ * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
+ * @return: true if the engine starts successfully, false otherwise
+ */
+static bool start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo)
+{
+	int ret = dbz_engine_start(connInfo, connectorType);
+	if (ret < 0)
+	{
+		elog(ERROR, "Failed to start Debezium engine for connector type %d", connectorType);
+		set_shm_connector_errmsg(connectorType, "Failed to start dbz engine");
+		return false;
+	}
+
+	set_shm_connector_state(connectorType, STATE_SYNCING);
+
+	elog(LOG, "Debezium engine started successfully for %s:%d (connector type %d)",
+		 connInfo->hostname, connInfo->port, connectorType);
+	return true;
+}
+
+static void main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo)
+{
+	ConnectorState currstate;
+	elog(LOG, "Main LOOP ENTER ");
+	while (!ShutdownRequestPending)
+	{
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
+
+		processRequestInterrupt(connInfo, connectorType);
+
+		currstate = get_shm_connector_state_enum(connectorType);
+		switch (currstate)
+		{
+		case STATE_SYNCING:
+			dbz_engine_get_change(jvm, env, &cls, &obj);
+			break;
+		case STATE_PAUSED:
+			/* Do nothing when paused */
+			break;
+		default:
+			/* Handle other states if necessary */
+			break;
+		}
+
+		(void)WaitLatch(MyLatch,
+						WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						synchdb_worker_naptime * 1000,
+						PG_WAIT_EXTENSION);
+
+		ResetLatch(MyLatch);
+	}
+	elog(LOG, "Main LOOP QUIT ");
+}
+
+static void cleanup(ConnectorType connectorType)
+{
+	int ret;
+
+	elog(WARNING, "synchdb_engine_main shutting down");
+
+	ret = dbz_engine_stop();
+	if (ret)
+	{
+		elog(WARNING, "Failed to call dbz engine stop method");
+	}
+
+	if (jvm != NULL)
+	{
+		(*jvm)->DestroyJavaVM(jvm);
+		jvm = NULL;
+		env = NULL;
+	}
+}
+
 /* public functions to access / change synchdb parameters in shared memory */
 const char *
 get_shm_connector_name(ConnectorType type)
 {
-	switch(type)
+	switch (type)
 	{
-		case TYPE_MYSQL:
-			return "mysql";
-		case TYPE_ORACLE:
-			return "oracle";
-		case TYPE_SQLSERVER:
-			return "sqlserver";
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			break;
-		}
+	case TYPE_MYSQL:
+		return "mysql";
+	case TYPE_ORACLE:
+		return "oracle";
+	case TYPE_SQLSERVER:
+		return "sqlserver";
+	/* todo: support more dbz connector types here */
+	default:
+		return "null";
 	}
-	return "null";
 }
 
-pid_t
-get_shm_connector_pid(ConnectorType type)
+pid_t get_shm_connector_pid(ConnectorType type)
 {
 	if (!sdb_state)
 		return InvalidPid;
 
-	switch(type)
+	switch (type)
 	{
-		case TYPE_MYSQL:
-		{
-			return sdb_state->mysqlinfo.pid;
-		}
-		case TYPE_ORACLE:
-		{
-			return sdb_state->oracleinfo.pid;
-		}
-		case TYPE_SQLSERVER:
-		{
-			return sdb_state->sqlserverinfo.pid;
-		}
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			return InvalidPid;
-		}
+	case TYPE_MYSQL:
+		return sdb_state->mysqlinfo.pid;
+	case TYPE_ORACLE:
+		return sdb_state->oracleinfo.pid;
+	case TYPE_SQLSERVER:
+		return sdb_state->sqlserverinfo.pid;
+	/* todo: support more dbz connector types here */
+	default:
+		return InvalidPid;
 	}
 }
 
-void
-set_shm_connector_pid(ConnectorType type, pid_t pid)
+void set_shm_connector_pid(ConnectorType type, pid_t pid)
 {
 	if (!sdb_state)
 		return;
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	switch(type)
+	switch (type)
 	{
-		case TYPE_MYSQL:
-		{
-			sdb_state->mysqlinfo.pid = pid;
-			break;
-		}
-		case TYPE_ORACLE:
-		{
-			sdb_state->oracleinfo.pid = pid;
-			break;
-		}
-		case TYPE_SQLSERVER:
-		{
-			sdb_state->sqlserverinfo.pid = pid;
-			break;
-		}
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			break;
-		}
+	case TYPE_MYSQL:
+		sdb_state->mysqlinfo.pid = pid;
+		break;
+	case TYPE_ORACLE:
+		sdb_state->oracleinfo.pid = pid;
+		break;
+	case TYPE_SQLSERVER:
+		sdb_state->sqlserverinfo.pid = pid;
+		break;
+	/* todo: support more dbz connector types here */
+	default:
+		break;
 	}
 	LWLockRelease(&sdb_state->lock);
 }
 
-void
-set_shm_connector_dbs(ConnectorType type, char * srcdb, char * dstdb)
+void set_shm_connector_dbs(ConnectorType type, char *srcdb, char *dstdb)
 {
 	if (!sdb_state)
 		return;
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	switch(type)
+	switch (type)
 	{
-		case TYPE_MYSQL:
-		{
-			snprintf(sdb_state->mysqlinfo.srcdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", srcdb);
-			snprintf(sdb_state->mysqlinfo.dstdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", dstdb);
-			break;
-		}
-		case TYPE_ORACLE:
-		{
-			snprintf(sdb_state->oracleinfo.srcdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", srcdb);
-			snprintf(sdb_state->oracleinfo.dstdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", dstdb);
-			break;
-		}
-		case TYPE_SQLSERVER:
-		{
-			snprintf(sdb_state->sqlserverinfo.srcdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", srcdb);
-			snprintf(sdb_state->sqlserverinfo.dstdb, SYNCHDB_MAX_DB_NAME_SIZE, "%s", dstdb);
-			break;
-		}
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			break;
-		}
+	case TYPE_MYSQL:
+		strlcpy(sdb_state->mysqlinfo.srcdb, srcdb, SYNCHDB_MAX_DB_NAME_SIZE);
+		strlcpy(sdb_state->mysqlinfo.dstdb, dstdb, SYNCHDB_MAX_DB_NAME_SIZE);
+		break;
+	case TYPE_ORACLE:
+		strlcpy(sdb_state->oracleinfo.srcdb, srcdb, SYNCHDB_MAX_DB_NAME_SIZE);
+		strlcpy(sdb_state->oracleinfo.dstdb, dstdb, SYNCHDB_MAX_DB_NAME_SIZE);
+		break;
+	case TYPE_SQLSERVER:
+		strlcpy(sdb_state->sqlserverinfo.srcdb, srcdb, SYNCHDB_MAX_DB_NAME_SIZE);
+		strlcpy(sdb_state->sqlserverinfo.dstdb, dstdb, SYNCHDB_MAX_DB_NAME_SIZE);
+		break;
+	/* todo: support more dbz connector types here */
+	default:
+		/* Do nothing for unknown types */
+		break;
 	}
 	LWLockRelease(&sdb_state->lock);
 }
@@ -756,156 +1298,202 @@ get_shm_connector_errmsg(ConnectorType type)
 	if (!sdb_state)
 		return "no error";
 
-	switch(type)
+	switch (type)
 	{
-		case TYPE_MYSQL:
-			return (strlen(sdb_state->mysqlinfo.errmsg) > 0 ?
-					sdb_state->mysqlinfo.errmsg : "no error");
-		case TYPE_ORACLE:
-			return (strlen(sdb_state->oracleinfo.errmsg) > 0 ?
-					sdb_state->oracleinfo.errmsg : "no error");
-		case TYPE_SQLSERVER:
-			return (strlen(sdb_state->sqlserverinfo.errmsg) > 0 ?
-					sdb_state->sqlserverinfo.errmsg : "no error");
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			break;
-		}
+	case TYPE_MYSQL:
+		return (sdb_state->mysqlinfo.errmsg[0] != '\0') ? sdb_state->mysqlinfo.errmsg : "no error";
+	case TYPE_ORACLE:
+		return (sdb_state->oracleinfo.errmsg[0] != '\0') ? sdb_state->oracleinfo.errmsg : "no error";
+	case TYPE_SQLSERVER:
+		return (sdb_state->sqlserverinfo.errmsg[0] != '\0') ? sdb_state->sqlserverinfo.errmsg : "no error";
+	/* todo: support more dbz connector types here */
+	default:
+		return "invalid connector type";
 	}
-	return "invalid connector type";
 }
 
-void
-set_shm_connector_errmsg(ConnectorType type, char * err)
+/*
+ * set_shm_connector_errmsg - Set the error message for a specific connector in shared memory
+ *
+ * This function sets the error message for a given connector type in the shared
+ * memory state. It ensures thread-safety by using a lock when accessing shared memory.
+ *
+ * @param type: The type of connector for which to set the error message
+ * @param err: The error message to set. If NULL, an empty string will be set.
+ */
+void set_shm_connector_errmsg(ConnectorType type, const char *err)
 {
 	if (!sdb_state)
+	{
+		elog(WARNING, "Shared memory state is not initialized");
 		return;
+	}
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	switch(type)
+
+	switch (type)
 	{
-		case TYPE_MYSQL:
-		{
-			if (!err)
-			{
-				memset(sdb_state->mysqlinfo.errmsg, 0, sizeof(sdb_state->mysqlinfo.errmsg));
-				break;
-			}
-			memset(sdb_state->mysqlinfo.errmsg, 0, sizeof(sdb_state->mysqlinfo.errmsg));
-			snprintf(sdb_state->mysqlinfo.errmsg,
-					sizeof(sdb_state->mysqlinfo.errmsg),
-					"%s", err);
-			break;
-		}
-		case TYPE_ORACLE:
-		{
-			if (!err)
-			{
-				memset(sdb_state->oracleinfo.errmsg, 0, sizeof(sdb_state->oracleinfo.errmsg));
-				break;
-			}
-			memset(sdb_state->oracleinfo.errmsg, 0, sizeof(sdb_state->oracleinfo.errmsg));
-			snprintf(sdb_state->oracleinfo.errmsg,
-					sizeof(sdb_state->oracleinfo.errmsg),
-					"%s", err);
-			break;
-		}
-		case TYPE_SQLSERVER:
-		{
-			if (!err)
-			{
-				memset(sdb_state->sqlserverinfo.errmsg, 0, sizeof(sdb_state->sqlserverinfo.errmsg));
-				break;
-			}
-			memset(sdb_state->sqlserverinfo.errmsg, 0, sizeof(sdb_state->sqlserverinfo.errmsg));
-			snprintf(sdb_state->sqlserverinfo.errmsg,
-					sizeof(sdb_state->sqlserverinfo.errmsg),
-					"%s", err);
-			break;
-		}
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			break;
-		}
+	case TYPE_MYSQL:
+		strlcpy(sdb_state->mysqlinfo.errmsg, err ? err : "", SYNCHDB_ERRMSG_SIZE);
+		break;
+	case TYPE_ORACLE:
+		strlcpy(sdb_state->oracleinfo.errmsg, err ? err : "", SYNCHDB_ERRMSG_SIZE);
+		break;
+	case TYPE_SQLSERVER:
+		strlcpy(sdb_state->sqlserverinfo.errmsg, err ? err : "", SYNCHDB_ERRMSG_SIZE);
+		break;
+	/* todo: support more dbz connector types here */
+	default:
+		elog(WARNING, "Unsupported connector type: %d", type);
+		break;
 	}
+
 	LWLockRelease(&sdb_state->lock);
 }
 
+/*
+ * get_shm_connector_state - Get the current state of a specific connector from shared memory
+ *
+ * This function retrieves the current state of a given connector type from the shared
+ * memory state. It returns the state as a string representation.
+ *
+ * @param type: The type of connector for which to get the state
+ *
+ * @return: A string representation of the connector's state. If the shared memory
+ *          is not initialized or the connector type is unknown, it returns "stopped"
+ *          or "undefined" respectively.
+ */
 const char *
 get_shm_connector_state(ConnectorType type)
 {
-	if (!sdb_state)
-		return "stopped";
+	ConnectorState state;
 
-	switch(type)
+	if (!sdb_state)
 	{
-		case TYPE_MYSQL:
-			return (connectorStateAsString(sdb_state->mysqlinfo.state));
-		case TYPE_ORACLE:
-			return (connectorStateAsString(sdb_state->oracleinfo.state));
-		case TYPE_SQLSERVER:
-			return (connectorStateAsString(sdb_state->sqlserverinfo.state));
-		/* todo: support more dbz connector types here */
-		default:
-			break;
+		elog(WARNING, "Shared memory state is not initialized");
+		return "stopped";
 	}
-	return connectorStateAsString(STATE_UNDEF);
+
+	/*
+	 * We're only reading, so shared lock is sufficient.
+	 * This ensures thread-safety without blocking other readers.
+	 */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+
+	switch (type)
+	{
+	case TYPE_MYSQL:
+		state = sdb_state->mysqlinfo.state;
+		break;
+	case TYPE_ORACLE:
+		state = sdb_state->oracleinfo.state;
+		break;
+	case TYPE_SQLSERVER:
+		state = sdb_state->sqlserverinfo.state;
+		break;
+	/* todo: support more dbz connector types here */
+	default:
+		elog(WARNING, "Unsupported connector type: %d", type);
+		state = STATE_UNDEF;
+		break;
+	}
+
+	LWLockRelease(&sdb_state->lock);
+
+	return connectorStateAsString(state);
 }
 
+/*
+ * get_shm_connector_state_enum - Get the current state enum of a specific connector from shared memory
+ *
+ * This function retrieves the current state of a given connector type from the shared
+ * memory state as a ConnectorState enum value.
+ *
+ * @param type: The type of connector for which to get the state
+ *
+ * @return: A ConnectorState enum representing the connector's state. If the shared memory
+ *          is not initialized or the connector type is unknown, it returns STATE_UNDEF.
+ */
 ConnectorState
 get_shm_connector_state_enum(ConnectorType type)
 {
-	if (!sdb_state)
-		return STATE_UNDEF;
+	ConnectorState state;
 
-	switch(type)
+	if (!sdb_state)
 	{
-		case TYPE_MYSQL:
-			return (sdb_state->mysqlinfo.state);
-		case TYPE_ORACLE:
-			return (sdb_state->oracleinfo.state);
-		case TYPE_SQLSERVER:
-			return (sdb_state->sqlserverinfo.state);
-		/* todo: support more dbz connector types here */
-		default:
-			break;
+		elog(WARNING, "Shared memory state is not initialized");
+		return STATE_UNDEF;
 	}
-	return STATE_UNDEF;
+
+	/*
+	 * We're only reading, so shared lock is sufficient.
+	 * This ensures thread-safety without blocking other readers.
+	 */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+
+	switch (type)
+	{
+	case TYPE_MYSQL:
+		state = sdb_state->mysqlinfo.state;
+		break;
+	case TYPE_ORACLE:
+		state = sdb_state->oracleinfo.state;
+		break;
+	case TYPE_SQLSERVER:
+		state = sdb_state->sqlserverinfo.state;
+		break;
+	/* todo: support more dbz connector types here */
+	default:
+		elog(WARNING, "Unsupported connector type: %d", type);
+		state = STATE_UNDEF;
+		break;
+	}
+
+	LWLockRelease(&sdb_state->lock);
+
+	return state;
 }
 
-void
-set_shm_connector_state(ConnectorType type, ConnectorState state)
+/*
+ * set_shm_connector_state - Set the state of a specific connector in shared memory
+ *
+ * This function sets the state of a given connector type in the shared memory.
+ * It ensures thread-safety by using an exclusive lock when accessing shared memory.
+ *
+ * @param type: The type of connector for which to set the state
+ * @param state: The new state to set for the connector
+ */
+void set_shm_connector_state(ConnectorType type, ConnectorState state)
 {
 	if (!sdb_state)
+	{
+		elog(WARNING, "Shared memory state is not initialized");
 		return;
+	}
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	switch(type)
+
+	switch (type)
 	{
-		case TYPE_MYSQL:
-		{
-			sdb_state->mysqlinfo.state = state;
-			break;
-		}
-		case TYPE_ORACLE:
-		{
-			sdb_state->oracleinfo.state = state;
-			break;
-		}
-		case TYPE_SQLSERVER:
-		{
-			sdb_state->sqlserverinfo.state = state;
-			break;
-		}
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			break;
-		}
+	case TYPE_MYSQL:
+		sdb_state->mysqlinfo.state = state;
+		break;
+	case TYPE_ORACLE:
+		sdb_state->oracleinfo.state = state;
+		break;
+	case TYPE_SQLSERVER:
+		sdb_state->sqlserverinfo.state = state;
+		break;
+	/* todo: support more dbz connector types here */
+	default:
+		elog(WARNING, "Unsupported connector type: %d", type);
+		break;
 	}
+
 	LWLockRelease(&sdb_state->lock);
+
+	elog(DEBUG1, "Set state for connector type %d to %s",
+		 type, connectorStateAsString(state));
 }
 
 /* TODO: set_shm_dbz_offset:
@@ -916,41 +1504,32 @@ set_shm_connector_state(ConnectorType type, ConnectorState state)
  * the offset managed within dbz so we could freely resume from any reference not
  * just at the flushed locations
  */
-void
-set_shm_dbz_offset(ConnectorType type)
+void set_shm_dbz_offset(ConnectorType type)
 {
+	char *offset;
+
 	if (!sdb_state)
 		return;
 
+	offset = dbz_engine_get_offset(type);
+	if (!offset)
+		return;
+
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	switch(type)
+	switch (type)
 	{
-		case TYPE_MYSQL:
-		{
-			memset(sdb_state->mysqlinfo.dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
-			snprintf(sdb_state->mysqlinfo.dbzoffset, SYNCHDB_ERRMSG_SIZE, "%s",
-					dbz_engine_get_offset(type));
-			break;
-		}
-		case TYPE_ORACLE:
-		{
-			memset(sdb_state->oracleinfo.dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
-			snprintf(sdb_state->oracleinfo.dbzoffset, SYNCHDB_ERRMSG_SIZE, "%s",
-					dbz_engine_get_offset(type));
-			break;
-		}
-		case TYPE_SQLSERVER:
-		{
-			memset(sdb_state->sqlserverinfo.dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
-			snprintf(sdb_state->sqlserverinfo.dbzoffset, SYNCHDB_ERRMSG_SIZE, "%s",
-					dbz_engine_get_offset(type));
-			break;
-		}
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			break;
-		}
+	case TYPE_MYSQL:
+		strlcpy(sdb_state->mysqlinfo.dbzoffset, offset, SYNCHDB_ERRMSG_SIZE);
+		break;
+	case TYPE_ORACLE:
+		strlcpy(sdb_state->oracleinfo.dbzoffset, offset, SYNCHDB_ERRMSG_SIZE);
+		break;
+	case TYPE_SQLSERVER:
+		strlcpy(sdb_state->sqlserverinfo.dbzoffset, offset, SYNCHDB_ERRMSG_SIZE);
+		break;
+	default:
+		/* Do nothing for unknown types */
+		break;
 	}
 	LWLockRelease(&sdb_state->lock);
 }
@@ -961,26 +1540,22 @@ get_shm_dbz_offset(ConnectorType type)
 	if (!sdb_state)
 		return "n/a";
 
-	switch(type)
+	switch (type)
 	{
-		case TYPE_MYSQL:
-			return (strlen(sdb_state->mysqlinfo.dbzoffset) == 0 ?
-					"no offset": sdb_state->mysqlinfo.dbzoffset);
-		case TYPE_ORACLE:
-			return (strlen(sdb_state->oracleinfo.dbzoffset) == 0 ?
-					"no offset": sdb_state->oracleinfo.dbzoffset);
-		case TYPE_SQLSERVER:
-			return (strlen(sdb_state->sqlserverinfo.dbzoffset) == 0 ?
-					"no offset": sdb_state->sqlserverinfo.dbzoffset);
-		/* todo: support more dbz connector types here */
-		default:
-		{
-			break;
-		}
+	case TYPE_MYSQL:
+		return (sdb_state->mysqlinfo.dbzoffset[0] != '\0') ? sdb_state->mysqlinfo.dbzoffset : "no offset";
+	case TYPE_ORACLE:
+		return (sdb_state->oracleinfo.dbzoffset[0] != '\0') ? sdb_state->oracleinfo.dbzoffset : "no offset";
+	case TYPE_SQLSERVER:
+		return (sdb_state->sqlserverinfo.dbzoffset[0] != '\0') ? sdb_state->sqlserverinfo.dbzoffset : "no offset";
+	default:
+		return "n/a";
 	}
-	return "n/a";
 }
 
+/*
+ * _PG_init - Initialize the SynchDB extension
+ */
 void _PG_init(void)
 {
 	DefineCustomIntVariable("synchdb.naptime",
@@ -1015,7 +1590,7 @@ void _PG_init(void)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not create directory \"%s\": %m",
-							 SYNCHDB_METADATA_DIR)));
+							SYNCHDB_METADATA_DIR)));
 		}
 	}
 	else
@@ -1024,336 +1599,158 @@ void _PG_init(void)
 	}
 }
 
+/* Finalization function */
 void _PG_fini(void)
 {
-
+	/* Currently empty, can be used for cleanup if needed */
 }
 
 /*
+ * synchdb_engine_main - Main entry point for the SynchDB background worker
+ *
  * Main entry point for the leader autoprewarm process.  Per-database workers
  * have a separate entry point.
+ *
  */
-void
-synchdb_engine_main(Datum main_arg)
+void synchdb_engine_main(Datum main_arg)
 {
-	char * hostname = NULL, * user = NULL, * pwd = NULL, * src_db = NULL, * dst_db = NULL, * table = NULL;
-	char * args = NULL, * tmp = NULL;
-	unsigned int port, connectorType;
-	pid_t enginepid;
-	ConnectorState currstate;
+	ConnectorType connectorType;
+	ConnectionInfo connInfo = {0};
 
-	/* jvm */
-	JavaVMInitArgs vm_args;
-    JavaVMOption options[2];
-	int ret;
-	const char * dbzpath = getenv("DBZ_ENGINE_DIR");
-	char javaopt[512] = {0}, defaultdbzpath[512] = {0};
-
-	/* Parse the arguments from bgw_extra and main_arg */
-	connectorType = DatumGetUInt32(main_arg);
-	args = pstrdup(MyBgworkerEntry->bgw_extra);
-
-	/* hostname */
-	tmp = strtok(args, ":");
-	if (tmp)
-		hostname = pstrdup(tmp);
-	/* port */
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		port = atoi(tmp);
-	/* user */
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		user = pstrdup(tmp);
-	/* password */
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		pwd = pstrdup(tmp);
-	/* source database */
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		src_db = pstrdup(tmp);
-	/* destination database */
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		dst_db = pstrdup(tmp);
-	/* table - in the form of database.table */
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		table = pstrdup(tmp);
-
-	pfree(args);
-
-	elog(WARNING, "host %s, port %u user %s, pwd %s, src_db %s, dst_db %s, table %s, connectorType %u",
-			hostname, port, user, pwd, src_db, dst_db, table, connectorType);
-
-	/* Establish signal handlers; once that's done, unblock signals. */
-	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
-	pqsignal(SIGHUP, SignalHandlerForConfigReload);
-	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
-
-	/* We're now ready to receive signals */
-	BackgroundWorkerUnblockSignals();
-
-	/* Connect to current database: NULL user - bootstrap superuser is used */
-	BackgroundWorkerInitializeConnection(dst_db, NULL, 0);
-
-	/* Create or attach to our synchdb shared memory */
-	synchdb_init_shmem();
-
-	/* Set on-detach hook */
-	on_shmem_exit(synchdb_detach_shmem, main_arg);
-
-	/*
-	 * Store our PID in the shared memory area to prevent starting multiple
-	 * synchdb workers
-	 */
-	enginepid = get_shm_connector_pid(connectorType);
-	if (enginepid != InvalidPid)
+	/* Parse arguments and initialize connection info */
+	if (!parse_arguments(main_arg, &connectorType, &connInfo))
 	{
-		ereport(LOG,
-				(errmsg("synchdb mysql worker (%u) is already running under PID %d",
-						connectorType,
-						(int) enginepid)));
+		elog(ERROR, "Failed to parse arguments");
 		return;
 	}
-	set_shm_connector_pid(connectorType, MyProcPid);
 
-	elog(WARNING, "synchdb_engine_main starting ...");
+	/* Set up signal handlers and initialize shared memory */
+	if (!setup_environment(connectorType, connInfo.dst_db))
+	{
+		return;
+	}
 
+	/* Initialize the connector state */
 	set_shm_connector_state(connectorType, STATE_INITIALIZING);
 	set_shm_connector_errmsg(connectorType, NULL);
-	set_shm_connector_dbs(connectorType, src_db, dst_db);
+	set_shm_connector_dbs(connectorType, connInfo.src_db, connInfo.dst_db);
 
-	if (!dbzpath)
+	/* Initialize JVM and Debezium engine */
+	if (!initialize_jvm(connectorType) ||
+		!start_debezium_engine(connectorType, &connInfo))
 	{
-		elog(WARNING, "DBZ_ENGINE_DIR not set. Using default lib path %s/dbz_engine/%s",
-				pkglib_path, DBZ_ENGINE_JAR_FILE);
-		snprintf(defaultdbzpath, sizeof(defaultdbzpath), "%s/dbz_engine/%s",
-				pkglib_path, DBZ_ENGINE_JAR_FILE);
-		if (access(defaultdbzpath, F_OK) == -1)
-		{
-			elog(WARNING, "cannot find DBZ engine jar file from %s",
-					defaultdbzpath);
-			set_shm_connector_errmsg(connectorType, "cannot find DBZ engine jar file");
-			return;
-		}
-		snprintf(javaopt, sizeof(javaopt), "-Djava.class.path=%s", defaultdbzpath);
-	}
-	else
-	{
-		elog(WARNING, "DBZ_ENGINE_DIR is set. DBZ engine jar location: %s", dbzpath);
-		if (access(dbzpath, F_OK) == -1)
-		{
-			elog(WARNING, "cannot find DBZ engine jar file from %s",
-					dbzpath);
-			set_shm_connector_errmsg(connectorType, "cannot find DBZ engine jar file");
-			return;
-		}
-		snprintf(javaopt, sizeof(javaopt), "-Djava.class.path=%s", dbzpath);
-	}
-
-	/*
-	 * Path to the Java class:
-	 * options[0].optionString = "-Djava.class.path=/home/ubuntu/synchdb/
-	 * 		postgres/contrib/synchdbjni/dbz-engine/target/dbz-engine-1.0.0.jar";
-	 */
-	options[0].optionString = javaopt;
-	options[1].optionString = "-Xrs";	/* this option disable JVM's signal handler */
-	vm_args.version = JNI_VERSION_21;
-	vm_args.nOptions = 2;
-	vm_args.options = options;
-	vm_args.ignoreUnrecognized = JNI_FALSE;
-
-	/* Load and initialize a Java VM, return a JNI interface pointer in env */
-	ret = JNI_CreateJavaVM(&jvm, (void**)&env, &vm_args);
-	if (ret < 0 || !env)
-	{
-		elog(WARNING, "Unable to Launch JVM");
-		set_shm_connector_errmsg(connectorType, "Unable to Launch JVM");
+		cleanup(connectorType);
 		return;
 	}
 
-	ret = dbz_engine_init(env, &cls, &obj);
-	if (ret < 0 )
-	{
-		elog(WARNING, "Failed to initialize dbz engine");
-		set_shm_connector_errmsg(connectorType, "Failed to initialize dbz engine");
-		return;
-	}
+	elog(LOG, "Going to main loop .... ");
+	/* Main processing loop */
+	main_loop(connectorType, &connInfo);
 
+	/* Cleanup */
+	cleanup(connectorType);
 
-//	dbz_engine_set_offset(connectorType, src_db, jvm, env, &cls, &obj);
-//	elog(WARNING, "offset %s", dbz_engine_get_offset(connectorType, src_db));
-
-	ret = dbz_engine_start(hostname, port, user, pwd, src_db, table, connectorType);
-	if (ret < 0)
-	{
-		elog(WARNING, "Failed to start dbz engine");
-		set_shm_connector_errmsg(connectorType, "Failed to start dbz engine");
-		return;
-	}
-
-	set_shm_connector_state(connectorType, STATE_SYNCING);
-	while (!ShutdownRequestPending)
-	{
-		/* In case of a SIGHUP, just reload the configuration. */
-		if (ConfigReloadPending)
-		{
-			ConfigReloadPending = false;
-			ProcessConfigFile(PGC_SIGHUP);
-		}
-
-		/*
-		 * check if there is any request interrupt to process. It may change the current
-		 * state synchdb is currently in
-		 */
-		processRequestInterrupt(hostname, port, user, pwd, src_db, table, connectorType);
-
-		/* based on current state, do what it needs to do */
-		currstate = get_shm_connector_state_enum(connectorType);
-		switch(currstate)
-		{
-			case STATE_SYNCING:
-			{
-				/* syncing: actively try to get changes from dbz */
-				dbz_engine_get_change(jvm, env, &cls, &obj);
-				break;
-			}
-			case STATE_PAUSED:
-			{
-				/* paused: do nothing */
-				break;
-			}
-			/* todo */
-			default:
-				break;
-		}
-
-		(void) WaitLatch(MyLatch,
-						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-						 synchdb_worker_naptime * 1000,
-						 PG_WAIT_EXTENSION);
-
-		/* Reset the latch, loop. */
-		ResetLatch(MyLatch);
-	}
-
-	elog(WARNING, "synchdb_engine_main shutting down");
-	ret = dbz_engine_stop();
-	if (ret)
-	{
-		elog(WARNING, "failed to call dbz engine stop method");
-	}
-
-	if (jvm != NULL)
-	{
-		(*jvm)->DestroyJavaVM(jvm);
-		jvm = NULL;
-		env = NULL;
-	}
-
-	if(hostname)
-		pfree(hostname);
-	if(user)
-		pfree(user);
-	if(pwd)
-		pfree(pwd);
-	if(src_db)
-		pfree(src_db);
-	if(dst_db)
-		pfree(dst_db);
-	if(table)
-		pfree(table);
+	/* Free allocated memory */
+	if (connInfo.hostname)
+		pfree(connInfo.hostname);
+	if (connInfo.user)
+		pfree(connInfo.user);
+	if (connInfo.pwd)
+		pfree(connInfo.pwd);
+	if (connInfo.src_db)
+		pfree(connInfo.src_db);
+	if (connInfo.dst_db)
+		pfree(connInfo.dst_db);
+	if (connInfo.table)
+		pfree(connInfo.table);
 
 	proc_exit(0);
 }
 
-Datum
-synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
+Datum synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 {
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
-	pid_t		pid;
+	pid_t pid;
+	ConnectionInfo connInfo;
+	char *connector;
 
-	/* input args */
-	text * hostname_text;
-	text * user_text;
-	text * pwd_text;
-	text * src_db_text;
-	text * dst_db_text;
-	text * table_text;
-	text * connector_text;
-	char * hostname;
-	unsigned int port;
-	char * user;
-	char * pwd;
-	char * src_db;
-	char * dst_db;
-	char * table;
-	char * connector;
+	/* Parse input arguments */
+	/* Parse input arguments */
+	text *hostname_text = PG_GETARG_TEXT_PP(0);
+	text *user_text = PG_GETARG_TEXT_PP(2);
+	text *pwd_text = PG_GETARG_TEXT_PP(3);
+	text *src_db_text = PG_GETARG_TEXT_PP(4);
+	text *dst_db_text = PG_GETARG_TEXT_PP(5);
+	text *table_text = PG_GETARG_TEXT_PP(6);
+	text *connector_text = PG_GETARG_TEXT_PP(7);
 
-	/* sanity check on input arguments */
-	hostname_text = PG_GETARG_TEXT_PP(0);
+	/* Sanity check on input arguments */
 	if (VARSIZE(hostname_text) - VARHDRSZ == 0)
 	{
-		elog(ERROR, "hostname cannot be empty");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("hostname cannot be empty")));
 	}
-	hostname = text_to_cstring(hostname_text);
+	connInfo.hostname = text_to_cstring(hostname_text);
 
-	port = PG_GETARG_UINT32(1);
-	if (port == 0 || port > 65535)
+	connInfo.port = PG_GETARG_UINT32(1);
+	if (connInfo.port == 0 || connInfo.port > 65535)
 	{
-		elog(ERROR, "invalid port number");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid port number")));
 	}
 
-	user_text = PG_GETARG_TEXT_PP(2);
 	if (VARSIZE(user_text) - VARHDRSZ == 0)
 	{
-		elog(ERROR, "username cannot be empty");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("username cannot be empty")));
 	}
-	user = text_to_cstring(user_text);
+	connInfo.user = text_to_cstring(user_text);
 
-	pwd_text = PG_GETARG_TEXT_PP(3);
 	if (VARSIZE(pwd_text) - VARHDRSZ == 0)
 	{
-		elog(ERROR, "password cannot be empty");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("password cannot be empty")));
 	}
-	pwd = text_to_cstring(pwd_text);
+	connInfo.pwd = text_to_cstring(pwd_text);
 
 	/* source database can be empty or NULL */
-	src_db_text = PG_GETARG_TEXT_PP(4);
 	if (VARSIZE(src_db_text) - VARHDRSZ == 0)
-		src_db = "null";
+		connInfo.src_db = "null";
 	else
-		src_db = text_to_cstring(src_db_text);
+		connInfo.src_db = text_to_cstring(src_db_text);
 
-	dst_db_text = PG_GETARG_TEXT_PP(5);
 	if (VARSIZE(dst_db_text) - VARHDRSZ == 0)
 	{
-		elog(ERROR, "destination database cannot be empty");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("destination database cannot be empty")));
 	}
-	dst_db = text_to_cstring(dst_db_text);
+	connInfo.dst_db = text_to_cstring(dst_db_text);
 
 	/* table can be empty or NULL */
-	table_text = PG_GETARG_TEXT_PP(6);
 	if (VARSIZE(table_text) - VARHDRSZ == 0)
-		table = "null";
+		connInfo.table = "null";
 	else
-		table = text_to_cstring(table_text);
+		connInfo.table = text_to_cstring(table_text);
 
-	connector_text = PG_GETARG_TEXT_PP(7);
 	if (VARSIZE(connector_text) - VARHDRSZ == 0)
 	{
-		elog(ERROR, "connector type cannot be empty");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("connector type cannot be empty")));
 	}
 	connector = text_to_cstring(connector_text);
 
 	/* prepare background worker */
 	MemSet(&worker, 0, sizeof(BackgroundWorker));
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-			BGWORKER_BACKEND_DATABASE_CONNECTION;
+					   BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_ConsistentState;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
 	worker.bgw_notify_pid = MyProcPid;
@@ -1361,7 +1758,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	strcpy(worker.bgw_library_name, "synchdb");
 	strcpy(worker.bgw_function_name, "synchdb_engine_main");
 
-	prepare_bgw(&worker, hostname, port, user, pwd, src_db, dst_db, table, connector);
+	prepare_bgw(&worker, &connInfo, connector);
 
 	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
 		ereport(ERROR,
@@ -1379,10 +1776,9 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
-Datum
-synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
+Datum synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 {
-	char * connector = text_to_cstring(PG_GETARG_TEXT_P(0));
+	char *connector = text_to_cstring(PG_GETARG_TEXT_P(0));
 	ConnectorType type = fc_get_connector_type(connector);
 	pid_t pid;
 
@@ -1400,7 +1796,7 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	pid = get_shm_connector_pid(type);
 	if (pid != InvalidPid)
 	{
-		elog(WARNING, "terminating dbz connector (%d) with pid %d", type, (int) pid);
+		elog(WARNING, "terminating dbz connector (%d) with pid %d", type, (int)pid);
 		DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(5000));
 		set_shm_connector_pid(type, InvalidPid);
 	}
@@ -1413,11 +1809,10 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
-Datum
-synchdb_get_state(PG_FUNCTION_ARGS)
+Datum synchdb_get_state(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *funcctx;
-	int * idx = NULL;
+	int *idx = NULL;
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -1439,7 +1834,7 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	}
 
 	funcctx = SRF_PERCALL_SETUP();
-	idx = (int *) funcctx->user_fctx;
+	idx = (int *)funcctx->user_fctx;
 
 	/*
 	 * todo: put 3 to a dynamic MACRO as the number of connector synchdb currently
@@ -1447,9 +1842,9 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	 */
 	if (*idx < 3)
 	{
-		Datum		values[5];
-		bool		nulls[5] = {0};
-		HeapTuple	tuple;
+		Datum values[5];
+		bool nulls[5] = {0};
+		HeapTuple tuple;
 
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
 		values[0] = CStringGetTextDatum(get_shm_connector_name((*idx + 1)));
@@ -1459,7 +1854,7 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 		values[4] = CStringGetTextDatum(get_shm_dbz_offset((*idx + 1)));
 		LWLockRelease(&sdb_state->lock);
 
-		*idx +=1;
+		*idx += 1;
 
 		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
 		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
@@ -1467,17 +1862,20 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	SRF_RETURN_DONE(funcctx);
 }
 
-Datum
-synchdb_pause_engine(PG_FUNCTION_ARGS)
+Datum synchdb_pause_engine(PG_FUNCTION_ARGS)
 {
-	SynchdbRequest * req;
-	ConnectorState currreqstate;
-	char * connector = text_to_cstring(PG_GETARG_TEXT_P(0));
-	ConnectorType type = fc_get_connector_type(connector);
 	pid_t pid;
+	char *connector;
+	ConnectorType type;
+	SynchdbRequest *req;
+
+	connector = text_to_cstring(PG_GETARG_TEXT_P(0));
+	type = fc_get_connector_type(connector);
 
 	if (type == TYPE_UNDEF)
-		elog(ERROR, "unsupported connector type");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported connector type")));
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -1485,7 +1883,9 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 	 */
 	synchdb_init_shmem();
 	if (!sdb_state)
-		elog(ERROR, "failed to init or attach to synchdb shared memory");
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
 
 	pid = get_shm_connector_pid(type);
 	if (pid == InvalidPid)
@@ -1495,53 +1895,52 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 	}
 
 	/* point to the right construct based on type */
-	switch(type)
+	req = NULL;
+	switch (type)
 	{
-		case TYPE_MYSQL:
-			req = &(sdb_state->mysqlinfo.req);
-			break;
-		case TYPE_ORACLE:
-			req = &(sdb_state->oracleinfo.req);
-			break;
-		case TYPE_SQLSERVER:
-			req = &(sdb_state->sqlserverinfo.req);
-			break;
-		/* todo: support more dbz connector types here */
-		default:
-			break;
+	case TYPE_MYSQL:
+		req = &(sdb_state->mysqlinfo.req);
+		break;
+	case TYPE_ORACLE:
+		req = &(sdb_state->oracleinfo.req);
+		break;
+	case TYPE_SQLSERVER:
+		req = &(sdb_state->sqlserverinfo.req);
+		break;
+	/* todo: support more dbz connector types here */
+	default:
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported connector type")));
 	}
 
 	/* an active state change request is currently in progress */
-	LWLockAcquire(&sdb_state->lock, LW_SHARED);
-	currreqstate = req->reqstate;
-	LWLockRelease(&sdb_state->lock);
+	LWLockAcquire(&sdb_state->lock, LW_SHARED); // TODO: EXCLUSIVE or SHARED?
 
-	if (currreqstate != STATE_UNDEF)
+	if (req->reqstate != STATE_UNDEF)
 	{
 		elog(WARNING, "an active state change request is currently active");
+		LWLockRelease(&sdb_state->lock);
 		PG_RETURN_INT32(1);
 	}
-	else
-	{
-		elog(WARNING, "send pause request interrupt to dbz connector (%s)", connector);
-		LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-		req->reqstate = STATE_PAUSED;
-		LWLockRelease(&sdb_state->lock);
-	}
+	req->reqstate = STATE_PAUSED;
+	LWLockRelease(&sdb_state->lock);
+
+	elog(WARNING, "send pause request interrupt to dbz connector (%s)", connector);
 	PG_RETURN_INT32(0);
 }
 
-Datum
-synchdb_resume_engine(PG_FUNCTION_ARGS)
+Datum synchdb_resume_engine(PG_FUNCTION_ARGS)
 {
-	SynchdbRequest * req;
-	ConnectorState currreqstate;
-	char * connector = text_to_cstring(PG_GETARG_TEXT_P(0));
-	ConnectorType type = fc_get_connector_type(connector);
 	pid_t pid;
+	SynchdbRequest *req;
+	char *connector = text_to_cstring(PG_GETARG_TEXT_P(0));
+	ConnectorType type = fc_get_connector_type(connector);
 
 	if (type == TYPE_UNDEF)
-		elog(ERROR, "unsupported connector type");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported connector type")));
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -1549,7 +1948,9 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 	 */
 	synchdb_init_shmem();
 	if (!sdb_state)
-		elog(ERROR, "failed to init or attach to synchdb shared memory");
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
 
 	pid = get_shm_connector_pid(type);
 	if (pid == InvalidPid)
@@ -1559,54 +1960,59 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 	}
 
 	/* point to the right construct based on type */
-	switch(type)
+	req = NULL;
+	switch (type)
 	{
-		case TYPE_MYSQL:
-			req = &(sdb_state->mysqlinfo.req);
-			break;
-		case TYPE_ORACLE:
-			req = &(sdb_state->oracleinfo.req);
-			break;
-		case TYPE_SQLSERVER:
-			req = &(sdb_state->sqlserverinfo.req);
-			break;
-		/* todo: support more dbz connector types here */
-		default:
-			break;
+	case TYPE_MYSQL:
+		req = &(sdb_state->mysqlinfo.req);
+		break;
+	case TYPE_ORACLE:
+		req = &(sdb_state->oracleinfo.req);
+		break;
+	case TYPE_SQLSERVER:
+		req = &(sdb_state->sqlserverinfo.req);
+		break;
+	/* todo: support more dbz connector types here */
+	default:
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported connector type")));
 	}
 
 	/* an active state change request is currently in progress */
 	LWLockAcquire(&sdb_state->lock, LW_SHARED);
-	currreqstate = req->reqstate;
-	LWLockRelease(&sdb_state->lock);
 
-	if (currreqstate != STATE_UNDEF)
+	if (req->reqstate != STATE_UNDEF)
 	{
 		elog(WARNING, "an active state change request is currently active");
+		LWLockRelease(&sdb_state->lock);
 		PG_RETURN_INT32(1);
 	}
-	else
-	{
-		elog(WARNING, "send resume request interrupt to dbz connector (%s)", connector);
-		LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-		req->reqstate = STATE_SYNCING;
-		LWLockRelease(&sdb_state->lock);
-	}
+
+	req->reqstate = STATE_SYNCING;
+	LWLockRelease(&sdb_state->lock);
+
+	elog(WARNING, "send resume request interrupt to dbz connector (%s)", connector);
 	PG_RETURN_INT32(0);
 }
 
-Datum
-synchdb_set_offset(PG_FUNCTION_ARGS)
+Datum synchdb_set_offset(PG_FUNCTION_ARGS)
 {
-	char * connector = text_to_cstring(PG_GETARG_TEXT_P(0));
-	char * offsetstr = text_to_cstring(PG_GETARG_TEXT_P(1));
-	ConnectorType type = fc_get_connector_type(connector);
-	ConnectorState currstate, currreqstate;
-	SynchdbRequest * req;
 	pid_t pid;
+	char *connector;
+	char *offsetstr;
+	ConnectorType type;
+	SynchdbRequest *req;
+	ConnectorState currstate;
+
+	connector = text_to_cstring(PG_GETARG_TEXT_P(0));
+	offsetstr = text_to_cstring(PG_GETARG_TEXT_P(1));
+	type = fc_get_connector_type(connector);
 
 	if (type == TYPE_UNDEF)
-		elog(ERROR, "unsupported connector type");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported connector type")));
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -1614,7 +2020,9 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 	 */
 	synchdb_init_shmem();
 	if (!sdb_state)
-		elog(ERROR, "failed to init or attach to synchdb shared memory");
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
 
 	pid = get_shm_connector_pid(type);
 	if (pid == InvalidPid)
@@ -1627,45 +2035,45 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 	if (currstate != STATE_PAUSED)
 	{
 		elog(WARNING, "dbz connector (%s) is not in paused state. "
-				"Use synchdb_pause_engine() to pause it first", connector);
+					  "Use synchdb_pause_engine() to pause it first",
+			 connector);
 		PG_RETURN_INT32(1);
 	}
 
 	/* point to the right construct based on type */
-	switch(type)
+	req = NULL;
+	switch (type)
 	{
-		case TYPE_MYSQL:
-			req = &(sdb_state->mysqlinfo.req);
-			break;
-		case TYPE_ORACLE:
-			req = &(sdb_state->oracleinfo.req);
-			break;
-		case TYPE_SQLSERVER:
-			req = &(sdb_state->sqlserverinfo.req);
-			break;
-		/* todo: support more dbz connector types here */
-		default:
-			break;
+	case TYPE_MYSQL:
+		req = &(sdb_state->mysqlinfo.req);
+		break;
+	case TYPE_ORACLE:
+		req = &(sdb_state->oracleinfo.req);
+		break;
+	case TYPE_SQLSERVER:
+		req = &(sdb_state->sqlserverinfo.req);
+		break;
+	/* todo: support more dbz connector types here */
+	default:
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported connector type")));
 	}
 
 	/* an active state change request is currently in progress */
 	LWLockAcquire(&sdb_state->lock, LW_SHARED);
-	currreqstate = req->reqstate;
-	LWLockRelease(&sdb_state->lock);
 
-	if (currreqstate != STATE_UNDEF)
+	if (req->reqstate != STATE_UNDEF)
 	{
 		elog(WARNING, "an active request is currently active");
+		LWLockRelease(&sdb_state->lock);
 		PG_RETURN_INT32(1);
 	}
-	else
-	{
-		elog(WARNING, "send update offset request interrupt to dbz connector (%s)", connector);
-		LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-		req->reqstate = STATE_OFFSET_UPDATE;
-		strncpy(req->reqdata, offsetstr, SYNCHDB_ERRMSG_SIZE);
-		LWLockRelease(&sdb_state->lock);
-	}
+
+	req->reqstate = STATE_OFFSET_UPDATE;
+	strncpy(req->reqdata, offsetstr, SYNCHDB_ERRMSG_SIZE);
+	LWLockRelease(&sdb_state->lock);
+
+	elog(WARNING, "send update offset request interrupt to dbz connector (%s)", connector);
 	PG_RETURN_INT32(0);
 }
-

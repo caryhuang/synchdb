@@ -1,8 +1,29 @@
-/*
- * format_converter.c
+/*-------------------------------------------------------------------------
  *
- *  Created on: Jul. 11, 2024
- *      Author: caryh
+ * format_converter.c
+ *    Conversion utilities for Debezium change events to PostgreSQL format
+ *
+ * This file contains functions to parse Debezium (DBZ) change events,
+ * convert them to PostgreSQL-compatible DDL and DML operations, and
+ * execute those operations. It handles CREATE, DROP, INSERT, UPDATE,
+ * and DELETE operations from various source databases (currently 
+ * MySQL, Oracle, and SQL Server) and converts them to equivalent 
+ * PostgreSQL commands.
+ *
+ * The main entry point is fc_processDBZChangeEvent(), which takes a
+ * Debezium change event as input, parses it, converts it, and executes
+ * the resulting PostgreSQL operation.
+ *
+ * Key functions:
+ * - parseDBZDDL(): Parses Debezium DDL events
+ * - parseDBZDML(): Parses Debezium DML events
+ * - convert2PGDDL(): Converts DBZ DDL to PostgreSQL DDL
+ * - convert2PGDML(): Converts DBZ DML to PostgreSQL DML
+ * - processDataByType(): Handles data type conversions
+ *
+ * Copyright (c) Hornetlabs Technology, Inc.
+ *
+ *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 #include "fmgr.h"
@@ -21,6 +42,7 @@
 
 extern bool synchdb_dml_use_spi;
 
+/* Function to remove double quotes from a string */
 static void
 remove_double_quotes(StringInfoData * str)
 {
@@ -40,6 +62,7 @@ remove_double_quotes(StringInfoData * str)
 	str->len = newlen;
 }
 
+/* Function to get a string element from a JSONB path */
 static int
 getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout)
 {
@@ -55,9 +78,10 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout)
 		elog(WARNING, "strinfo is null");
 		return -1;
 	}
+
+    /* Count the number of elements in the path */
 	if (strstr(pathcopy, "."))
 	{
-		/* count how many elements are in path */
 		while (*p != '\0')
 		{
 			if (*p == '.')
@@ -66,8 +90,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout)
 			}
 			p++;
 		}
-		/* add the last one */
-		numPaths++;
+		numPaths++; /* Add the last one */
 	}
 	else
 	{
@@ -76,22 +99,16 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout)
 
 	datum_elems = palloc0(sizeof(Datum) * numPaths);
 
+    /* Parse the path into elements */
 	if (strstr(pathcopy, "."))
 	{
-		/* multi level paths, */
 		str_elems= strtok(pathcopy, ".");
 		if (str_elems)
 		{
 			datum_elems[curr] = CStringGetTextDatum(str_elems);
 			curr++;
-			while (str_elems)
+			while ((str_elems = strtok(NULL, ".")))
 			{
-				/* parse the remaining elements */
-				str_elems = strtok(NULL, ".");
-
-				if (str_elems == NULL)
-					break;
-
 				datum_elems[curr] = CStringGetTextDatum(str_elems);
 				curr++;
 			}
@@ -103,6 +120,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout)
 		datum_elems[curr] = CStringGetTextDatum(pathcopy);
 	}
 
+    /* Get the element from JSONB */
     res = jsonb_get_element(jb, datum_elems, numPaths, &isnull, false);
     if (isnull)
     {
@@ -129,6 +147,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout)
 	return 0;
 }
 
+/* Function to get a JSONB element from a path */
 static Jsonb *
 getPathElementJsonb(Jsonb * jb, char * path)
 {
@@ -198,6 +217,7 @@ getPathElementJsonb(Jsonb * jb, char * path)
 	return out;
 }
 
+/* Functions to destroy various structures */
 static void
 destroyDBZDDL(DBZ_DDL * ddlinfo)
 {
@@ -267,6 +287,7 @@ destroyDBZDML(DBZ_DML * dmlinfo)
 	}
 }
 
+/* Function to parse Debezium DDL */
 static DBZ_DDL *
 parseDBZDDL(Jsonb * jb)
 {
@@ -491,6 +512,8 @@ parseDBZDDL(Jsonb * jb)
 }
 
 /*
+ * Function to split ID string into database, schema, and table.
+ *
  * This function transforms id format 'database.schema.table' to
  * 'database.schema_table'. If the id format is 'database.table'
  * then no transformation is applied.
@@ -523,6 +546,7 @@ splitIdString(char * id, char ** db, char ** schema, char ** table)
 	}
 }
 
+/* Function to transform DDL columns */
 static void
 transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData * strinfo)
 {
@@ -601,6 +625,7 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 	}
 }
 
+/* Function to convert Debezium DDL to PostgreSQL DDL */
 static PG_DDL *
 convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 {
@@ -1749,6 +1774,7 @@ fc_get_connector_type(const char * connector)
 	}
 }
 
+/* Main function to process Debezium change event */
 int
 fc_processDBZChangeEvent(const char * event)
 {
@@ -1759,18 +1785,22 @@ fc_processDBZChangeEvent(const char * event)
 
 	initStringInfo(&strinfo);
 
+    /* Convert event string to JSONB */
     jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
     jb = DatumGetJsonbP(jsonb_datum);
 
+    /* Get connector type */
     getPathElementString(jb, "payload.source.connector", &strinfo);
 
     type = fc_get_connector_type(strinfo.data);
 
+    /* Check if it's a DDL or DML event */
     getPathElementString(jb, "payload.ddl", &strinfo);
     getPathElementString(jb, "payload.op", &strinfo);
 
     if (!strcmp(strinfo.data, "NULL"))
     {
+        /* Process DDL event */
     	DBZ_DDL * dbzddl = NULL;
     	PG_DDL * pgddl = NULL;
 
@@ -1784,8 +1814,8 @@ fc_processDBZChangeEvent(const char * event)
     		set_shm_connector_state(type, STATE_SYNCING);
     		return -1;
     	}
-    	elog(WARNING, "converting to PG DDL change event...");
 
+    	elog(WARNING, "converting to PG DDL change event...");
     	/* (2) convert */
     	set_shm_connector_state(type, STATE_CONVERTING);
     	pgddl = convert2PGDDL(dbzddl, type);
@@ -1820,6 +1850,7 @@ fc_processDBZChangeEvent(const char * event)
     }
     else
     {
+        /* Process DML event */
     	DBZ_DML * dbzdml = NULL;
     	PG_DML * pgdml = NULL;
 

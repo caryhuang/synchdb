@@ -81,5 +81,5 @@ install_dbz:
 	rm -rf $(libdir)/dbz_engine
 	install -d $(libdir)/dbz_engine
 	cp -rp $(DBZ_ENGINE_PATH)/target/* $(libdir)/dbz_engine
-	chown root:root -R $(libdir)/dbz_engine
+#	chown -R root:root $(libdir)/dbz_engine
 # append new recipe to the original all and clean as defined by global Makefile

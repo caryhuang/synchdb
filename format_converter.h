@@ -1,8 +1,19 @@
 /*
  * format_converter.h
  *
- *  Created on: Jul. 11, 2024
- *      Author: caryh
+ * Header file for the SynchDB format converter module
+ *
+ * This module provides structures and functions for processing
+ * database change events in Debezium (DBZ) format and converting
+ * them to a format suitable for SynchDB.
+ *
+ * Key components:
+ * - Structures for representing DDL (Data Definition Language) events
+ * - Structures for representing DML (Data Manipulation Language) events
+ * - Functions for processing and converting DBZ change events
+ *
+ * Copyright (c) Hornetlabs Technology, Inc.
+ * 
  */
 
 #ifndef SYNCHDB_FORMAT_CONVERTER_H_
@@ -12,6 +23,7 @@
 #include "replication_agent.h"
 #include "synchdb.h"
 
+/* Structure to represent a column in a DDL event */
 typedef struct dbz_ddl_column
 {
 	char * name;
@@ -25,6 +37,7 @@ typedef struct dbz_ddl_column
 	char * defaultValueExpression;
 } DBZ_DDL_COLUMN;
 
+/* Structure to represent a DDL event */
 typedef struct dbz_ddl
 {
 	char * id;
@@ -40,7 +53,8 @@ typedef struct
 	int position;
 } NameOidEntry;
 
-typedef struct dbz_ddl_column_value
+/* Structure to represent a column value in a DML event */
+typedef struct dbz_dml_column_value
 {
 	char * name;
 	char * value;	/* expressed as string as taken from json */
@@ -48,6 +62,7 @@ typedef struct dbz_ddl_column_value
 	int position;	/* position of this column value, start from 1 */
 } DBZ_DML_COLUMN_VALUE;
 
+/* Structure to represent a DML event */
 typedef struct dbz_dml
 {
 	char op;
@@ -58,6 +73,7 @@ typedef struct dbz_dml
 	List * columnValuesAfter;	/* list of DBZ_DML_COLUMN_VALUE */
 } DBZ_DML;
 
+/* Function prototypes */
 int fc_processDBZChangeEvent(const char * event);
 ConnectorType fc_get_connector_type(const char * connector);
 
