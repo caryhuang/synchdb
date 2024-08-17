@@ -1,8 +1,18 @@
 /*
  * replication_agent.h
  *
- *  Created on: Jul. 16, 2024
- *      Author: caryh
+ * Header file for the SynchDB replication agent
+ *
+ * This file defines the data structures and function prototypes
+ * used by the replication agent to handle DDL and DML operations
+ * in PostgreSQL format.
+ *
+ * Key components:
+ * - Structures for representing DDL and DML operations
+ * - Function prototypes for executing DDL and DML operations
+ * 
+ * Copyright (c) 2024 Hornetlabs Technology, Inc.
+ *
  */
 
 #ifndef SYNCHDB_REPLICATION_AGENT_H_
@@ -11,7 +21,7 @@
 #include "executor/tuptable.h"
 #include "synchdb.h"
 
-/* data structures representing PostgreSQL data formats */
+/* Data structures representing PostgreSQL data formats */
 typedef struct pg_ddl
 {
 	char * ddlquery;	/* to be fed into SPI*/
@@ -36,6 +46,7 @@ typedef struct pg_dml
 	List * columnValuesAfter;	/* list of PG_DML_COLUMN_VALUE */
 } PG_DML;
 
+/* Function prototypes */
 int ra_executePGDDL(PG_DDL * pgddl, ConnectorType type);
 int ra_executePGDML(PG_DML * pgdml, ConnectorType type);
 

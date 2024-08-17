@@ -1,8 +1,15 @@
 /*
  * replication_agent.c
  *
- *  Created on: Jul. 16, 2024
- *      Author: caryh
+ * Implementation of replication agent functionality for SynchDB
+ *
+ * This file contains functions for executing DDL and DML operations
+ * as part of the database replication process. It provides both
+ * SPI-based execution and Heap Tuple execution for insert, update, and
+ * delete operations.
+ * 
+ * Copyright (c) Hornetlabs Technology, Inc.
+ *
  */
 
 #include "postgres.h"
@@ -24,13 +31,20 @@
 
 extern bool synchdb_dml_use_spi;
 
+/*
+ * spi_execute - Execute a query using the Server Programming Interface (SPI)
+ *
+ * This function sets up a transaction, executes the given query using SPI,
+ * and handles any errors that occur during execution.
+ */
 static int
 spi_execute(char * query, ConnectorType type)
 {
 	int ret = -1;
+
 	PG_TRY();
 	{
-		/* Start a transaction and set a snapshot */
+		/* Start a transaction and set up a snapshot */
 		StartTransactionCommand();
 		PushActiveSnapshot(GetTransactionSnapshot());
 
@@ -79,13 +93,19 @@ spi_execute(char * query, ConnectorType type)
 		FreeErrorData(errdata);
 		SPI_finish();
 		ret = -1;
-
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
 	return ret;
 }
 
+/*
+ * synchdb_handle_insert - Custom handler for INSERT operations
+ *
+ * This function performs an INSERT operation without using SPI.
+ * It creates a tuple from the provided column values and inserts it into the table.
+ */
 static int
 synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 {
@@ -194,6 +214,13 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 	return 0;
 }
 
+/*
+ * synchdb_handle_update - Custom handler for UPDATE operations
+ *
+ * This function performs an UPDATE operation without using SPI.
+ * It locates the existing tuple, creates a new tuple with updated values,
+ * and replaces the old tuple with the new one.
+ */
 static int
 synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, ConnectorType type)
 {
@@ -368,6 +395,12 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 	return ret;
 }
 
+/*
+ * synchdb_handle_delete - Custom handler for DELETE operations
+ *
+ * This function performs a DELETE operation without using SPI.
+ * It locates the existing tuple based on the provided column values and deletes it.
+ */
 static int
 synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 {
@@ -515,26 +548,50 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 	return ret;
 }
 
+/*
+ * ra_executePGDDL - Execute a PostgreSQL DDL operation
+ *
+ * This function is the entry point for executing DDL operations.
+ * It uses SPI to execute the DDL query.
+ */
 int
 ra_executePGDDL(PG_DDL * pgddl, ConnectorType type)
 {
+	if (!pgddl || !pgddl->ddlquery)
+    {
+        elog(WARNING, "Invalid DDL query");
+        return -1;
+    }
 	return spi_execute(pgddl->ddlquery, type);
 }
 
+/*
+ * ra_executePGDML - Execute a PostgreSQL DML operation
+ *
+ * This function is the entry point for executing DML operations.
+ * Depending on the operation type and configuration, it either uses SPI
+ * or calls a custom handler function.
+ */
 int
 ra_executePGDML(PG_DML * pgdml, ConnectorType type)
 {
+	if (!pgdml)
+    {
+        elog(WARNING, "Invalid DML operation");
+        return -1;
+    }
+
 	switch (pgdml->op)
 	{
-		case 'r':
-		case 'c':
+		case 'r':  // Read operation
+		case 'c':  // Create operation
 		{
 			if (synchdb_dml_use_spi)
 				return spi_execute(pgdml->dmlquery, type);
 			else
 				return synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type);
 		}
-		case 'u':
+		case 'u':  // Update operation
 		{
 			if (synchdb_dml_use_spi)
 				return spi_execute(pgdml->dmlquery, type);
@@ -544,7 +601,7 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type)
 											 pgdml->tableoid,
 											 type);
 		}
-		case 'd':
+		case 'd':  // Delete operation
 		{
 			if (synchdb_dml_use_spi)
 				return spi_execute(pgdml->dmlquery, type);

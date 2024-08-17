@@ -158,12 +158,20 @@ public class DebeziumRunner {
 	public List<String> getChangeEvents()
 	{
 		/* make a copy of current change list for returning */
-		List<String> listcopy = new ArrayList<>(changeEvents);
+		List<String> listCopy;
+		synchronized (this) {
+			if (changeEvents == null) {
+				logger.warn("changeEvents is null, initializing empty list");
+				changeEvents = new ArrayList<>();
+			}
+			listCopy = new ArrayList<>(changeEvents);
 
-		/* empty the changeEvents as they have been consumed */
-		changeEvents.clear();
+			/* empty the changeEvents as they have been consumed */
+			changeEvents.clear();
+			logger.info("Retrieved {} change events", listCopy.size());
+		}
 
-		return listcopy;
+		return listCopy;
 		/*
         synchronized (this) {
 
