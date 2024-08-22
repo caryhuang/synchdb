@@ -287,7 +287,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
 			continue;
 		}
 
-		elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
+		elog(WARNING, "Processing DBZ Event: %s", eventStr);
 
 		if (fc_processDBZChangeEvent(eventStr) != 0)
 		{
@@ -1177,6 +1177,8 @@ cleanup(ConnectorType connectorType)
 		jvm = NULL;
 		env = NULL;
 	}
+
+	fc_deinitFormatConverter(connectorType);
 }
 
 const char *
@@ -1629,6 +1631,9 @@ synchdb_engine_main(Datum main_arg)
 	set_shm_connector_state(connectorType, STATE_INITIALIZING);
 	set_shm_connector_errmsg(connectorType, NULL);
 	set_shm_connector_dbs(connectorType, connInfo.src_db, connInfo.dst_db);
+
+	/* initialize format converter */
+	fc_initFormatConverter(connectorType);
 
 	/* Initialize JVM */
 	initialize_jvm(connectorType);
