@@ -23,6 +23,7 @@
 /* Constants */
 #define SYNCHDB_ERRMSG_SIZE 128
 #define SYNCHDB_MAX_DB_NAME_SIZE 64
+#define SYNCHDB_DATATYPE_NAME_SIZE 64
 
 #define SYNCHDB_MYSQL_OFFSET_FILE "pg_synchdb/mysql_offsets.dat"
 #define SYNCHDB_ORACLE_OFFSET_FILE "pg_synchdb/oracle_offsets.dat"

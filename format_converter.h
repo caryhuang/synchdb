@@ -35,6 +35,7 @@ typedef struct dbz_ddl_column
 	char * charsetName;
 	bool autoIncremented;
 	char * defaultValueExpression;
+	int scale;
 } DBZ_DDL_COLUMN;
 
 /* Structure to represent a DDL event */
@@ -73,8 +74,23 @@ typedef struct dbz_dml
 	List * columnValuesAfter;	/* list of DBZ_DML_COLUMN_VALUE */
 } DBZ_DML;
 
+typedef struct datatypeHashKey
+{
+	char extTypeName[SYNCHDB_DATATYPE_NAME_SIZE];
+	bool autoIncremented;
+} DatatypeHashKey;
+
+typedef struct datatypeHashEntry
+{
+	DatatypeHashKey key;
+	char pgsqlTypeName[SYNCHDB_DATATYPE_NAME_SIZE];
+	int pgsqlTypeLength;
+} DatatypeHashEntry;
+
 /* Function prototypes */
 int fc_processDBZChangeEvent(const char * event);
 ConnectorType fc_get_connector_type(const char * connector);
+void fc_initFormatConverter(ConnectorType connectorType);
+void fc_deinitFormatConverter(ConnectorType connectorType);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */

@@ -42,6 +42,79 @@
 
 extern bool synchdb_dml_use_spi;
 
+static HTAB * mysqlDatatypeHash;
+
+// Define the type mappings
+DatatypeHashEntry mysql_defaultTypeMappings[] =
+{
+	{{"INT", true}, "SERIAL", -1},
+	{{"BIGINT", true}, "BIGSERIAL", -1},
+	{{"SMALLINT", true}, "SMALLSERIAL", -1},
+	{{"ENUM", false}, "TEXT", 0},
+	{{"BIGINT UNSIGNED", false}, "NUMERIC", -1},
+	{{"NUMERIC UNSIGNED", false}, "NUMERIC", -1},
+	{{"DEC", false}, "DECIMAL", -1},
+	{{"DEC UNSIGNED", false}, "DECIMAL", -1},
+	{{"DECIMAL UNSIGNED", false}, "DECIMAL", -1},
+	{{"FIXED", false}, "DECIMAL", -1},
+	{{"FIXED UNSIGNED", false}, "DECIMAL", -1},
+	{{"BIT", false}, "BIT", -1},
+	{{"BOOL", false}, "BOOLEAN", -1},
+	{{"DOUBLE", false}, "DOUBLE PRECISION", -1},
+	{{"DOUBLE PRECISION UNSIGNED", false}, "DOUBLE PRECISION", -1},
+	{{"DOUBLE UNSIGNED", false}, "DOUBLE PRECISION", -1},
+	{{"REAL", false}, "REAL", -1},
+	{{"REAL UNSIGNED", false}, "REAL", -1},
+	{{"FLOAT", false}, "REAL", -1},
+	{{"FLOAT UNSIGNED", false}, "REAL", -1},
+	{{"INT UNSIGNED", false}, "INT", -1},
+	{{"INTEGER UNSIGNED", false}, "INT", -1},
+	{{"MEDIUMINT", false}, "INT", -1},
+	{{"MEDIUMINT UNSIGNED", false}, "INT", -1},
+	{{"YEAR", false}, "INT", -1},
+	{{"SMALLINT UNSIGNED", false}, "SMALLINT", -1},
+	{{"TINYINT", false}, "SMALLINT", -1},
+	{{"TINYINT UNSIGNED", false}, "SMALLINT", -1},
+	{{"DATETIME", false}, "TIMESTAMP", -1},
+	{{"BINARY", false}, "BYTEA", 0},
+	{{"VARBINARY", false}, "BYTEA", 0},
+	{{"BLOB", false}, "BYTEA", 0},
+	{{"MEDIUMBLOB", false}, "BYTEA", 0},
+	{{"LONGBLOB", false}, "BYTEA", 0},
+	{{"TINYBLOB", false}, "BYTEA", 0},
+	{{"LONG VARCHAR", false}, "TEXT", -1},
+	{{"LONGTEXT", false}, "TEXT", -1},
+	{{"MEDIUMTEXT", false}, "TEXT", -1},
+	{{"TINYTEXT", false}, "TEXT", -1},
+	{{"JSON", false}, "JSONB", -1},
+	{{"GEOMETRY", false}, "TEXT", -1},
+	{{"GEOMETRYCOLLECTION", false}, "TEXT", -1},
+	{{"LINESTRING", false}, "TEXT", -1},
+	{{"MULTILINESTRING", false}, "TEXT", -1},
+	{{"MULTIPOINT", false}, "TEXT", -1},
+	{{"MULTIPOLYGON", false}, "TEXT", -1},
+	{{"POINT", false}, "TEXT", -1},
+	{{"POLYGON", false}, "TEXT", -1}
+};
+
+#define SIZE_MYSQL_DATATYPE_MAPPING (sizeof(mysql_defaultTypeMappings) / sizeof(DatatypeHashEntry))
+
+/* Function to find exact match from given line */
+static bool
+find_exact_string_match(char * line, char * wordtofind)
+{
+	char * p = strstr(line, wordtofind);
+	if ((p == line) || (p != NULL && !isalnum((unsigned char)p[-1])))
+	{
+		p += strlen(wordtofind);
+		if (!isalnum((unsigned char)*p))
+			return true;
+		else
+			return false;
+	}
+	return false;
+}
+
 /* Function to remove double quotes from a string */
 static void
 remove_double_quotes(StringInfoData * str)
@@ -481,6 +554,11 @@ parseDBZDDL(Jsonb * jb)
 						elog(WARNING, "consuming %s = %s", key, value);
 						ddlcol->defaultValueExpression = pstrdup(value);
 					}
+					if (!strcmp(key, "scale"))
+					{
+						elog(WARNING, "consuming %s = %s", key, value);
+						ddlcol->scale = strcmp(value, "NULL") == 0 ? 0 : atoi(value);
+					}
 
 					/* note: other key - value pairs ignored for now */
 					pfree(key);
@@ -554,30 +632,31 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 	{
 		case TYPE_MYSQL:
 		{
-			/*
-			 * todo: column data type conversion cases for MySQL:
-			 *  - if type is INT and autoincremented is true, translate to SERIAL
-			 *  - if type is BIGINT and autoincremented is true, translate to BIGSERIAL
-			 *  - if type is SMALLINT and autoincremented is true, translate to SMALLSERIAL
-			 *  - if type is ENUM, translate to TEXT with length=0
-			 *  - if type is GEOMETRY, translate to TEXT
-			 */
-			if (!strcasecmp(col->typeName, "INT") && col->autoIncremented)
-				appendStringInfo(strinfo, " %s %s ", col->name, "SERIAL");
-			else if (!strcasecmp(col->typeName, "BIGINT") && col->autoIncremented)
-				appendStringInfo(strinfo, " %s %s ", col->name, "BIGSERIAL");
-			else if (!strcasecmp(col->typeName, "SMALLINT") && col->autoIncremented)
-				appendStringInfo(strinfo, " %s %s ", col->name, "SMALLSERIAL");
-			else if (!strcasecmp(col->typeName, "ENUM"))
-			{
-				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
-				col->length = 0;
-			}
-			else if (!strcmp(col->typeName, "GEOMETRY"))
-				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
-			else
-				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+			DatatypeHashEntry * entry;
+			DatatypeHashKey key = {0};
+			bool found = 0;
 
+			key.autoIncremented = col->autoIncremented;
+			strcpy(key.extTypeName, col->typeName);
+			entry = (DatatypeHashEntry *) hash_search(mysqlDatatypeHash, &key, HASH_FIND, &found);
+			if (!found)
+			{
+				/* no mapping found, so no transformation done */
+				elog(WARNING, "no transformation done for %s (autoincrement %d)",
+						key.extTypeName, key.autoIncremented);
+				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+			}
+			else
+			{
+				/* use the mapped values and sizes */
+				elog(WARNING, "transform %s (autoincrement %d) to %s with length %d",
+						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+						entry->pgsqlTypeLength);
+				appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+				if (entry->pgsqlTypeLength != -1)
+					col->length = entry->pgsqlTypeLength;
+			}
 			break;
 		}
 		case TYPE_ORACLE:
@@ -598,7 +677,7 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 				appendStringInfo(strinfo, " %s %s ", col->name, "SERIAL");
 			else if (!strcasecmp(col->typeName, "bigint identity") && col->autoIncremented)
 				appendStringInfo(strinfo, " %s %s ", col->name, "BIGSERIAL");
-			else if (!strcasecmp(col->typeName, "int identity") && col->autoIncremented)
+			else if (!strcasecmp(col->typeName, "smallint identity") && col->autoIncremented)
 				appendStringInfo(strinfo, " %s %s ", col->name, "SMALLSERIAL");
 			else if (!strcasecmp(col->typeName, "ENUM"))
 			{
@@ -684,14 +763,26 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 			transformDDLColumns(col, type, &strinfo);
 
-			/* if a length if specified, add it. For example VARCHAR(30)*/
-			if (col->length > 0)
+			/* if both length and scale are specified, add them. For example DECIMAL(10,2) */
+			if (col->length > 0 && col->scale > 0)
+			{
+				appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
+			}
+
+			/* if a only length if specified, add it. For example VARCHAR(30)*/
+			if (col->length > 0 && col->scale == 0)
 			{
 				appendStringInfo(&strinfo, "(%d) ", col->length);
 			}
 
+			/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
+			if (strstr(col->typeName, "UNSIGNED"))
+			{
+				appendStringInfo(&strinfo, "CHECK (%s >= 0) ", col->name);
+			}
+
 			/* if it is marked as primary key */
-			if (strstr(dbzddl->primaryKeyColumnNames, col->name))
+			if (find_exact_string_match(dbzddl->primaryKeyColumnNames, col->name))
 			{
 				appendStringInfo(&strinfo, "PRIMARY KEY ");
 			}
@@ -1774,6 +1865,99 @@ fc_get_connector_type(const char * connector)
 	}
 }
 
+static void
+init_mysql(void)
+{
+	HASHCTL	info;
+	int i = 0;
+	DatatypeHashEntry * entry;
+	bool found = 0;
+
+	info.keysize = sizeof(DatatypeHashKey);
+	info.entrysize = sizeof(DatatypeHashEntry);
+	info.hcxt = CurrentMemoryContext;
+
+	mysqlDatatypeHash = hash_create("mysql datatype hash",
+							 256,
+							 &info,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	for (i = 0; i < SIZE_MYSQL_DATATYPE_MAPPING; i++)
+	{
+		entry = (DatatypeHashEntry *) hash_search(mysqlDatatypeHash, &(mysql_defaultTypeMappings[i].key), HASH_ENTER, &found);
+		if (!found)
+		{
+			entry->key.autoIncremented = mysql_defaultTypeMappings[i].key.autoIncremented;
+			strncpy(entry->key.extTypeName,
+					mysql_defaultTypeMappings[i].key.extTypeName,
+					strlen(mysql_defaultTypeMappings[i].key.extTypeName));
+
+			entry->pgsqlTypeLength = mysql_defaultTypeMappings[i].pgsqlTypeLength;
+			strncpy(entry->pgsqlTypeName,
+					mysql_defaultTypeMappings[i].pgsqlTypeName,
+					strlen(mysql_defaultTypeMappings[i].pgsqlTypeName));
+
+			elog(WARNING, "Inserted mapping '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+		}
+		else
+		{
+			elog(WARNING, "mapping exists '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+		}
+	}
+}
+
+void
+fc_initFormatConverter(ConnectorType connectorType)
+{
+	switch (connectorType)
+	{
+		case TYPE_MYSQL:
+		{
+			init_mysql();
+			break;
+		}
+		case TYPE_ORACLE:
+		{
+			break;
+		}
+		case TYPE_SQLSERVER:
+		{
+			break;
+		}
+		default:
+		{
+			set_shm_connector_errmsg(connectorType, "unsupported connector type");
+			elog(ERROR, "unsupported connector type");
+		}
+	}
+}
+
+void
+fc_deinitFormatConverter(ConnectorType connectorType)
+{
+	switch (connectorType)
+	{
+		case TYPE_MYSQL:
+		{
+			hash_destroy(mysqlDatatypeHash);
+			break;
+		}
+		case TYPE_ORACLE:
+		{
+			break;
+		}
+		case TYPE_SQLSERVER:
+		{
+			break;
+		}
+		default:
+		{
+			set_shm_connector_errmsg(connectorType, "unsupported connector type");
+			elog(ERROR, "unsupported connector type");
+		}
+	}
+}
+
 /* Main function to process Debezium change event */
 int
 fc_processDBZChangeEvent(const char * event)
@@ -1796,6 +1980,7 @@ fc_processDBZChangeEvent(const char * event)
 
     /* Check if it's a DDL or DML event */
     getPathElementString(jb, "payload.ddl", &strinfo);
+
     getPathElementString(jb, "payload.op", &strinfo);
 
     if (!strcmp(strinfo.data, "NULL"))
