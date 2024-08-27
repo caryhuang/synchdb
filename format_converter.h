@@ -61,6 +61,7 @@ typedef struct dbz_dml_column_value
 	char * value;	/* expressed as string as taken from json */
 	Oid datatype;	/* data type Oid as defined by PostgreSQL */
 	int position;	/* position of this column value, start from 1 */
+	int scale;		/* location of decimal point - decimal type only */
 } DBZ_DML_COLUMN_VALUE;
 
 /* Structure to represent a DML event */
