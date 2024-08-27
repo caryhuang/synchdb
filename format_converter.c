@@ -39,6 +39,8 @@
 #include "access/xact.h"
 #include "utils/snapmgr.h"
 #include "synchdb.h"
+#include "common/base64.h"
+#include "port/pg_bswap.h"
 
 extern bool synchdb_dml_use_spi;
 
@@ -67,15 +69,16 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	{{"REAL UNSIGNED", false}, "REAL", -1},
 	{{"FLOAT", false}, "REAL", -1},
 	{{"FLOAT UNSIGNED", false}, "REAL", -1},
-	{{"INT UNSIGNED", false}, "INT", -1},
-	{{"INTEGER UNSIGNED", false}, "INT", -1},
+	{{"INT UNSIGNED", false}, "BIGINT", -1},
+	{{"INTEGER UNSIGNED", false}, "BIGINT", -1},
 	{{"MEDIUMINT", false}, "INT", -1},
 	{{"MEDIUMINT UNSIGNED", false}, "INT", -1},
 	{{"YEAR", false}, "INT", -1},
-	{{"SMALLINT UNSIGNED", false}, "SMALLINT", -1},
+	{{"SMALLINT UNSIGNED", false}, "INT", -1},
 	{{"TINYINT", false}, "SMALLINT", -1},
 	{{"TINYINT UNSIGNED", false}, "SMALLINT", -1},
-	{{"DATETIME", false}, "TIMESTAMP", -1},
+	{{"DATETIME", false}, "TIMESTAMP WITHOUT TIME ZONE", -1},
+	{{"TIMESTAMP", false}, "TIMESTAMP WITH TIME ZONE", -1},
 	{{"BINARY", false}, "BYTEA", 0},
 	{{"VARBINARY", false}, "BYTEA", 0},
 	{{"BLOB", false}, "BYTEA", 0},
@@ -87,6 +90,7 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	{{"MEDIUMTEXT", false}, "TEXT", -1},
 	{{"TINYTEXT", false}, "TEXT", -1},
 	{{"JSON", false}, "JSONB", -1},
+	/* spatial types - map to TEXT by default */
 	{{"GEOMETRY", false}, "TEXT", -1},
 	{{"GEOMETRYCOLLECTION", false}, "TEXT", -1},
 	{{"LINESTRING", false}, "TEXT", -1},
@@ -98,6 +102,89 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 };
 
 #define SIZE_MYSQL_DATATYPE_MAPPING (sizeof(mysql_defaultTypeMappings) / sizeof(DatatypeHashEntry))
+
+static void
+bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char *output_string)
+{
+	char *ptr = NULL;
+
+	if (!output_string)
+		return;
+
+	strcpy(output_string, "'\\x");
+	ptr = output_string + 3; /* Skip "'\\x" */
+
+	for (size_t i = 0; i < length; i++)
+	{
+		sprintf(ptr, "%02X", byte_array[i]);
+		ptr += 2;
+	}
+
+	// Close the string with a single quote
+	strcat(ptr, "'");
+}
+
+static long
+derive_value_from_byte(const unsigned char * bytes, int len)
+{
+	long value = 0;
+	int i;
+
+	/* Convert the byte array to an integer */
+	for (i = 0; i < len; i++)
+	{
+		value = (value << 8) | bytes[i];
+	}
+
+	/*
+	 * If the value is signed and the most significant bit (MSB) is set,
+	 * sign-extend the value
+	 */
+	if ((bytes[0] & 0x80))
+	{
+		value |= -((long) 1 << (len * 8));
+	}
+	return value;
+}
+
+static void
+reverse_byte_array(unsigned char * array, int length)
+{
+	size_t start = 0;
+	size_t end = length - 1;
+	while (start < end)
+	{
+		unsigned char temp = array[start];
+		array[start] = array[end];
+		array[end] = temp;
+		start++;
+		end--;
+	}
+}
+
+static void
+byte_to_binary(unsigned char byte, char * binary_str)
+{
+	for (int i = 7; i >= 0; i--)
+	{
+		binary_str[7 - i] = (byte & (1 << i)) ? '1' : '0';
+	}
+	binary_str[8] = '\0';
+}
+
+static void
+bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_str)
+{
+	char byte_str[9];
+	size_t i = 0;
+	binary_str[0] = '\0';
+
+	for (i = 0; i < len; i++)
+	{
+		byte_to_binary(bytes[i], byte_str);
+		strcat(binary_str, byte_str);
+	}
+}
 
 /* Function to find exact match from given line */
 static bool
@@ -828,34 +915,71 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
  * as string and output a processed string based on type
  */
 static char *
-processDataByType(char * in, Oid type, bool addquote, ConnectorType conntype)
+processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType conntype)
 {
 	char * out = NULL;
+	char * in = colval->value;
 
 	if (!in || strlen(in) == 0)
 		return NULL;
 
-	if (!strcmp(in, "NULL") || !strcmp(in, "null"))
+	if (!strcasecmp(in, "NULL"))
 		return NULL;
 
-	switch(type)
+	switch(colval->datatype)
 	{
+		case BOOLOID:
 		case INT8OID:
 		case INT2OID:
-		case BOOLOID:
 		case INT4OID:
 		case FLOAT8OID:
 		case FLOAT4OID:
-		case NUMERICOID:
 		{
 			/* no extra processing for nunmeric types */
 			out = (char *) palloc0(strlen(in) + 1);
-			strncpy(out, in, strlen(in));
+			strlcpy(out, in, strlen(in) + 1);
 			break;
 		}
+		case NUMERICOID:
+		{
+			int newlen = 0, decimalpos = 0;
+			long value = 0;
+			char buffer[32] = {0};
+			int tmpoutlen = pg_b64_dec_len(strlen(in));
+			unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
+
+
+			tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+
+			value = derive_value_from_byte(tmpout, tmpoutlen);
+			elog(WARNING, "value %ld, scale %d", value, colval->scale);
+
+			snprintf(buffer, sizeof(buffer), "%ld", value);
+			if (colval->scale > 0)
+			{
+				newlen = strlen(buffer) + 1;	/* plus 1 decimal */
+				out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+
+				decimalpos = strlen(buffer) - colval->scale;
+				strncpy(out, buffer, decimalpos);
+				out[decimalpos] = '.';
+				strcpy(out + decimalpos + 1, buffer + decimalpos);
+			}
+			else
+			{
+				newlen = strlen(buffer);	/* no decimal */
+				out = (char *) palloc0(newlen + 1);
+				strlcpy(out, buffer, newlen + 1);
+			}
+			pfree(tmpout);
+			break;
+		}
+		case BPCHAROID:
 		case TEXTOID:
 		case VARCHAROID:
 		case CSTRINGOID:
+		case TIMESTAMPTZOID:
+		case JSONBOID:
 		{
 			if (addquote)
 			{
@@ -897,8 +1021,40 @@ processDataByType(char * in, Oid type, bool addquote, ConnectorType conntype)
 			else
 			{
 				out = (char *) palloc0(strlen(in) + 1);
-				strncpy(out, in, strlen(in));
+				strlcpy(out, in, strlen(in) + 1);
 			}
+			break;
+		}
+		case VARBITOID:
+		case BITOID:
+		{
+			int tmpoutlen = pg_b64_dec_len(strlen(in));
+			unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
+
+			tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
+
+			if (addquote)
+			{
+				/* 8 bits per byte + 2 single quotes + b + terminating null */
+				char * tmp = NULL;
+				out = (char *) palloc0((tmpoutlen * 8) + 2 + 1 + 1);
+				tmp = out;
+				reverse_byte_array(tmpout, tmpoutlen);
+				strcat(tmp, "'b");
+				tmp += 2;
+				bytes_to_binary_string(tmpout, tmpoutlen, tmp);
+				strcat(tmp, "'");
+			}
+			else
+			{
+				/* 8 bits per byte + terminating null */
+				out = (char *) palloc0(tmpoutlen * 8 + 1);
+				reverse_byte_array(tmpout, tmpoutlen);
+				bytes_to_binary_string(tmpout, tmpoutlen, out);
+			}
+			elog(WARNING, "%s decoded as %s", in, out);
+			pfree(tmpout);
+
 			break;
 		}
 		case DATEOID:
@@ -912,7 +1068,7 @@ processDataByType(char * in, Oid type, bool addquote, ConnectorType conntype)
 			struct tm epoch = {0};
 			time_t epoch_time, target_time;
 			struct tm *target_date;
-			char datestr[10 + 1]; /* yyyy-mm-dd */
+			char datestr[10 + 1]; /* YYYY-MM-DD */
 
 			/* since 1970-01-01 */
 			epoch.tm_year = 70;
@@ -927,30 +1083,108 @@ processDataByType(char * in, Oid type, bool addquote, ConnectorType conntype)
 			 * todo: convert to local timezone?
 			 */
 			target_date = gmtime(&target_time);
-			strftime(datestr, 11, "%Y-%m-%d", target_date);
+			strftime(datestr, sizeof(datestr), "%Y-%m-%d", target_date);
 
 			if (addquote)
 			{
-				/* date string needs quotes as well */
 				out = (char *) palloc0(strlen(datestr) + 2 + 1);
 				snprintf(out, strlen(datestr) + 2 + 1, "'%s'", datestr);
 			}
 			else
 			{
 				out = (char *) palloc0(strlen(datestr) + 1);
-				strncpy(out, datestr, strlen(datestr));
+				strlcpy(out, datestr,strlen(datestr) + 1);
+			}
+			break;
+		}
+		case TIMESTAMPOID:
+		{
+			/*
+			 * DBZ uses number of milliseconds since epoch to represent timestamp.
+			 * We convert to YYYY-MM-DDThh:mm:ss
+			 */
+			unsigned long long msecsSinceEpoch = atoll(in);
+			time_t seconds = msecsSinceEpoch / 1000;
+			struct tm *tm_info;
+			char timestamp[19 + 1] = {0};
+
+			tm_info = gmtime(&seconds);
+			snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d",
+					tm_info->tm_year + 1900,
+					tm_info->tm_mon + 1,
+					tm_info->tm_mday,
+					tm_info->tm_hour,
+					tm_info->tm_min,
+					tm_info->tm_sec);
+
+			if (addquote)
+			{
+				out = (char *) palloc0(strlen(timestamp) + 2 + 1);
+				snprintf(out, strlen(timestamp) + 2 + 1, "'%s'", timestamp);
+			}
+			else
+			{
+				out = (char *) palloc0(strlen(timestamp) + 1);
+				strlcpy(out, timestamp, strlen(timestamp) + 1);
 			}
 			break;
 		}
 		case TIMEOID:
-		case TIMESTAMPOID:
-		case TIMESTAMPTZOID:
+		{
+			/*
+			 * DBZ uses number of microseconds of a day to represent time.
+			 * We convert to hh:mm:ss
+			 */
+			unsigned long long usecsSinceMidnight = atoll(in);
+			time_t seconds = usecsSinceMidnight / 1000 / 1000;
+			char time[8 + 1] = {0};
+
+			snprintf(time, sizeof(time), "%02d:%02d:%02d",
+					(int)((seconds / (60 * 60)) % 24),
+					(int)((seconds / 60) % 60),
+					(int)(seconds % 60));
+
+			if (addquote)
+			{
+				out = (char *) palloc0(strlen(time) + 2 + 1);
+				snprintf(out, strlen(time) + 2 + 1, "'%s'", time);
+			}
+			else
+			{
+				out = (char *) palloc0(strlen(time) + 1);
+				strlcpy(out, time, strlen(time) + 1);
+			}
+			elog(WARNING, "out time %s", out);
+			break;
+		}
+		case BYTEAOID:
+		{
+			int tmpoutlen = pg_b64_dec_len(strlen(in));
+			unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
+
+			tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
+
+			if (addquote)
+			{
+				/* hexstring + 2 single quotes + '\x' + terminating null */
+				out = (char *) palloc0((tmpoutlen * 2) + 2 + 2 + 1);
+				bytearray_to_escaped_string(tmpout, tmpoutlen, out);
+			}
+			else
+			{
+				/* bytearray + terminating null */
+				out = (char *) palloc0(tmpoutlen + 1);
+				memcpy(out, tmpout, tmpoutlen);
+			}
+			pfree(tmpout);
+			break;
+		}
 		case TIMETZOID:
 		default:
 		{
 			/* todo: support more */
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "unsupported data type %d", type);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "unsupported data type %d", colval->datatype);
 			set_shm_connector_errmsg(conntype, msg);
 			elog(ERROR, "%s", msg);
 		}
@@ -1012,7 +1246,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 				foreach(cell, dbzdml->columnValuesAfter)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
-					char * data = processDataByType(colval->value, colval->datatype, true, type);
+					char * data = processDataByType(colval, true, type);
 
 					if (data != NULL)
 					{
@@ -1038,7 +1272,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval->value, colval->datatype, false, type);
+					char * data = processDataByType(colval, false, type);
 
 					if (data != NULL)
 					{
@@ -1068,7 +1302,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval->value, colval->datatype, true, type);
+					data = processDataByType(colval, true, type);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s", data);
@@ -1094,7 +1328,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval->value, colval->datatype, false, type);
+					char * data = processDataByType(colval, false, type);
 
 					if (data != NULL)
 					{
@@ -1123,7 +1357,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval->value, colval->datatype, true, type);
+					data = processDataByType(colval, true, type);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s,", data);
@@ -1145,7 +1379,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval->value, colval->datatype, true, type);
+					data = processDataByType(colval, true, type);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s", data);
@@ -1174,7 +1408,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 					PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval_after->value, colval_after->datatype, false, type);
+					char * data = processDataByType(colval_after, false, type);
 
 					if (data != NULL)
 					{
@@ -1187,7 +1421,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					pgcolval_after->datatype = colval_after->datatype;
 					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
 
-					data = processDataByType(colval_before->value, colval_before->datatype, false, type);
+					data = processDataByType(colval_before, false, type);
 
 					if (data != NULL)
 					{
@@ -1218,6 +1452,37 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 
 	elog(WARNING, "pgdml->dmlquery %s", pgdml->dmlquery);
 	return pgdml;
+}
+
+static void
+get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefore, int pos)
+{
+	StringInfoData strinfo;
+	char path[SYNCHDB_JSON_PATH_SIZE] = {0};
+
+	if (!colval || !colval->name || colval->datatype == InvalidOid)
+		return;
+
+	initStringInfo(&strinfo);
+
+	/* spcial case: numeric: need to obtain scale and precision from json */
+	if (colval->datatype == NUMERICOID)
+	{
+		elog(WARNING, "retrieving additional scale and precision parameters");
+
+		snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.parameters.scale",
+				isbefore ? 0 : 1, pos);
+
+		getPathElementString(jb, path, &strinfo);
+
+		if (!strcasecmp(strinfo.data, "NULL"))
+			colval->scale = -1;	/* has no scale */
+		else
+			colval->scale = atoi(strinfo.data);	/* has scale */
+	}
+
+	if(strinfo.data)
+		pfree(strinfo.data);
 }
 
 static DBZ_DML *
@@ -1344,7 +1609,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		{
 			elog(DEBUG2, "Name '%s' already exists with OID %u and position %d", entry->name, entry->oid, entry->position);
 		}
-
 	}
 	table_close(rel, NoLock);
 
@@ -1384,7 +1648,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			dmlpayload = getPathElementJsonb(jb, "payload.after");
 			if (dmlpayload)
 			{
-				int pause = 0;
+				int pause = 0, pos = 0;
 				it = JsonbIteratorInit(&dmlpayload->root);
 				while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
 				{
@@ -1495,6 +1759,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						{
 							colval->datatype = entry->oid;
 							colval->position = entry->position;
+
+							/* get additional parameters if applicable */
+							get_additional_parameters(jb, colval, false, pos);
 						}
 						else
 							elog(WARNING, "cannot find data type for column %s. None-existent column?", colval->name);
@@ -1506,6 +1773,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						pfree(value);
 						key = NULL;
 						value = NULL;
+						pos++;
 					}
 				}
 			}
