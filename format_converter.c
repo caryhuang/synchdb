@@ -45,8 +45,8 @@
 extern bool synchdb_dml_use_spi;
 
 static HTAB * mysqlDatatypeHash;
+static HTAB * sqlserverDatatypeHash;
 
-// Define the type mappings
 DatatypeHashEntry mysql_defaultTypeMappings[] =
 {
 	{{"INT", true}, "SERIAL", -1},
@@ -100,8 +100,48 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	{{"POINT", false}, "TEXT", -1},
 	{{"POLYGON", false}, "TEXT", -1}
 };
-
 #define SIZE_MYSQL_DATATYPE_MAPPING (sizeof(mysql_defaultTypeMappings) / sizeof(DatatypeHashEntry))
+
+DatatypeHashEntry sqlserver_defaultTypeMappings[] =
+{
+	{{"int identity", true}, "SERIAL", 0},
+	{{"bigint identity", true}, "BIGSERIAL", 0},
+	{{"smallint identity", true}, "SMALLSERIAL", 0},
+	{{"enum", false}, "TEXT", 0},
+	{{"int", false}, "INT", 0},
+	{{"bigint", false}, "BIGINT", 0},
+	{{"smallint", false}, "SMALLINT", 0},
+	{{"tinyint", false}, "SMALLINT", 0},
+	{{"numeric", false}, "NUMERIC", 0},
+	{{"decimal", false}, "NUMERIC", 0},
+	{{"bit", false}, "BOOL", 0},
+	{{"money", false}, "MONEY", 0},
+	{{"smallmoney", false}, "MONEY", 0},
+	{{"real", false}, "REAL", 0},
+	{{"float", false}, "REAL", 0},
+	{{"date", false}, "DATE", 0},
+	{{"time", false}, "TIME", 0},
+	{{"datetime", false}, "TIMESTAMP WITHOUT TIME ZONE", 0},
+	{{"datetime2", false}, "TIMESTAMP WITHOUT TIME ZONE", 0},
+	{{"datetimeoffset", false}, "TIMESTAMP WITH TIME ZONE", 0},
+	{{"smalldatetime", false}, "TIMESTAMP WITHOUT TIME ZONE", 0},
+	{{"char", false}, "CHAR", 0},
+	{{"varchar", false}, "VARCHAR", -1},
+	{{"text", false}, "TEXT", 0},
+	{{"nchar", false}, "CHAR", 0},
+	{{"nvarchar", false}, "VARCHAR", -1},
+	{{"ntext", false}, "TEXT", 0},
+	{{"binary", false}, "BYTEA", 0},
+	{{"varbinary", false}, "BYTEA", 0},
+	{{"image", false}, "BYTEA", 0},
+	{{"uniqueidentifier", false}, "UUID", 0},
+	{{"xml", false}, "TEXT", 0},
+	/* spatial types - map to TEXT by default */
+	{{"geometry", false}, "TEXT", 0},
+	{{"geography", false}, "TEXT", 0},
+};
+
+#define SIZE_SQLSERVER_DATATYPE_MAPPING (sizeof(sqlserver_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
 static void
 bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char *output_string)
@@ -752,33 +792,58 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 		}
 		case TYPE_SQLSERVER:
 		{
-			/*
-			 * todo: column data type conversion cases for SqlServer:
-			 *  - if type is int identity and autoincremented is true, translate to SERIAL
-			 *  - if type is bigint identity and autoincremented is true, translate to BIGSERIAL
-			 *  - if type is smallint identity and autoincremented is true, translate to SMALLSERIAL
-			 *  - if type is ENUM, translate to TEXT with length=0
-			 *  - if type is GEOMETRY, translate to TEXT
-			 */
-			if (!strcasecmp(col->typeName, "int identity") && col->autoIncremented)
-				appendStringInfo(strinfo, " %s %s ", col->name, "SERIAL");
-			else if (!strcasecmp(col->typeName, "bigint identity") && col->autoIncremented)
-				appendStringInfo(strinfo, " %s %s ", col->name, "BIGSERIAL");
-			else if (!strcasecmp(col->typeName, "smallint identity") && col->autoIncremented)
-				appendStringInfo(strinfo, " %s %s ", col->name, "SMALLSERIAL");
-			else if (!strcasecmp(col->typeName, "ENUM"))
+			DatatypeHashEntry * entry;
+			DatatypeHashKey key = {0};
+			bool found = 0;
+
+			key.autoIncremented = col->autoIncremented;
+			strcpy(key.extTypeName, col->typeName);
+			entry = (DatatypeHashEntry *) hash_search(sqlserverDatatypeHash, &key, HASH_FIND, &found);
+			if (!found)
 			{
-				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
-				col->length = 0;	/* this prevents adding a fixed size for TEXT */
-			}
-			else if (!strcmp(col->typeName, "GEOMETRY"))
-				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
-			else
+				/* no mapping found, so no transformation done */
+				elog(WARNING, "no transformation done for %s (autoincrement %d)",
+						key.extTypeName, key.autoIncremented);
 				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+			}
+			else
+			{
+				/* use the mapped values and sizes */
+				elog(WARNING, "transform %s (autoincrement %d) to %s with length %d",
+						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+						entry->pgsqlTypeLength);
+				appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+				if (entry->pgsqlTypeLength != -1)
+					col->length = entry->pgsqlTypeLength;
+			}
+//			/*
+//			 * todo: column data type conversion cases for SqlServer:
+//			 *  - if type is int identity and autoincremented is true, translate to SERIAL
+//			 *  - if type is bigint identity and autoincremented is true, translate to BIGSERIAL
+//			 *  - if type is smallint identity and autoincremented is true, translate to SMALLSERIAL
+//			 *  - if type is ENUM, translate to TEXT with length=0
+//			 *  - if type is GEOMETRY, translate to TEXT
+//			 */
+//			if (!strcasecmp(col->typeName, "int identity") && col->autoIncremented)
+//				appendStringInfo(strinfo, " %s %s ", col->name, "SERIAL");
+//			else if (!strcasecmp(col->typeName, "bigint identity") && col->autoIncremented)
+//				appendStringInfo(strinfo, " %s %s ", col->name, "BIGSERIAL");
+//			else if (!strcasecmp(col->typeName, "smallint identity") && col->autoIncremented)
+//				appendStringInfo(strinfo, " %s %s ", col->name, "SMALLSERIAL");
+//			else if (!strcasecmp(col->typeName, "ENUM"))
+//			{
+//				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
+//				col->length = 0;	/* this prevents adding a fixed size for TEXT */
+//			}
+//			else if (!strcmp(col->typeName, "GEOMETRY"))
+//				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
+//			else
+//				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
 
 			/* set the length to 0 to prevent adding a fixed size for non-string columne types */
-			if (strcasecmp(col->typeName, "varchar") && strcasecmp(col->typeName, "char") && col->length > 0)
-				col->length = 0;
+//			if (strcasecmp(col->typeName, "varchar") && strcasecmp(col->typeName, "char") && col->length > 0)
+//				col->length = 0;
 
 			break;
 		}
@@ -862,6 +927,8 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				appendStringInfo(&strinfo, "(%d) ", col->length);
 			}
 
+			/* todo: only col->scale case. such as TIMESTAMP(6) */
+
 			/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
 			if (strstr(col->typeName, "UNSIGNED"))
 			{
@@ -940,6 +1007,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			strlcpy(out, in, strlen(in) + 1);
 			break;
 		}
+		case MONEYOID:
 		case NUMERICOID:
 		{
 			int newlen = 0, decimalpos = 0;
@@ -967,9 +1035,24 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			}
 			else
 			{
-				newlen = strlen(buffer);	/* no decimal */
-				out = (char *) palloc0(newlen + 1);
-				strlcpy(out, buffer, newlen + 1);
+				/* make scale = 4 to account for cents */
+				if (colval->datatype == MONEYOID)
+				{
+					colval->scale = 4;
+					newlen = strlen(buffer) + 1;	/* plus 1 decimal */
+					out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+
+					decimalpos = strlen(buffer) - colval->scale;
+					strncpy(out, buffer, decimalpos);
+					out[decimalpos] = '.';
+					strcpy(out + decimalpos + 1, buffer + decimalpos);
+				}
+				else
+				{
+					newlen = strlen(buffer);	/* no decimal */
+					out = (char *) palloc0(newlen + 1);
+					strlcpy(out, buffer, newlen + 1);
+				}
 			}
 			pfree(tmpout);
 			break;
@@ -980,6 +1063,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 		case CSTRINGOID:
 		case TIMESTAMPTZOID:
 		case JSONBOID:
+		case UUIDOID:
 		{
 			if (addquote)
 			{
@@ -1060,15 +1144,42 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 		case DATEOID:
 		{
 			/*
-			 * DBZ uses number of days since epoch 1970-01-01 to represent a date.
-			 * to decode, we need to add this number to epoch to get the final
-			 * date value and converts it to string as output
+			 * we need to process these time related values based on the timerep
+			 * that has been determined during the parsing stage
 			 */
-			unsigned int daysSinceEpoch = atoi(in);
+			unsigned long long input = atoll(in);
+			time_t dayssinceepoch = 0;
 			struct tm epoch = {0};
 			time_t epoch_time, target_time;
 			struct tm *target_date;
 			char datestr[10 + 1]; /* YYYY-MM-DD */
+
+			switch (colval->timerep)
+			{
+				case TIME_DATE:
+					/* number of days since epoch, no conversion needed */
+					dayssinceepoch = (time_t) input;
+					break;
+				case TIME_TIMESTAMP:
+					/* number of milliseconds since epoch - convert to days since epoch */
+					dayssinceepoch = (time_t)(input / 86400000LL);
+					break;
+				case TIME_MICROTIMESTAMP:
+					/* number of microseconds since epoch - convert to days since epoch */
+					dayssinceepoch = (time_t)(input / 86400000000LL);
+					break;
+				case TIME_NANOTIMESTAMP:
+					/* number of microseconds since epoch - convert to days since epoch */
+					dayssinceepoch = (time_t)(input / 86400000000000LL);
+					break;
+				case TIME_UNDEF:
+				default:
+				{
+					set_shm_connector_errmsg(conntype, "no time representation available to"
+							"process DATEOID value");
+					elog(ERROR, "no time representation available to process DATEOID value");
+				}
+			}
 
 			/* since 1970-01-01 */
 			epoch.tm_year = 70;
@@ -1076,7 +1187,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			epoch.tm_mday = 1;
 
 			epoch_time = mktime(&epoch);
-			target_time = epoch_time + (daysSinceEpoch * 24 * 60 * 60);
+			target_time = epoch_time + (dayssinceepoch * 24 * 60 * 60);
 
 			/*
 			 * Convert to struct tm in GMT timezone for now
@@ -1095,19 +1206,42 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				out = (char *) palloc0(strlen(datestr) + 1);
 				strlcpy(out, datestr,strlen(datestr) + 1);
 			}
+
 			break;
 		}
 		case TIMESTAMPOID:
 		{
 			/*
-			 * DBZ uses number of milliseconds since epoch to represent timestamp.
-			 * We convert to YYYY-MM-DDThh:mm:ss
+			 * we need to process these time related values based on the timerep
+			 * that has been determined during the parsing stage
 			 */
-			unsigned long long msecsSinceEpoch = atoll(in);
-			time_t seconds = msecsSinceEpoch / 1000;
+			unsigned long long input = atoll(in);
+			time_t seconds = 0;
 			struct tm *tm_info;
 			char timestamp[19 + 1] = {0};
 
+			switch (colval->timerep)
+			{
+				case TIME_TIMESTAMP:
+					/* milliseconds since epoch - convert to seconds since epoch */
+					seconds = (time_t)(input / 1000);
+					break;
+				case TIME_MICROTIMESTAMP:
+					/* microseconds since epoch - convert to seconds since epoch */
+					seconds = (time_t)(input / 1000 / 1000);
+					break;
+				case TIME_NANOTIMESTAMP:
+					/* microseconds since epoch - convert to seconds since epoch */
+					seconds = (time_t)(input / 1000 / 1000 / 1000);
+					break;
+				case TIME_UNDEF:
+				default:
+				{
+					set_shm_connector_errmsg(conntype, "no time representation available to"
+							"process TIMESTAMPOID value");
+					elog(ERROR, "no time representation available to process TIMESTAMPOID value");
+				}
+			}
 			tm_info = gmtime(&seconds);
 			snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d",
 					tm_info->tm_year + 1900,
@@ -1132,13 +1266,35 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 		case TIMEOID:
 		{
 			/*
-			 * DBZ uses number of microseconds of a day to represent time.
-			 * We convert to hh:mm:ss
+			 * we need to process these time related values based on the timerep
+			 * that has been determined during the parsing stage
 			 */
-			unsigned long long usecsSinceMidnight = atoll(in);
-			time_t seconds = usecsSinceMidnight / 1000 / 1000;
+			unsigned long long input = atoll(in);
+			time_t seconds = 0;
 			char time[8 + 1] = {0};
 
+			switch(colval->timerep)
+			{
+				case TIME_TIME:
+					/* milliseconds since midnight - convert to seconds since midnight */
+					seconds = (time_t)(input / 1000);
+					break;
+				case TIME_MICROTIME:
+					/* microseconds since midnight - convert to seconds since midnight */
+					seconds = (time_t)(input / 1000 / 1000);
+					break;
+				case TIME_NANOTIME:
+					/* nanoseconds since midnight - convert to seconds since midnight */
+					seconds = (time_t)(input / 1000 / 1000 / 1000);
+					break;
+				case TIME_UNDEF:
+				default:
+				{
+					set_shm_connector_errmsg(conntype, "no time representation available to"
+							"process TIMEOID value");
+					elog(ERROR, "no time representation available to process TIMEOID value");
+				}
+			}
 			snprintf(time, sizeof(time), "%02d:%02d:%02d",
 					(int)((seconds / (60 * 60)) % 24),
 					(int)((seconds / 60) % 60),
@@ -1465,20 +1621,67 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 
 	initStringInfo(&strinfo);
 
-	/* spcial case: numeric: need to obtain scale and precision from json */
+	switch (colval->datatype)
+	{
+		case NUMERICOID:
+		{
+			/* spcial numeric case: need to obtain scale and precision from json */
+			elog(WARNING, "numeric: retrieving additional scale and precision parameters");
+
+			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.parameters.scale",
+					isbefore ? 0 : 1, pos);
+
+			getPathElementString(jb, path, &strinfo);
+
+			if (!strcasecmp(strinfo.data, "NULL"))
+				colval->scale = -1;	/* has no scale */
+			else
+				colval->scale = atoi(strinfo.data);	/* has scale */
+			break;
+		}
+		case DATEOID:
+		case TIMEOID:
+		case TIMESTAMPOID:
+		case TIMETZOID:
+		{
+			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.name",
+					isbefore ? 0 : 1, pos);
+
+			getPathElementString(jb, path, &strinfo);
+
+			if (!strcasecmp(strinfo.data, "NULL"))
+				colval->timerep = TIME_UNDEF;	/* has no specific representation */
+			else
+			{
+				if (find_exact_string_match(strinfo.data, "io.debezium.time.Date"))
+					colval->timerep = TIME_DATE;
+				else if (find_exact_string_match(strinfo.data, "io.debezium.time.Time"))
+					colval->timerep = TIME_TIME;
+				else if (find_exact_string_match(strinfo.data, "io.debezium.time.MicroTime"))
+					colval->timerep = TIME_MICROTIME;
+				else if (find_exact_string_match(strinfo.data, "io.debezium.time.NanoTime"))
+					colval->timerep = TIME_NANOTIME;
+				else if (find_exact_string_match(strinfo.data, "io.debezium.time.Timestamp"))
+					colval->timerep = TIME_TIMESTAMP;
+				else if (find_exact_string_match(strinfo.data, "io.debezium.time.MicroTimestamp"))
+					colval->timerep = TIME_MICROTIMESTAMP;
+				else if (find_exact_string_match(strinfo.data, "io.debezium.time.NanoTimestamp"))
+					colval->timerep = TIME_NANOTIMESTAMP;
+				else if (find_exact_string_match(strinfo.data, "io.debezium.time.ZonedTimestamp"))
+					colval->timerep = TIME_ZONEDTIMESTAMP;
+				else
+					colval->timerep = TIME_UNDEF;
+				elog(WARNING, "timerep %d", colval->timerep);
+			}
+			break;
+		}
+		default:
+			break;
+	}
+
 	if (colval->datatype == NUMERICOID)
 	{
-		elog(WARNING, "retrieving additional scale and precision parameters");
 
-		snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.parameters.scale",
-				isbefore ? 0 : 1, pos);
-
-		getPathElementString(jb, path, &strinfo);
-
-		if (!strcasecmp(strinfo.data, "NULL"))
-			colval->scale = -1;	/* has no scale */
-		else
-			colval->scale = atoi(strinfo.data);	/* has scale */
 	}
 
 	if(strinfo.data)
@@ -1760,8 +1963,13 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							colval->datatype = entry->oid;
 							colval->position = entry->position;
 
-							/* get additional parameters if applicable */
-							get_additional_parameters(jb, colval, false, pos);
+							/*
+							 * get additional parameters if applicable - this assumes the position
+							 * in dbz json array is the same as the position created in PostgreSQL
+							 * table. If later we introduced column mappings or both have different
+							 * number of columns. This part needs update too - todo
+							 */
+							get_additional_parameters(jb, colval, false, entry->position - 1);
 						}
 						else
 							elog(WARNING, "cannot find data type for column %s. None-existent column?", colval->name);
@@ -2174,6 +2382,47 @@ init_mysql(void)
 	}
 }
 
+static void
+init_sqlserver(void)
+{
+	HASHCTL	info;
+	int i = 0;
+	DatatypeHashEntry * entry;
+	bool found = 0;
+
+	info.keysize = sizeof(DatatypeHashKey);
+	info.entrysize = sizeof(DatatypeHashEntry);
+	info.hcxt = CurrentMemoryContext;
+
+	sqlserverDatatypeHash = hash_create("sqlserver datatype hash",
+							 256,
+							 &info,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	for (i = 0; i < SIZE_SQLSERVER_DATATYPE_MAPPING; i++)
+	{
+		entry = (DatatypeHashEntry *) hash_search(sqlserverDatatypeHash, &(sqlserver_defaultTypeMappings[i].key), HASH_ENTER, &found);
+		if (!found)
+		{
+			entry->key.autoIncremented = sqlserver_defaultTypeMappings[i].key.autoIncremented;
+			strncpy(entry->key.extTypeName,
+					sqlserver_defaultTypeMappings[i].key.extTypeName,
+					strlen(sqlserver_defaultTypeMappings[i].key.extTypeName));
+
+			entry->pgsqlTypeLength = sqlserver_defaultTypeMappings[i].pgsqlTypeLength;
+			strncpy(entry->pgsqlTypeName,
+					sqlserver_defaultTypeMappings[i].pgsqlTypeName,
+					strlen(sqlserver_defaultTypeMappings[i].pgsqlTypeName));
+
+			elog(WARNING, "Inserted mapping '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+		}
+		else
+		{
+			elog(WARNING, "mapping exists '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+		}
+	}
+}
+
 void
 fc_initFormatConverter(ConnectorType connectorType)
 {
@@ -2190,6 +2439,7 @@ fc_initFormatConverter(ConnectorType connectorType)
 		}
 		case TYPE_SQLSERVER:
 		{
+			init_sqlserver();
 			break;
 		}
 		default:

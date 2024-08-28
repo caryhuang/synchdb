@@ -23,6 +23,20 @@
 #include "replication_agent.h"
 #include "synchdb.h"
 
+/* structure to hold possible time representations in DBZ engine */
+typedef enum _timeRep
+{
+	TIME_UNDEF = 0,
+	TIME_DATE,				/* number of days since epoch */
+	TIME_TIME,				/* number of milliseconds since epoch */
+	TIME_MICROTIME,			/* number of microseconds since midnight */
+	TIME_NANOTIME,			/* number of nanoseconds since midnight */
+	TIME_TIMESTAMP,			/* number of milliseconds since epoch */
+	TIME_MICROTIMESTAMP,	/* number of microseconds since epoch */
+	TIME_NANOTIMESTAMP,		/* number of nanoseconds since epoch */
+	TIME_ZONEDTIMESTAMP,	/* string representation of timestamp with timezone */
+} TimeRep;
+
 /* Structure to represent a column in a DDL event */
 typedef struct dbz_ddl_column
 {
@@ -62,6 +76,7 @@ typedef struct dbz_dml_column_value
 	Oid datatype;	/* data type Oid as defined by PostgreSQL */
 	int position;	/* position of this column value, start from 1 */
 	int scale;		/* location of decimal point - decimal type only */
+	int timerep;	/* how dbz represents time related fields */
 } DBZ_DML_COLUMN_VALUE;
 
 /* Structure to represent a DML event */
