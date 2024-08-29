@@ -77,8 +77,8 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	{{"SMALLINT UNSIGNED", false}, "INT", -1},
 	{{"TINYINT", false}, "SMALLINT", -1},
 	{{"TINYINT UNSIGNED", false}, "SMALLINT", -1},
-	{{"DATETIME", false}, "TIMESTAMP WITHOUT TIME ZONE", -1},
-	{{"TIMESTAMP", false}, "TIMESTAMP WITH TIME ZONE", -1},
+	{{"DATETIME", false}, "TIMESTAMP", -1},
+	{{"TIMESTAMP", false}, "TIMESTAMPTZ", -1},
 	{{"BINARY", false}, "BYTEA", 0},
 	{{"VARBINARY", false}, "BYTEA", 0},
 	{{"BLOB", false}, "BYTEA", 0},
@@ -121,10 +121,10 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 	{{"float", false}, "REAL", 0},
 	{{"date", false}, "DATE", 0},
 	{{"time", false}, "TIME", 0},
-	{{"datetime", false}, "TIMESTAMP WITHOUT TIME ZONE", 0},
-	{{"datetime2", false}, "TIMESTAMP WITHOUT TIME ZONE", 0},
-	{{"datetimeoffset", false}, "TIMESTAMP WITH TIME ZONE", 0},
-	{{"smalldatetime", false}, "TIMESTAMP WITHOUT TIME ZONE", 0},
+	{{"datetime", false}, "TIMESTAMP", 0},
+	{{"datetime2", false}, "TIMESTAMP", 0},
+	{{"datetimeoffset", false}, "TIMESTAMPTZ", 0},
+	{{"smalldatetime", false}, "TIMESTAMP", 0},
 	{{"char", false}, "CHAR", 0},
 	{{"varchar", false}, "VARCHAR", -1},
 	{{"text", false}, "TEXT", 0},
@@ -816,35 +816,23 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 
 				if (entry->pgsqlTypeLength != -1)
 					col->length = entry->pgsqlTypeLength;
+
+				/*
+				 * special handling for sqlserver: the scale parameter for timestamp,
+				 * and time date types are sent as "scale" not as "length" as in
+				 * mysql case. So we need to use the scale value here
+				 */
+				if (col->scale > 0 && (find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMP") ||
+						find_exact_string_match(entry->pgsqlTypeName, "TIME") ||
+						find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMPTZ")))
+				{
+					/* postgresql can only support up to 6 */
+					if (col->scale > 6)
+						appendStringInfo(strinfo, "(6) ");
+					else
+						appendStringInfo(strinfo, "(%d) ", col->scale);
+				}
 			}
-//			/*
-//			 * todo: column data type conversion cases for SqlServer:
-//			 *  - if type is int identity and autoincremented is true, translate to SERIAL
-//			 *  - if type is bigint identity and autoincremented is true, translate to BIGSERIAL
-//			 *  - if type is smallint identity and autoincremented is true, translate to SMALLSERIAL
-//			 *  - if type is ENUM, translate to TEXT with length=0
-//			 *  - if type is GEOMETRY, translate to TEXT
-//			 */
-//			if (!strcasecmp(col->typeName, "int identity") && col->autoIncremented)
-//				appendStringInfo(strinfo, " %s %s ", col->name, "SERIAL");
-//			else if (!strcasecmp(col->typeName, "bigint identity") && col->autoIncremented)
-//				appendStringInfo(strinfo, " %s %s ", col->name, "BIGSERIAL");
-//			else if (!strcasecmp(col->typeName, "smallint identity") && col->autoIncremented)
-//				appendStringInfo(strinfo, " %s %s ", col->name, "SMALLSERIAL");
-//			else if (!strcasecmp(col->typeName, "ENUM"))
-//			{
-//				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
-//				col->length = 0;	/* this prevents adding a fixed size for TEXT */
-//			}
-//			else if (!strcmp(col->typeName, "GEOMETRY"))
-//				appendStringInfo(strinfo, " %s %s ", col->name, "TEXT");
-//			else
-//				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
-
-			/* set the length to 0 to prevent adding a fixed size for non-string columne types */
-//			if (strcasecmp(col->typeName, "varchar") && strcasecmp(col->typeName, "char") && col->length > 0)
-//				col->length = 0;
-
 			break;
 		}
 		default:
@@ -926,8 +914,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				appendStringInfo(&strinfo, "(%d) ", col->length);
 			}
-
-			/* todo: only col->scale case. such as TIMESTAMP(6) */
 
 			/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
 			if (strstr(col->typeName, "UNSIGNED"))
@@ -1020,7 +1006,6 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
 
 			value = derive_value_from_byte(tmpout, tmpoutlen);
-			elog(WARNING, "value %ld, scale %d", value, colval->scale);
 
 			snprintf(buffer, sizeof(buffer), "%ld", value);
 			if (colval->scale > 0)
@@ -1136,7 +1121,6 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				reverse_byte_array(tmpout, tmpoutlen);
 				bytes_to_binary_string(tmpout, tmpoutlen, out);
 			}
-			elog(WARNING, "%s decoded as %s", in, out);
 			pfree(tmpout);
 
 			break;
@@ -1206,7 +1190,6 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				out = (char *) palloc0(strlen(datestr) + 1);
 				strlcpy(out, datestr,strlen(datestr) + 1);
 			}
-
 			break;
 		}
 		case TIMESTAMPOID:
@@ -1216,24 +1199,77 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			 * that has been determined during the parsing stage
 			 */
 			unsigned long long input = atoll(in);
-			time_t seconds = 0;
+			time_t seconds = 0, remains = 0;
 			struct tm *tm_info;
-			char timestamp[19 + 1] = {0};
+			char timestamp[26 + 1] = {0};	/* yyyy-MM-ddThh:mm:ss.xxxxxx */
 
 			switch (colval->timerep)
 			{
 				case TIME_TIMESTAMP:
 					/* milliseconds since epoch - convert to seconds since epoch */
 					seconds = (time_t)(input / 1000);
+					remains = input % 1000;
 					break;
 				case TIME_MICROTIMESTAMP:
 					/* microseconds since epoch - convert to seconds since epoch */
 					seconds = (time_t)(input / 1000 / 1000);
+					remains = input % 1000000;
 					break;
 				case TIME_NANOTIMESTAMP:
 					/* microseconds since epoch - convert to seconds since epoch */
 					seconds = (time_t)(input / 1000 / 1000 / 1000);
+					remains = input % 1000000000;
 					break;
+				case TIME_ZONEDTIMESTAMP:
+					/*
+					 * sent as string - just treat it like a string and skip the
+					 * rest of processing logic
+					 */
+					if (addquote)
+					{
+						size_t i = 0, j = 0;
+						size_t outlen = 0;
+
+						/* escape possible single quotes */
+						for (i = 0; i < strlen(in); i++)
+						{
+							if (in[i] == '\'')
+							{
+								/* single quote will be escaped so +2 in size */
+								outlen += 2;
+							}
+							else
+							{
+								outlen++;
+							}
+						}
+
+						/* 2 more to account for open and closing quotes */
+						out = (char *) palloc0(outlen + 2 + 1);
+
+						out[j++] = '\'';
+						for (i = 0; i < strlen(in); i++)
+						{
+							if (in[i] == '\'')
+							{
+								out[j++] = '\'';
+								out[j++] = '\'';
+							}
+							else
+							{
+								out[j++] = in[i];
+							}
+						}
+						out[j++] = '\'';
+					}
+					else
+					{
+						out = (char *) palloc0(strlen(in) + 1);
+						strlcpy(out, in, strlen(in) + 1);
+					}
+
+					/* skip the rest of processing */
+					return out;
 				case TIME_UNDEF:
 				default:
 				{
@@ -1243,13 +1279,33 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				}
 			}
 			tm_info = gmtime(&seconds);
-			snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d",
-					tm_info->tm_year + 1900,
-					tm_info->tm_mon + 1,
-					tm_info->tm_mday,
-					tm_info->tm_hour,
-					tm_info->tm_min,
-					tm_info->tm_sec);
+
+			if (colval->typemod > 0)
+			{
+				/*
+				 * it means we could include additional precision to timestamp. PostgreSQL
+				 * supports up to 6 digits of precision. We always put 6, PostgreSQL will
+				 * round it up or down as defined by table schema
+				 */
+				snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d.%06ld",
+						tm_info->tm_year + 1900,
+						tm_info->tm_mon + 1,
+						tm_info->tm_mday,
+						tm_info->tm_hour,
+						tm_info->tm_min,
+						tm_info->tm_sec,
+						remains);
+			}
+			else
+			{
+				snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d",
+						tm_info->tm_year + 1900,
+						tm_info->tm_mon + 1,
+						tm_info->tm_mday,
+						tm_info->tm_hour,
+						tm_info->tm_min,
+						tm_info->tm_sec);
+			}
 
 			if (addquote)
 			{
@@ -1270,22 +1326,25 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			 * that has been determined during the parsing stage
 			 */
 			unsigned long long input = atoll(in);
-			time_t seconds = 0;
-			char time[8 + 1] = {0};
+			time_t seconds = 0, remains = 0;
+			char time[15 + 1] = {0};	/* hh:mm:ss.xxxxxx */
 
 			switch(colval->timerep)
 			{
 				case TIME_TIME:
 					/* milliseconds since midnight - convert to seconds since midnight */
 					seconds = (time_t)(input / 1000);
+					remains = input % 1000;
 					break;
 				case TIME_MICROTIME:
 					/* microseconds since midnight - convert to seconds since midnight */
 					seconds = (time_t)(input / 1000 / 1000);
+					remains = input % 1000000;
 					break;
 				case TIME_NANOTIME:
 					/* nanoseconds since midnight - convert to seconds since midnight */
 					seconds = (time_t)(input / 1000 / 1000 / 1000);
+					remains = input % 1000000000;
 					break;
 				case TIME_UNDEF:
 				default:
@@ -1295,10 +1354,21 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 					elog(ERROR, "no time representation available to process TIMEOID value");
 				}
 			}
-			snprintf(time, sizeof(time), "%02d:%02d:%02d",
-					(int)((seconds / (60 * 60)) % 24),
-					(int)((seconds / 60) % 60),
-					(int)(seconds % 60));
+			if (colval->typemod > 0)
+			{
+				snprintf(time, sizeof(time), "%02d:%02d:%02d.%06ld",
+						(int)((seconds / (60 * 60)) % 24),
+						(int)((seconds / 60) % 60),
+						(int)(seconds % 60),
+						remains);
+			}
+			else
+			{
+				snprintf(time, sizeof(time), "%02d:%02d:%02d",
+						(int)((seconds / (60 * 60)) % 24),
+						(int)((seconds / 60) % 60),
+						(int)(seconds % 60));
+			}
 
 			if (addquote)
 			{
@@ -1310,7 +1380,6 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				out = (char *) palloc0(strlen(time) + 1);
 				strlcpy(out, time, strlen(time) + 1);
 			}
-			elog(WARNING, "out time %s", out);
 			break;
 		}
 		case BYTEAOID:
@@ -1806,6 +1875,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			strncpy(entry->name, NameStr(attr->attname), NAMEDATALEN);
 			entry->oid = attr->atttypid;
 			entry->position = attnum;
+			entry->typemod = attr->atttypmod;
 			elog(DEBUG2, "Inserted name '%s' with OID %u and position %d", entry->name, entry->oid, entry->position);
 		}
 		else
@@ -1962,6 +2032,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						{
 							colval->datatype = entry->oid;
 							colval->position = entry->position;
+							colval->typemod = entry->typemod;
 
 							/*
 							 * get additional parameters if applicable - this assumes the position
@@ -2113,6 +2184,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						{
 							colval->datatype = entry->oid;
 							colval->position = entry->position;
+							colval->typemod = entry->typemod;
+
+							get_additional_parameters(jb, colval, true, entry->position - 1);
 						}
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
@@ -2272,6 +2346,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							{
 								colval->datatype = entry->oid;
 								colval->position = entry->position;
+								colval->typemod = entry->typemod;
+
+								if (i == 0)
+									get_additional_parameters(jb, colval, true, entry->position - 1);
+								else
+									get_additional_parameters(jb, colval, false, entry->position - 1);
 							}
 							else
 								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
@@ -2405,11 +2485,13 @@ init_sqlserver(void)
 		if (!found)
 		{
 			entry->key.autoIncremented = sqlserver_defaultTypeMappings[i].key.autoIncremented;
+			memset(entry->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
 			strncpy(entry->key.extTypeName,
 					sqlserver_defaultTypeMappings[i].key.extTypeName,
 					strlen(sqlserver_defaultTypeMappings[i].key.extTypeName));
 
 			entry->pgsqlTypeLength = sqlserver_defaultTypeMappings[i].pgsqlTypeLength;
+			memset(entry->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
 			strncpy(entry->pgsqlTypeName,
 					sqlserver_defaultTypeMappings[i].pgsqlTypeName,
 					strlen(sqlserver_defaultTypeMappings[i].pgsqlTypeName));

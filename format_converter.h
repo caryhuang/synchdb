@@ -66,6 +66,7 @@ typedef struct
 	char name[NAMEDATALEN];
 	Oid oid;
 	int position;
+	int typemod;
 } NameOidEntry;
 
 /* Structure to represent a column value in a DML event */
@@ -77,6 +78,7 @@ typedef struct dbz_dml_column_value
 	int position;	/* position of this column value, start from 1 */
 	int scale;		/* location of decimal point - decimal type only */
 	int timerep;	/* how dbz represents time related fields */
+	int typemod;	/* extra data type modifier */
 } DBZ_DML_COLUMN_VALUE;
 
 /* Structure to represent a DML event */
