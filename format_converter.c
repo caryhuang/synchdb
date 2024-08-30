@@ -52,6 +52,7 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	{{"INT", true}, "SERIAL", -1},
 	{{"BIGINT", true}, "BIGSERIAL", -1},
 	{{"SMALLINT", true}, "SMALLSERIAL", -1},
+	{{"MEDIUMINT", true}, "SERIAL", -1},
 	{{"ENUM", false}, "TEXT", 0},
 	{{"BIGINT UNSIGNED", false}, "NUMERIC", -1},
 	{{"NUMERIC UNSIGNED", false}, "NUMERIC", -1},
@@ -262,9 +263,90 @@ remove_double_quotes(StringInfoData * str)
 	str->len = newlen;
 }
 
+/*
+ * this function constructs primary key clauses based on jsonin. jsonin
+ * is expected to be a json array with string element, for example:
+ * ["col1","col2"]
+ */
+static void
+populate_primary_keys(StringInfoData * strinfo, const char * jsonin)
+{
+	Datum jsonb_datum;
+	Jsonb * jb;
+	JsonbIterator *it;
+	JsonbIteratorToken r;
+	JsonbValue v;
+	char * value = NULL;
+	bool isfirst = true;
+
+	jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonin));
+	jb = DatumGetJsonbP(jsonb_datum);
+
+	it = JsonbIteratorInit(&jb->root);
+	while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
+	{
+		switch (r)
+		{
+			case WJB_BEGIN_ARRAY:
+				break;
+			case WJB_END_ARRAY:
+				/*
+				 * if at least one primary key is appended, we need to remove the last comma
+				 * and close parenthesis
+				 */
+				if (!isfirst)
+				{
+					strinfo->data[strinfo->len - 1] = '\0';
+					strinfo->len = strinfo->len - 1;
+					appendStringInfo(strinfo, ")");
+				}
+				break;
+			case WJB_VALUE:
+			case WJB_ELEM:
+			{
+				switch(v.type)
+				{
+					case jbvString:
+						value = pnstrdup(v.val.string.val, v.val.string.len);
+						elog(WARNING, "primary key column: %s", value);
+						if (isfirst)
+						{
+							appendStringInfo(strinfo, ", PRIMARY KEY(");
+							appendStringInfo(strinfo, "%s,", value);
+							isfirst = false;
+						}
+						else
+						{
+							appendStringInfo(strinfo, "%s,", value);
+						}
+						pfree(value);
+						break;
+					case jbvNull:
+					case jbvNumeric:
+					case jbvBool:
+					case jbvBinary:
+					default:
+						elog(ERROR, "Unknown or unexpected value type: %d while "
+								"parsing primaryKeyColumnNames", v.type);
+						break;
+				}
+				break;
+			}
+			case WJB_BEGIN_OBJECT:
+			case WJB_END_OBJECT:
+			case WJB_KEY:
+			default:
+			{
+				elog(ERROR, "Unknown or unexpected token: %d while "
+						"parsing primaryKeyColumnNames", r);
+				break;
+			}
+		}
+	}
+}
 /* Function to get a string element from a JSONB path */
 static int
-getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout)
+getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool removequotes)
 {
 	Datum * datum_elems = NULL;
 	char * str_elems = NULL, * p = path;
@@ -338,7 +420,8 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout)
 		 * note: buf.data includes double quotes and escape char \.
 		 * We need to remove them
 		 */
-		remove_double_quotes(strinfoout);
+		if (removequotes)
+			remove_double_quotes(strinfoout);
 		elog(WARNING, "%s = %s", path, strinfoout->data);
     }
 
@@ -509,13 +592,13 @@ parseDBZDDL(Jsonb * jb)
 	 * todo: we only support parsing 1 set of DDL for now using hardcoded
 	 * array index 0. Need to remove this limitation later
 	 */
-    getPathElementString(jb, "payload.tableChanges.0.id", &strinfo);
+    getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true);
     ddlinfo->id = pstrdup(strinfo.data);
 
-    getPathElementString(jb, "payload.tableChanges.0.table.primaryKeyColumnNames", &strinfo);
+    getPathElementString(jb, "payload.tableChanges.0.table.primaryKeyColumnNames", &strinfo, false);
     ddlinfo->primaryKeyColumnNames = pstrdup(strinfo.data);
 
-    getPathElementString(jb, "payload.tableChanges.0.type", &strinfo);
+    getPathElementString(jb, "payload.tableChanges.0.type", &strinfo, true);
     ddlinfo->type = pstrdup(strinfo.data);
 
     /* free the data inside strinfo as we no longer needs it */
@@ -555,9 +638,19 @@ parseDBZDDL(Jsonb * jb)
 		 *   },
 		 *   ...... rest of array elements
 		 *
+		 * columns arrat may contains another array of enumValues, this is ignored
+		 * for now as enums are mapped to text as of now
+		 *
+		 *	   "enumValues":
+		 *     [
+         *         "'fish'",
+         *         "'mammal'",
+         *         "'bird'"
+         *     ]
 		 */
 		if (ddlpayload)
 		{
+			int pause = 0;
 			/* iterate this payload jsonb */
 			it = JsonbIteratorInit(&ddlpayload->root);
 			while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
@@ -580,23 +673,34 @@ parseDBZDDL(Jsonb * jb)
 
 						break;
 					case WJB_BEGIN_ARRAY:
-						elog(DEBUG2, "Begin array under %s", key ? key : "NULL");
+						elog(WARNING, "Begin array under %s", key ? key : "NULL");
 						if (key)
 						{
+							elog(WARNING, "sub array detected, skip it");
+							pause = 1;
 							pfree(key);
 							key = NULL;
 						}
 						break;
 					case WJB_END_ARRAY:
-						elog(DEBUG2, "End array");
+						elog(WARNING, "End array");
+						if (pause)
+						{
+							elog(WARNING, "sub array ended, resume parsing operation");
+							pause = 0;
+						}
 						break;
 					case WJB_KEY:
+						if (pause)
+							break;
 						key = pnstrdup(v.val.string.val, v.val.string.len);
 						elog(DEBUG2, "Key: %s", key);
 
 						break;
 					case WJB_VALUE:
 					case WJB_ELEM:
+						if (pause)
+							break;
 						switch (v.type)
 						{
 							case jbvNull:
@@ -850,7 +954,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 {
 	PG_DDL * pgddl = (PG_DDL*) palloc0(sizeof(PG_DDL));
 	ListCell * cell;
-
 	StringInfoData strinfo;
 
 	initStringInfo(&strinfo);
@@ -921,12 +1024,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				appendStringInfo(&strinfo, "CHECK (%s >= 0) ", col->name);
 			}
 
-			/* if it is marked as primary key */
-			if (find_exact_string_match(dbzddl->primaryKeyColumnNames, col->name))
-			{
-				appendStringInfo(&strinfo, "PRIMARY KEY ");
-			}
-
 			/* is it optional? */
 			if (!col->optional)
 			{
@@ -946,6 +1043,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		/* remove the last extra comma */
 		strinfo.data[strinfo.len - 1] = '\0';
 		strinfo.len = strinfo.len - 1;
+
+		/*
+		 * finally, declare primary keys if any. iterate dbzddl->primaryKeyColumnNames
+		 * and build into primary key(x, y, z) clauses. todo
+		 */
+		populate_primary_keys(&strinfo, dbzddl->primaryKeyColumnNames);
 
 		appendStringInfo(&strinfo, ");");
 	}
@@ -1700,7 +1803,7 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.parameters.scale",
 					isbefore ? 0 : 1, pos);
 
-			getPathElementString(jb, path, &strinfo);
+			getPathElementString(jb, path, &strinfo, true);
 
 			if (!strcasecmp(strinfo.data, "NULL"))
 				colval->scale = -1;	/* has no scale */
@@ -1716,7 +1819,7 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.name",
 					isbefore ? 0 : 1, pos);
 
-			getPathElementString(jb, path, &strinfo);
+			getPathElementString(jb, path, &strinfo, true);
 
 			if (!strcasecmp(strinfo.data, "NULL"))
 				colval->timerep = TIME_UNDEF;	/* has no specific representation */
@@ -1783,10 +1886,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 	dbzdml = (DBZ_DML *) palloc0(sizeof(DBZ_DML));
 
-	getPathElementString(jb, "payload.source.db", &strinfo);
+	getPathElementString(jb, "payload.source.db", &strinfo, true);
 	dbzdml->db = pstrdup(strinfo.data);
 
-	getPathElementString(jb, "payload.source.table", &strinfo);
+	getPathElementString(jb, "payload.source.table", &strinfo, true);
 	dbzdml->table = pstrdup(strinfo.data);
 
 	if (!dbzdml->db || !dbzdml->table)
@@ -1921,7 +2024,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			dmlpayload = getPathElementJsonb(jb, "payload.after");
 			if (dmlpayload)
 			{
-				int pause = 0, pos = 0;
+				int pause = 0;
 				it = JsonbIteratorInit(&dmlpayload->root);
 				while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
 				{
@@ -1949,7 +2052,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 									elog(WARNING, "parse the entire sub element under %s as string", key);
 
 									snprintf(tmpPath, pathsize, "payload.after.%s", key);
-									getPathElementString(jb, tmpPath, &strinfo);
+									getPathElementString(jb, tmpPath, &strinfo, false);
 									value = pstrdup(strinfo.data);
 									if(tmpPath)
 										pfree(tmpPath);
@@ -2052,7 +2155,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						pfree(value);
 						key = NULL;
 						value = NULL;
-						pos++;
 					}
 				}
 			}
@@ -2102,7 +2204,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 									elog(WARNING, "parse the entire sub element under %s as string", key);
 
 									snprintf(tmpPath, pathsize, "payload.before.%s", key);
-									getPathElementString(jb, tmpPath, &strinfo);
+									getPathElementString(jb, tmpPath, &strinfo, false);
 									value = pstrdup(strinfo.data);
 									if(tmpPath)
 										pfree(tmpPath);
@@ -2264,7 +2366,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 											snprintf(tmpPath, pathsize, "payload.before.%s", key);
 										else
 											snprintf(tmpPath, pathsize, "payload.after.%s", key);
-										getPathElementString(jb, tmpPath, &strinfo);
+										getPathElementString(jb, tmpPath, &strinfo, false);
 										value = pstrdup(strinfo.data);
 										if(tmpPath)
 											pfree(tmpPath);
@@ -2574,14 +2676,14 @@ fc_processDBZChangeEvent(const char * event)
     jb = DatumGetJsonbP(jsonb_datum);
 
     /* Get connector type */
-    getPathElementString(jb, "payload.source.connector", &strinfo);
+    getPathElementString(jb, "payload.source.connector", &strinfo, true);
 
     type = fc_get_connector_type(strinfo.data);
 
     /* Check if it's a DDL or DML event */
-    getPathElementString(jb, "payload.ddl", &strinfo);
+    getPathElementString(jb, "payload.ddl", &strinfo, true);
 
-    getPathElementString(jb, "payload.op", &strinfo);
+    getPathElementString(jb, "payload.op", &strinfo, true);
 
     if (!strcmp(strinfo.data, "NULL"))
     {
