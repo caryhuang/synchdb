@@ -29,7 +29,9 @@
 #define SYNCHDB_MYSQL_OFFSET_FILE "pg_synchdb/mysql_offsets.dat"
 #define SYNCHDB_ORACLE_OFFSET_FILE "pg_synchdb/oracle_offsets.dat"
 #define SYNCHDB_SQLSERVER_OFFSET_FILE "pg_synchdb/sqlserver_offsets.dat"
+#define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 
+#define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
 /* Enumerations */
 
 /**
@@ -123,6 +125,7 @@ typedef struct _SynchdbSharedState
  */
 typedef struct _ConnectionInfo
 {
+	char *name;
     char *hostname;
     unsigned int port;
     char *user;

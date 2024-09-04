@@ -28,8 +28,75 @@
 #include "parser/parse_relation.h"
 #include "replication/logicalrelation.h"
 #include "synchdb.h"
+#include "utils/builtins.h"
+#include "utils/jsonb.h"
 
 extern bool synchdb_dml_use_spi;
+extern uint64 SPI_processed;
+
+/*
+ * This function performs SPI_execute SELECT and returns an array of
+ * Datums that represent each column, Caller is expected to know exactly
+ * how to process this array of Datums
+ */
+static Datum *
+spi_execute_select_one(const char * query, int * numcols)
+{
+	int ret = -1, i = 0;
+	int numrows = -1;
+	TupleDesc tupdesc;
+	HeapTuple tuple;
+	Datum colval;
+	Datum * rowval;
+	bool isnull;
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+	{
+		elog(WARNING, "synchdb_pgsql - SPI_connect failed");
+		return NULL;
+	}
+
+	/* we only want to select 1 row */
+	ret = SPI_execute(query, true, 1);
+	switch (ret)
+	{
+		case SPI_OK_SELECT:
+		{
+			break;
+		}
+		default:
+		{
+			SPI_finish();
+			return NULL;
+		}
+	}
+	numrows = SPI_processed;
+	if (numrows == 0)
+	{
+		SPI_finish();
+		return NULL;
+	}
+
+	/* only one row expected */
+	tuple = SPI_tuptable->vals[0];
+	tupdesc = SPI_tuptable->tupdesc;
+	*numcols = tupdesc->natts;
+
+	rowval = (Datum *) palloc0(*numcols * sizeof(Datum));
+
+	for (i = 0; i < *numcols; i++)
+	{
+		colval = SPI_getbinval(tuple, tupdesc, i+1, &isnull);
+		if (isnull)
+			rowval[i] = (Datum) 0;
+		else
+			rowval[i] = colval;
+	}
+
+	/* Close the connection */
+	SPI_finish();
+	return rowval;
+}
 
 /*
  * spi_execute - Execute a query using the Server Programming Interface (SPI)
@@ -38,20 +105,30 @@ extern bool synchdb_dml_use_spi;
  * and handles any errors that occur during execution.
  */
 static int
-spi_execute(char * query, ConnectorType type)
+spi_execute(const char * query, ConnectorType type)
 {
 	int ret = -1;
+	bool skiptx = false;
+
+	/*
+	 * if we are already in transaction or transaction block, we can skip
+	 * the transaction and snapshot acquisition code below
+	 */
+	if (IsTransactionOrTransactionBlock())
+		skiptx = true;
 
 	PG_TRY();
 	{
-		/* Start a transaction and set up a snapshot */
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
+		if (!skiptx)
+		{
+			/* Start a transaction and set up a snapshot */
+			StartTransactionCommand();
+			PushActiveSnapshot(GetTransactionSnapshot());
+		}
 
 		if (SPI_connect() != SPI_OK_CONNECT)
 		{
-			elog(WARNING, "synchdb_pgsql - SPI_connect failed");
-			return ret;
+			elog(ERROR, "synchdb_pgsql - SPI_connect failed");
 		}
 
 		ret = SPI_exec(query, 0);
@@ -62,26 +139,26 @@ spi_execute(char * query, ConnectorType type)
 			case SPI_OK_DELETE:
 			case SPI_OK_UPDATE:
 			{
-				elog(WARNING, "SPI OK with ret %d", ret);
 				break;
 			}
 			default:
 			{
-				SPI_finish();
-				elog(WARNING, "SPI_exec failed: %d", ret);
-				return ret;
+				elog(ERROR, "SPI_exec failed: %d", ret);
 			}
 		}
 
 		ret = 0;
 		if (SPI_finish() != SPI_OK_FINISH)
 		{
-			elog(WARNING, "SPI_finish failed");
+			elog(ERROR, "SPI_finish failed");
 		}
 
-		/* Commit the transaction */
-		PopActiveSnapshot();
-		CommitTransactionCommand();
+		if (!skiptx)
+		{
+			/* Commit the transaction */
+			PopActiveSnapshot();
+			CommitTransactionCommand();
+		}
 	}
 	PG_CATCH();
 	{
@@ -615,4 +692,54 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type)
 		}
 	}
 	return -1;
+}
+
+int
+ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** connector)
+{
+	int numcols = -1;
+	StringInfoData strinfo;
+	Datum * res;
+
+	initStringInfo(&strinfo);
+
+	appendStringInfo(&strinfo, "SELECT "
+			"coalesce(data->>'hostname', 'null'), "
+			"coalesce(data->>'port', 'null'), "
+			"coalesce(data->>'user', 'null'), "
+			"pgp_sym_decrypt((data->>'pwd')::bytea, '%s'), "
+			"coalesce(data->>'srcdb', 'null'), "
+			"coalesce(data->>'dstdb', 'null'), "
+			"coalesce(data->>'table', 'null'), "
+			"coalesce(data->>'connector', 'null') FROM "
+			"synchdb_conninfo WHERE name = '%s'",
+			SYNCHDB_SECRET, name);
+
+	res = spi_execute_select_one(strinfo.data, &numcols);
+	if (!res)
+	{
+		elog(WARNING, "connection name %s does not exist", name);
+		return -1;
+	}
+	conninfo->name = pstrdup(name);
+	conninfo->hostname = pstrdup(TextDatumGetCString(res[0]));
+	conninfo->port = atoi(TextDatumGetCString(res[1]));
+	conninfo->user = pstrdup(TextDatumGetCString(res[2]));
+	conninfo->pwd = pstrdup(TextDatumGetCString(res[3]));
+	conninfo->src_db = pstrdup(TextDatumGetCString(res[4]));
+	conninfo->dst_db = pstrdup(TextDatumGetCString(res[5]));
+	conninfo->table = pstrdup(TextDatumGetCString(res[6]));
+	*connector = pstrdup(TextDatumGetCString(res[7]));
+
+	elog(DEBUG2, "name %s hostname %s, port %d, user %s pwd %s srcdb %s dstdb %s table %s connector %s",
+			conninfo->name, conninfo->hostname, conninfo->port,
+			conninfo->user, conninfo->pwd, conninfo->src_db,
+			conninfo->dst_db, conninfo->table, *connector);
+	pfree(res);
+	return 0;
+}
+
+int ra_executeCommand(const char * query)
+{
+	return spi_execute(query, TYPE_UNDEF);
 }
