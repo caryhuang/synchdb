@@ -37,6 +37,7 @@
 #include "varatt.h"
 #include "funcapi.h"
 #include "synchdb.h"
+#include "replication_agent.h"
 
 PG_MODULE_MAGIC;
 
@@ -47,6 +48,7 @@ PG_FUNCTION_INFO_V1(synchdb_get_state);
 PG_FUNCTION_INFO_V1(synchdb_pause_engine);
 PG_FUNCTION_INFO_V1(synchdb_resume_engine);
 PG_FUNCTION_INFO_V1(synchdb_set_offset);
+PG_FUNCTION_INFO_V1(synchdb_add_conninfo);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -1344,7 +1346,6 @@ set_shm_connector_errmsg(ConnectorType type, const char *err)
 		break;
 	/* todo: support more dbz connector types here */
 	default:
-		elog(WARNING, "Unsupported connector type: %d", type);
 		break;
 	}
 
@@ -1609,7 +1610,7 @@ _PG_init(void)
 void
 _PG_fini(void)
 {
-	/* Currently empty, can be used for cleanup if needed */
+	elog(WARNING," shutdown synchdb");
 }
 
 /*
@@ -1673,78 +1674,26 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	BgwHandleStatus status;
 	pid_t pid;
 	ConnectionInfo connInfo;
-	char *connector;
+	char *connector = NULL;
+	int ret = -1;
 
 	/* Parse input arguments */
-	/* Parse input arguments */
-	text *hostname_text = PG_GETARG_TEXT_PP(0);
-	text *user_text = PG_GETARG_TEXT_PP(2);
-	text *pwd_text = PG_GETARG_TEXT_PP(3);
-	text *src_db_text = PG_GETARG_TEXT_PP(4);
-	text *dst_db_text = PG_GETARG_TEXT_PP(5);
-	text *table_text = PG_GETARG_TEXT_PP(6);
-	text *connector_text = PG_GETARG_TEXT_PP(7);
+	text *name_text = PG_GETARG_TEXT_PP(0);
 
 	/* Sanity check on input arguments */
-	if (VARSIZE(hostname_text) - VARHDRSZ == 0)
+	if (VARSIZE(name_text) - VARHDRSZ == 0)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("hostname cannot be empty")));
+				 errmsg("connection name cannot be empty")));
 	}
-	connInfo.hostname = text_to_cstring(hostname_text);
 
-	connInfo.port = PG_GETARG_UINT32(1);
-	if (connInfo.port == 0 || connInfo.port > 65535)
-	{
+	ret = ra_getConninfoByName(text_to_cstring(name_text), &connInfo, &connector);
+	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("invalid port number")));
-	}
-
-	if (VARSIZE(user_text) - VARHDRSZ == 0)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("username cannot be empty")));
-	}
-	connInfo.user = text_to_cstring(user_text);
-
-	if (VARSIZE(pwd_text) - VARHDRSZ == 0)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("password cannot be empty")));
-	}
-	connInfo.pwd = text_to_cstring(pwd_text);
-
-	/* source database can be empty or NULL */
-	if (VARSIZE(src_db_text) - VARHDRSZ == 0)
-		connInfo.src_db = "null";
-	else
-		connInfo.src_db = text_to_cstring(src_db_text);
-
-	if (VARSIZE(dst_db_text) - VARHDRSZ == 0)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("destination database cannot be empty")));
-	}
-	connInfo.dst_db = text_to_cstring(dst_db_text);
-
-	/* table can be empty or NULL */
-	if (VARSIZE(table_text) - VARHDRSZ == 0)
-		connInfo.table = "null";
-	else
-		connInfo.table = text_to_cstring(table_text);
-
-	if (VARSIZE(connector_text) - VARHDRSZ == 0)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("connector type cannot be empty")));
-	}
-	connector = text_to_cstring(connector_text);
+				 errmsg("connection name does not exist"),
+				 errhint("use synchdb_add_conninfo to add one first")));
 
 	/* prepare background worker */
 	MemSet(&worker, 0, sizeof(BackgroundWorker));
@@ -2072,4 +2021,111 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 
 	elog(WARNING, "sent update offset request interrupt to dbz connector (%s)", connector);
 	PG_RETURN_INT32(0);
+}
+
+Datum
+synchdb_add_conninfo(PG_FUNCTION_ARGS)
+{
+	text *name_text = PG_GETARG_TEXT_PP(0);
+	text *hostname_text = PG_GETARG_TEXT_PP(1);
+	unsigned int port = PG_GETARG_UINT32(2);
+	text *user_text = PG_GETARG_TEXT_PP(3);
+	text *pwd_text = PG_GETARG_TEXT_PP(4);
+	text *src_db_text = PG_GETARG_TEXT_PP(5);
+	text *dst_db_text = PG_GETARG_TEXT_PP(6);
+	text *table_text = PG_GETARG_TEXT_PP(7);
+	text *connector_text = PG_GETARG_TEXT_PP(8);
+	char *connector;
+
+	ConnectionInfo connInfo;
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	/* Sanity check on input arguments */
+	if (VARSIZE(name_text) - VARHDRSZ == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("name cannot be empty")));
+	}
+	connInfo.name = text_to_cstring(name_text);
+
+	/* Sanity check on input arguments */
+	if (VARSIZE(hostname_text) - VARHDRSZ == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("hostname cannot be empty")));
+	}
+	connInfo.hostname = text_to_cstring(hostname_text);
+
+	connInfo.port = port;
+	if (connInfo.port == 0 || connInfo.port > 65535)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid port number")));
+	}
+
+	if (VARSIZE(user_text) - VARHDRSZ == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("username cannot be empty")));
+	}
+	connInfo.user = text_to_cstring(user_text);
+
+	if (VARSIZE(pwd_text) - VARHDRSZ == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("password cannot be empty")));
+	}
+	connInfo.pwd = text_to_cstring(pwd_text);
+
+	/* source database can be empty or NULL */
+	if (VARSIZE(src_db_text) - VARHDRSZ == 0)
+		connInfo.src_db = "null";
+	else
+		connInfo.src_db = text_to_cstring(src_db_text);
+
+	if (VARSIZE(dst_db_text) - VARHDRSZ == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("destination database cannot be empty")));
+	}
+	connInfo.dst_db = text_to_cstring(dst_db_text);
+
+	/* table can be empty or NULL */
+	if (VARSIZE(table_text) - VARHDRSZ == 0)
+		connInfo.table = "null";
+	else
+		connInfo.table = text_to_cstring(table_text);
+
+	if (VARSIZE(connector_text) - VARHDRSZ == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("connector type cannot be empty")));
+	}
+	connector = text_to_cstring(connector_text);
+
+	appendStringInfo(&strinfo, "INSERT INTO %s (name, data)"
+			" VALUES ('%s', jsonb_build_object('hostname', '%s', "
+			"'port', %d, 'user', '%s', 'pwd', pgp_sym_encrypt('%s', '%s'), "
+			"'srcdb', '%s', 'dstdb', '%s', 'table', '%s', 'connector', '%s') );",
+			SYNCHDB_CONNINFO_TABLE,
+			connInfo.name,
+			connInfo.hostname,
+			connInfo.port,
+			connInfo.user,
+			connInfo.pwd,
+			SYNCHDB_SECRET,
+			connInfo.src_db,
+			connInfo.dst_db,
+			connInfo.table,
+			connector);
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
 }

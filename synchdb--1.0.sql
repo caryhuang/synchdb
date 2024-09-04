@@ -1,7 +1,7 @@
 --complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION synchdb" to load this file. \quit
  
-CREATE OR REPLACE FUNCTION synchdb_start_engine_bgw(text, int, text, text, text, text, text, text) RETURNS int
+CREATE OR REPLACE FUNCTION synchdb_start_engine_bgw(text) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
@@ -26,3 +26,11 @@ LANGUAGE C IMMUTABLE STRICT;
 CREATE OR REPLACE FUNCTION synchdb_set_offset(text, text) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_add_conninfo(text, text, int, text, text, text, text, text, text) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
+--CREATE TABLE IF NOT EXISTS synchdb_conninfo(name TEXT PRIMARY KEY, host TEXT NOT NULL, port INTEGER NOT NULL CHECK (port > 0 AND port <= 65535), username TEXT NOT NULL, password BYTEA);
+CREATE TABLE IF NOT EXISTS synchdb_conninfo(name TEXT PRIMARY KEY, data JSONB);
+

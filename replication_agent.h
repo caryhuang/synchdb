@@ -49,5 +49,7 @@ typedef struct pg_dml
 /* Function prototypes */
 int ra_executePGDDL(PG_DDL * pgddl, ConnectorType type);
 int ra_executePGDML(PG_DML * pgdml, ConnectorType type);
+int ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** connector);
+int ra_executeCommand(const char * query);
 
 #endif /* SYNCHDB_REPLICATION_AGENT_H_ */

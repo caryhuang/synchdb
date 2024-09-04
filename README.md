@@ -196,16 +196,18 @@ initdb -D synchdbtest
 pg_ctl -D synchdbtest -l logfile start
 ```
 
-Install SynchDB extension to the database:
-Please make sure you have set the path to the Debezium Runner Engine Jar in environment variable DBZ_ENGINE_DIR. Otherwise, the extension will fail to create.
+SynchDB extension requires pgcrypto to encrypt certain sensitive credential data. Please make sure it is installed prior to installing SynchDB. Alternatively, you can include `CASCADE` clause in `CREATE EXTENSION` to automatically install dependencies:
+
 ```
-CREATE EXTENSION synchdb;
+CREATE EXTENSION synchdb CASCADE;
 ```
 
-Use the SQL function `synchdb_start_engine_bgw` to spawn a new background worker to capture CDC from a heterogeneous database such as MySQL.
+### Create a Connection Information
+After SynchDB is installed, we can create a connection information entries that represents how to connect to a remote heterogeneous database and what to replicate. This can be done with `synchdb_add_conninfo()` function.
 
-## Usage of `synchdb_start_engine_bgw`
-`synchdb_start_engine_bgw` takes these arguments:
+## Usage of `synchdb_add_conninfo`
+`synchdb_add_conninfo` takes these arguments:
+  `name` - a unique identifier that represents this connection info
 * `hostname` - the IP address of heterogeneous database.
 * `port` - the port number to connect to.
 * `username` - user name to use to connect.
@@ -215,16 +217,17 @@ Use the SQL function `synchdb_start_engine_bgw` to spawn a new background worker
 * `table` (optional) - expressed in the form of `[database].[table]` that must exists in MySQL so the engine will only replicate the specified tables. If empty, all tables are replicated.
 * `connector` - the connector to use (MySQL, Oracle, or SQLServer). Currently only MySQL and SQLServer are supported.
 
-### Example Usage
-To replicate all tables from the 'inventory' database from MySQL:
+For example:
 ```
-select synchdb_start_engine_bgw('127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');
+SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');
+SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver');
 ```
-This command will spawn a dedicated background worker that will replicate all tables from the 'inventory' database from MySQL database.
 
-To replicate only specific tables (`orders` and `customers`):
+Other Examples:
+
+To create a connection information to replicate only specific tables (`orders` and `customers`) from MySQL:
 ```
-select synchdb_start_engine_bgw('127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'mysql');
+SELECT synchdb_add_conninfo('mysqlconn2', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'mysql');
 ```
 
 The replicated changes will be mapped to a schema in destination database. For example, a table named `orders` from database `inventory` in MySQL will be replicated to a table named `orders` under schema `inventory`.
@@ -232,10 +235,36 @@ The replicated changes will be mapped to a schema in destination database. For e
 To replicate from SQL Server to a different database in PostgreSQL:
 ```
 create database sqlserverdb;
-select synchdb_start_engine_bgw('127.0.0.1',1433, 'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver');
+SELECT synchdb_add_conninfo('sqlserverconn2','127.0.0.1',1433, 'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver');
 ```
 
-The above will spawn a second worker to replicate changes from SQL server to a PostgreSQL database called `sqlserverdb`.
+The above connection information (when run) will spawn a second worker to replicate changes from SQL server to a PostgreSQL database called `sqlserverdb`.
+
+### Review all Connection Information Created
+All connection information are created in the table `synchdb_conninfo`. We are free to view its content and make modification as required. Please note that the password of a user credential is encrypted by pgcrypto. 
+
+```
+postgres=# \x
+Expanded display is on.
+
+postgres=# select * from synchdb_conninfo;
+-[ RECORD 1 ]-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+name | mysqlconn
+data | {"pwd": "\\xc30d040703024828cc4d982e47b07bd23901d03e40da5995d2a631fb89d49f748b87247aee94070f71ecacc4990c3e71cad9f68d57c440de42e35bcc78fd145feab03452e454284289db", "port": 3306, "user": "mysqluser", "dstdb": "postgres", "srcdb": "inventory", "table": "null", "hostname": "192.168.1.86", "connector": "mysql"}
+-[ RECORD 2 ]-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+name | sqlserverconn
+data | {"pwd": "\\xc30d0407030231678e1bb0f8d3156ad23a010ca3a4b0ad35ed148f8181224885464cdcfcec42de9834878e2311b343cd184fde65e0051f75d6a12d5c91d0a0403549fe00e4219215eafe1b", "port": 1433, "user": "sa", "dstdb": "sqlserverdb", "srcdb": "testDB", "table": "null", "hostname": "192.168.1.86", "connector": "sqlserver"}
+```
+
+Use the SQL function `synchdb_start_engine_bgw` to spawn a new background worker to capture CDC from a heterogeneous database such as MySQL.
+
+### Start a Connector Worker
+We can use `synchdb_start_engine_bgw` function to start a connector worker. It takes one argument which is the connection information name created above. Based on the connection information, the command will spawn a worker with specific replication configuration. For example:
+
+```
+select synchdb_start_engine_bgw('mysqlconn');
+select synchdb_start_engine_bgw('sqlserverconn');
+```
 
 ### Checking Running Workers
 You can check the running workers using the `ps` command:
