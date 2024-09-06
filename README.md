@@ -219,29 +219,32 @@ After SynchDB is installed, we can create a connection information entries that 
 
 For example:
 ```
+# create a mysql conninfo called 'mysqlconn' to replicate from source database 'inventory' to destination database 'postgres'
 SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');
+
+# create a second mysql conninfo called 'mysqlconn2' to replicate from source database 'inventory' to destination database 'mysqldb2'
+SELECT synchdb_add_conninfo('mysqlconn2','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'mysqldb2', '', 'mysql');
+
+# create a sqlserver conninfo called 'sqlserverconn' to replicate from source database 'testDB' to destination database 'sqlserverdb'
 SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver');
+
+# create a second sqlserver conninfo called 'sqlserverconn2' to replicate from source database 'testDB' to destination database 'sqlserverdb2'
+SELECT synchdb_add_conninfo('sqlserverconn2','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb2', '', 'sqlserver');
+
 ```
 
 Other Examples:
 
 To create a connection information to replicate only specific tables (`orders` and `customers`) from MySQL:
 ```
-SELECT synchdb_add_conninfo('mysqlconn2', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'mysql');
+# create another mysql conninfo called 'mysqlconn3' to replicate from source database 'inventory''s orders and customers tabls to destination database 'mysqldb3'
+SELECT synchdb_add_conninfo('mysqlconn3', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'mysqldb3', 'inventory.orders,inventory.customers', 'mysql');
 ```
 
 The replicated changes will be mapped to a schema in destination database. For example, a table named `orders` from database `inventory` in MySQL will be replicated to a table named `orders` under schema `inventory`.
 
-To replicate from SQL Server to a different database in PostgreSQL:
-```
-create database sqlserverdb;
-SELECT synchdb_add_conninfo('sqlserverconn2','127.0.0.1',1433, 'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver');
-```
-
-The above connection information (when run) will spawn a second worker to replicate changes from SQL server to a PostgreSQL database called `sqlserverdb`.
-
 ### Review all Connection Information Created
-All connection information are created in the table `synchdb_conninfo`. We are free to view its content and make modification as required. Please note that the password of a user credential is encrypted by pgcrypto. 
+All connection information are created in the table `synchdb_conninfo`. We are free to view its content and make modification as required. Please note that the password of a user credential is encrypted by pgcrypto. See below for an example output: 
 
 ```
 postgres=# \x
@@ -266,7 +269,7 @@ select synchdb_start_engine_bgw('mysqlconn');
 select synchdb_start_engine_bgw('sqlserverconn');
 ```
 
-### Checking Running Workers
+### Check Running Connector Workers
 You can check the running workers using the `ps` command:
 ```
 ps -ef | grep postgres
@@ -286,15 +289,96 @@ ubuntu    153900  153865  0 15:49 ?        00:00:46 postgres: synchdb engine: my
 
 As you can see, there are 2 additional background workers(synchdb engine), one replicating from MySQL, the other replicating from SQL server.
 
-### Stopping a Worker
-To stop a running SynchDB background worker. Use the `synchdb_stop_engine_bgw` SQL function:
+### View the Connector States
+We can execute the `synchdb_state_view` view to examine all the running connectors and their states. Currently, synchdb can support up to 30 running workers. The output is grouped by a connector ID, which can be used as the key to run other synchdb control routines such as `synchdb_stop_engine_bgw()`
+
+See below for an example output:
 ```
-select synchdb_stop_engine_bgw('mysql');
-select synchdb_stop_engine_bgw('sqlserver');
+postgres=# select * from synchdb_state_view;
+ id | connector | conninfo_name  |  pid   |  state  |   err    |                                          last_dbz_offset
+----+-----------+----------------+--------+---------+----------+---------------------------------------------------------------------------------------------------
+  0 | mysql     | mysqlconn      | 461696 | syncing | no error | {"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}
+  1 | mysql     | mysqlconn2     | 461535 | syncing | no error | {"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}
+  2 | sqlserver | sqlserverconn  | 461739 | syncing | no error | {"event_serial_no":1,"commit_lsn":"00000100:00000c00:0003","change_lsn":"00000100:00000c00:0002"}
+  3 | sqlserver | sqlserverconn2 | 461971 | syncing | no error | offset file not flushed yet
+  4 | null      |                |     -1 | stopped | no error | no offset
+  5 | null      |                |     -1 | stopped | no error | no offset
+  6 | null      |                |     -1 | stopped | no error | no offset
+  7 | null      |                |     -1 | stopped | no error | no offset
+  8 | null      |                |     -1 | stopped | no error | no offset
+  9 | null      |                |     -1 | stopped | no error | no offset
+ 10 | null      |                |     -1 | stopped | no error | no offset
+ 11 | null      |                |     -1 | stopped | no error | no offset
+ 12 | null      |                |     -1 | stopped | no error | no offset
+ 13 | null      |                |     -1 | stopped | no error | no offset
+ 14 | null      |                |     -1 | stopped | no error | no offset
+ 15 | null      |                |     -1 | stopped | no error | no offset
+ 16 | null      |                |     -1 | stopped | no error | no offset
+ 17 | null      |                |     -1 | stopped | no error | no offset
+ 18 | null      |                |     -1 | stopped | no error | no offset
+ 19 | null      |                |     -1 | stopped | no error | no offset
+ 20 | null      |                |     -1 | stopped | no error | no offset
+ 21 | null      |                |     -1 | stopped | no error | no offset
+ 22 | null      |                |     -1 | stopped | no error | no offset
+ 23 | null      |                |     -1 | stopped | no error | no offset
+ 24 | null      |                |     -1 | stopped | no error | no offset
+ 25 | null      |                |     -1 | stopped | no error | no offset
+ 26 | null      |                |     -1 | stopped | no error | no offset
+ 27 | null      |                |     -1 | stopped | no error | no offset
+ 28 | null      |                |     -1 | stopped | no error | no offset
+ 29 | null      |                |     -1 | stopped | no error | no offset
 ```
 
- `synchdb_stop_engine_bgw` takes this argument:
-* connector - the connector type expressed as string, can be MySQL, Oracle, SQLServer regardless of capital or lower case. Currently only `mysql` and `sqlserver` are supported.
+Column Details:
+* id: unique identifier of a connector slot
+* connector: the type of connector (mysql, oracle, sqlserver...etc)
+* conninfo_name: the associated connection info name created by `synchdb_add_conninfo`
+* pid: the PID of the connector worker process
+* state: the state of the connector. Possible states are:
+	* stopped
+	* initializing
+	* paused
+	* syncing
+	* parsing
+	* converting
+	* executing
+	* updating offset
+	* unknown
+* err: the last error message encountered by the worker which would have caused it to exit
+* last_dbz_offset: the last Debezium offset captured by synchdb. Note that this may not reflect the current and real-time offset value of the connector engine. Rather, this is shown as a checkpoint that we could restart from this offeet point if needed.
+
+### Pause a Connector Worker
+We can use `synchdb_pause_engine()` SQL function to pause a runnng connector. This will halt the Debezium engine from replicating from the remote heterogeneous database. When paused, it is possible to alter the Debezium connector's offset value to replicate from a specific point in the past using `synchdb_set_offset()` SQL routine. It takes the `connector id` argument which can be found from the output of `synchdb_get_state()` view.
+
+For example:
+```
+SELECT synchdb_pause_engine(0);
+```
+
+### Update Connector Offset
+We can use `synchdb_set_offset()` SQL function to change a connector worker's starting offset. This can only be done when the connector is put into `paused` state. The function takes 2 parameters, connector Id and a valid offset string, both of which can be found from the output of `synchdb_get_state()` view.
+
+For example:
+```
+SELECT synchdb_set_offset(0, '{"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}'); 
+```
+
+### Resume Connector Offset
+We can use `synchdb_resume_engine()` SQL function to resume Debezium operation from a paused state. This function takes conenctor ID as its only parameter, which can be found from the output of `synchdb_get_state()` view.
+
+For example:
+```
+SELECT synchdb_resume_engine(0);
+```
+
+### Stopping a Worker
+We can use `synchdb_stop_engine_bgw()` SQL function to stop a running or paused connector worker. This function takes conenctor ID as its only parameter, which can be found from the output of `synchdb_get_state()` view.
+
+For example:
+```
+select synchdb_stop_engine_bgw(0);
+select synchdb_stop_engine_bgw(1);
+```
 
 ### Metadata Files
 During the synchdb operations, metadata files (offsets and schemahistory files) are generated by DBZ engine and they are by default located in `$PGDATA/pg_synchdb` directory:
@@ -305,8 +389,8 @@ ls $PGDATA/pg_synchdb
 
 Sample output:
 ```
-mysql_mysqluser@127.0.0.1_3306_offsets.dat        sqlserver_sa@127.0.0.1_1433_offsets.dat
-mysql_mysqluser@127.0.0.1_3306_schemahistory.dat  sqlserver_sa@127.0.0.1_1433_schemahistory.dat
+mysql_mysqlconn_offsets.dat        sqlserver_sqlserverconn_offsets.dat
+mysql_mysqlconn_schemahistory.dat  sqlserver_sqlserverconn_schemahistory.dat
 ```
 
 Each DBZ engine worker has its own pair of metadata files. These store the schema information to build the source tables and the offsets to resume upon restarting.
@@ -315,16 +399,16 @@ Each DBZ engine worker has its own pair of metadata files. These store the schem
 To restart replication from the beginning:
 1. Stop the Debezium engine:
 ```
-select synchdb_stop_engine_bgw('mysql');
+select synchdb_stop_engine_bgw(0);
 ```
 2. Remove the metadata files:
 ```
-rm $PGDATA/pg_synchdb/mysql_mysqluser@127.0.0.1_3306_offsets.dat
-rm $PGDATA/pg_synchdb/mysql_mysqluser@127.0.0.1_3306_schemahistory.dat
+rm $PGDATA/pg_synchdb/mysql_mysqlconn_offsets.dat
+rm $PGDATA/pg_synchdb/mysql_mysqlconn_schemahistory.dat
 ```
 3. Restart the Debezium engine:
 ```
-select synchdb_start_engine_bgw('127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');
+select synchdb_start_engine_bgw('mysqlconn');
 ```
 
 ## Architecture
