@@ -205,7 +205,7 @@ CREATE EXTENSION synchdb CASCADE;
 ### Create a Connection Information
 After SynchDB is installed, we can create a connection information entries that represents how to connect to a remote heterogeneous database and what to replicate. This can be done with `synchdb_add_conninfo()` function.
 
-## Usage of `synchdb_add_conninfo`
+### Usage of `synchdb_add_conninfo`
 `synchdb_add_conninfo` takes these arguments:
   `name` - a unique identifier that represents this connection info
 * `hostname` - the IP address of heterogeneous database.
