@@ -43,6 +43,7 @@
 #include "port/pg_bswap.h"
 
 extern bool synchdb_dml_use_spi;
+extern int myConnectorId;
 
 static HTAB * mysqlDatatypeHash;
 static HTAB * sqlserverDatatypeHash;
@@ -987,7 +988,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "malformed id field in dbz change event: %s",
 					dbzddl->id);
-			set_shm_connector_errmsg(type, msg);
+			set_shm_connector_errmsg(myConnectorId, msg);
 
 			/* trigger pg's error shutdown routine */
 			elog(ERROR, "%s", msg);
@@ -1262,7 +1263,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				case TIME_UNDEF:
 				default:
 				{
-					set_shm_connector_errmsg(conntype, "no time representation available to"
+					set_shm_connector_errmsg(myConnectorId, "no time representation available to"
 							"process DATEOID value");
 					elog(ERROR, "no time representation available to process DATEOID value");
 				}
@@ -1376,7 +1377,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				case TIME_UNDEF:
 				default:
 				{
-					set_shm_connector_errmsg(conntype, "no time representation available to"
+					set_shm_connector_errmsg(myConnectorId, "no time representation available to"
 							"process TIMESTAMPOID value");
 					elog(ERROR, "no time representation available to process TIMESTAMPOID value");
 				}
@@ -1452,7 +1453,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				case TIME_UNDEF:
 				default:
 				{
-					set_shm_connector_errmsg(conntype, "no time representation available to"
+					set_shm_connector_errmsg(myConnectorId, "no time representation available to"
 							"process TIMEOID value");
 					elog(ERROR, "no time representation available to process TIMEOID value");
 				}
@@ -1513,7 +1514,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			/* todo: support more */
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "unsupported data type %d", colval->datatype);
-			set_shm_connector_errmsg(conntype, msg);
+			set_shm_connector_errmsg(myConnectorId, msg);
 			elog(ERROR, "%s", msg);
 		}
 	}
@@ -1850,12 +1851,6 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 		default:
 			break;
 	}
-
-	if (colval->datatype == NUMERICOID)
-	{
-
-	}
-
 	if(strinfo.data)
 		pfree(strinfo.data);
 }
@@ -1925,7 +1920,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	{
 		char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 		snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->db);
-		set_shm_connector_errmsg(type, msg);
+		set_shm_connector_errmsg(myConnectorId, msg);
 
 		/* trigger pg's error shutdown routine */
 		elog(ERROR, "%s", msg);
@@ -1936,7 +1931,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	{
 		char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 		snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", dbzdml->table);
-		set_shm_connector_errmsg(type, msg);
+		set_shm_connector_errmsg(myConnectorId, msg);
 
 		/* trigger pg's error shutdown routine */
 		elog(ERROR, "%s", msg);
@@ -2628,7 +2623,7 @@ fc_initFormatConverter(ConnectorType connectorType)
 		}
 		default:
 		{
-			set_shm_connector_errmsg(connectorType, "unsupported connector type");
+			set_shm_connector_errmsg(myConnectorId, "unsupported connector type");
 			elog(ERROR, "unsupported connector type");
 		}
 	}
@@ -2650,11 +2645,12 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 		}
 		case TYPE_SQLSERVER:
 		{
+			hash_destroy(sqlserverDatatypeHash);
 			break;
 		}
 		default:
 		{
-			set_shm_connector_errmsg(connectorType, "unsupported connector type");
+			set_shm_connector_errmsg(myConnectorId, "unsupported connector type");
 			elog(ERROR, "unsupported connector type");
 		}
 	}
@@ -2693,44 +2689,44 @@ fc_processDBZChangeEvent(const char * event)
 
     	/* (1) parse */
     	elog(WARNING, "parsing DBZ DDL change event...");
-    	set_shm_connector_state(type, STATE_PARSING);
+    	set_shm_connector_state(myConnectorId, STATE_PARSING);
     	dbzddl = parseDBZDDL(jb);
     	if (!dbzddl)
     	{
     		elog(WARNING, "malformed DDL event");
-    		set_shm_connector_state(type, STATE_SYNCING);
+    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		return -1;
     	}
 
     	elog(WARNING, "converting to PG DDL change event...");
     	/* (2) convert */
-    	set_shm_connector_state(type, STATE_CONVERTING);
+    	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
     	pgddl = convert2PGDDL(dbzddl, type);
     	if (!pgddl)
     	{
     		elog(WARNING, "failed to convert DBZ DDL to PG DDL change event");
-    		set_shm_connector_state(type, STATE_SYNCING);
+    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		destroyDBZDDL(dbzddl);
     		return -1;
     	}
 
     	/* (3) execute */
     	elog(WARNING, "executing PG DDL change event...");
-    	set_shm_connector_state(type, STATE_EXECUTING);
+    	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
     	if(ra_executePGDDL(pgddl, type))
     	{
     		elog(WARNING, "failed to execute PG DDL change event");
-    		set_shm_connector_state(type, STATE_SYNCING);
+    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		destroyDBZDDL(dbzddl);
     		destroyPGDDL(pgddl);
     		return -1;
     	}
 
     	/* (4) update offset */
-       	set_shm_dbz_offset(type);
+       	set_shm_dbz_offset(myConnectorId);
 
     	/* (5) clean up */
-    	set_shm_connector_state(type, STATE_SYNCING);
+    	set_shm_connector_state(myConnectorId, STATE_SYNCING);
     	elog(WARNING, "execution completed. Clean up...");
     	destroyDBZDDL(dbzddl);
     	destroyPGDDL(pgddl);
@@ -2744,43 +2740,43 @@ fc_processDBZChangeEvent(const char * event)
     	elog(WARNING, "this is DML change event");
 
     	/* (1) parse */
-    	set_shm_connector_state(type, STATE_PARSING);
+    	set_shm_connector_state(myConnectorId, STATE_PARSING);
     	dbzdml = parseDBZDML(jb, strinfo.data[0], type);
     	if (!dbzdml)
 		{
 			elog(WARNING, "malformed DNL event");
-			set_shm_connector_state(type, STATE_SYNCING);
+			set_shm_connector_state(myConnectorId, STATE_SYNCING);
 			return -1;
 		}
 
     	/* (2) convert */
-    	set_shm_connector_state(type, STATE_CONVERTING);
+    	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
     	pgdml = convert2PGDML(dbzdml, type);
     	if (!pgdml)
     	{
     		elog(WARNING, "failed to convert DBZ DML to PG DML change event");
-    		set_shm_connector_state(type, STATE_SYNCING);
+    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		destroyDBZDML(dbzdml);
     		return -1;
     	}
 
     	/* (3) execute */
-    	set_shm_connector_state(type, STATE_EXECUTING);
+    	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
     	elog(WARNING, "executing PG DML change event...");
     	if(ra_executePGDML(pgdml, type))
     	{
     		elog(WARNING, "failed to execute PG DML change event");
-    		set_shm_connector_state(type, STATE_SYNCING);
+    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
         	destroyDBZDML(dbzdml);
         	destroyPGDML(pgdml);
     		return -1;
     	}
 
     	/* (4) update offset */
-       	set_shm_dbz_offset(type);
+       	set_shm_dbz_offset(myConnectorId);
 
        	/* (5) clean up */
-    	set_shm_connector_state(type, STATE_SYNCING);
+    	set_shm_connector_state(myConnectorId, STATE_SYNCING);
     	elog(WARNING, "execution completed. Clean up...");
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);

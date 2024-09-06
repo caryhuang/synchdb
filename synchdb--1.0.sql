@@ -5,7 +5,7 @@ CREATE OR REPLACE FUNCTION synchdb_start_engine_bgw(text) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
-CREATE OR REPLACE FUNCTION synchdb_stop_engine_bgw(text) RETURNS int
+CREATE OR REPLACE FUNCTION synchdb_stop_engine_bgw(int) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
@@ -13,17 +13,17 @@ CREATE OR REPLACE FUNCTION synchdb_get_state() RETURNS SETOF record
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
-CREATE VIEW synchdb_state_view AS SELECT * FROM synchdb_get_state() AS (connector text, pid int, state text, err text, last_dbz_offset text);
+CREATE VIEW synchdb_state_view AS SELECT * FROM synchdb_get_state() AS (id int, connector text, conninfo_name text, pid int, state text, err text, last_dbz_offset text);
 
-CREATE OR REPLACE FUNCTION synchdb_pause_engine(text) RETURNS int
+CREATE OR REPLACE FUNCTION synchdb_pause_engine(int) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
-CREATE OR REPLACE FUNCTION synchdb_resume_engine(text) RETURNS int
+CREATE OR REPLACE FUNCTION synchdb_resume_engine(int) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
-CREATE OR REPLACE FUNCTION synchdb_set_offset(text, text) RETURNS int
+CREATE OR REPLACE FUNCTION synchdb_set_offset(int, text) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 

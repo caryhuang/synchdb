@@ -34,7 +34,7 @@ public class DebeziumRunner {
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
 
-	public void startEngine(String hostname, int port, String user, String password, String database, String table, int connectorType) throws Exception
+	public void startEngine(String hostname, int port, String user, String password, String database, String table, int connectorType, String name) throws Exception
 	{
 		String offsetfile = "/dev/shm/offsets.dat";
 		String schemahistoryfile = "/dev/shm/schemahistory.dat";
@@ -48,25 +48,31 @@ public class DebeziumRunner {
 			case TYPE_MYSQL:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.mysql.MySqlConnector");
-				props.setProperty("database.server.id", "223344");	/* todo: make configurable */
-				offsetfile = "pg_synchdb/mysql_offsets.dat";
-				schemahistoryfile = "pg_synchdb/mysql_schemahistory.dat";
+				int hash = name.hashCode();
+				long unsignedhash = Integer.toUnsignedLong(hash);
+				long serverid = 1 + (unsignedhash % (4294967295L - 1));
+
+				logger.warn("derived server id " + serverid);
+				props.setProperty("database.server.id", String.valueOf(serverid));	/* todo: make configurable */
+
+				offsetfile = "pg_synchdb/mysql_" + name + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/mysql_" + name + "_schemahistory.dat";
 
 				break;
 			}
 			case TYPE_ORACLE:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
-				offsetfile = "pg_synchdb/oracle_offsets.dat";
-				schemahistoryfile = "pg_synchdb/oracle_schemahistory.dat";
+				offsetfile = "pg_synchdb/oracle_" + name + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/oracle_" + name + "_schemahistory.dat";
 				break;
 			}
 			case TYPE_SQLSERVER:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");
 				props.setProperty("database.encrypt", "false");	/* todo: enable tls */
-				offsetfile = "pg_synchdb/sqlserver_offsets.dat";
-				schemahistoryfile = "pg_synchdb/sqlserver_schemahistory.dat";
+				offsetfile = "pg_synchdb/sqlserver_" + name + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/sqlserver_" + name + "_schemahistory.dat";
 				break;
 			}
 		}
@@ -184,7 +190,7 @@ public class DebeziumRunner {
 		*/
     }
 	
-	public String getConnectorOffset(int connectorType, String db)
+	public String getConnectorOffset(int connectorType, String db, String name)
 	{
 		File inputFile = null;
 		Map<ByteBuffer, ByteBuffer> originalData = null;
@@ -195,19 +201,19 @@ public class DebeziumRunner {
 		{
 			case TYPE_MYSQL:
 			{
-				inputFile = new File("pg_synchdb/mysql_offsets.dat");
+				inputFile = new File("pg_synchdb/mysql_" + name + "_offsets.dat");
 				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 				break;
 			}
 			case TYPE_ORACLE:
 			{
-				inputFile = new File("pg_synchdb/oracle_offsets.dat");
+				inputFile = new File("pg_synchdb/oracle_" + name + "_offsets.dat");
 				/* todo */
 				break;
 			}
 			case TYPE_SQLSERVER:
 			{
-				inputFile = new File("pg_synchdb/sqlserver_offsets.dat");
+				inputFile = new File("pg_synchdb/sqlserver_" + name + "_offsets.dat");
 				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
 				break;
 			}

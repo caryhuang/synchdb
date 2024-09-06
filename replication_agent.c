@@ -33,6 +33,7 @@
 
 extern bool synchdb_dml_use_spi;
 extern uint64 SPI_processed;
+extern int myConnectorId;
 
 /*
  * This function performs SPI_execute SELECT and returns an array of
@@ -165,7 +166,7 @@ spi_execute(const char * query, ConnectorType type)
 		ErrorData  *errdata = CopyErrorData();
 
 		if (errdata)
-			set_shm_connector_errmsg(type, errdata->message);
+			set_shm_connector_errmsg(myConnectorId, errdata->message);
 
 		FreeErrorData(errdata);
 		SPI_finish();
@@ -280,7 +281,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "table %d: %s",
 					tableoid, errdata->message);
-			set_shm_connector_errmsg(type, msg);
+			set_shm_connector_errmsg(myConnectorId, msg);
 			pfree(msg);
 		}
 
@@ -460,7 +461,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "table %d: %s",
 					tableoid, errdata->message);
-			set_shm_connector_errmsg(type, msg);
+			set_shm_connector_errmsg(myConnectorId, msg);
 			pfree(msg);
 		}
 
@@ -614,7 +615,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "table %d: %s",
 					tableoid, errdata->message);
-			set_shm_connector_errmsg(type, msg);
+			set_shm_connector_errmsg(myConnectorId, msg);
 			pfree(msg);
 		}
 
