@@ -25,10 +25,13 @@
 #define SYNCHDB_MAX_DB_NAME_SIZE 64
 #define SYNCHDB_DATATYPE_NAME_SIZE 64
 #define SYNCHDB_JSON_PATH_SIZE 128
+#define SYNCHDB_MAX_ACTIVE_CONNECTORS 30
 
-#define SYNCHDB_MYSQL_OFFSET_FILE "pg_synchdb/mysql_offsets.dat"
-#define SYNCHDB_ORACLE_OFFSET_FILE "pg_synchdb/oracle_offsets.dat"
-#define SYNCHDB_SQLSERVER_OFFSET_FILE "pg_synchdb/sqlserver_offsets.dat"
+/*
+ * ex: 	pg_synchdb/[connector]_[name]_offsets.dat
+ * 		pg_synchdb/mysql_mysqlconn_offsets.dat
+ */
+#define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_offsets.dat"
 #define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
@@ -73,41 +76,18 @@ typedef struct _SynchdbRequest
 /**
  *  Structure holding state information for connectors
  */
-typedef struct _MysqlStateInfo
+typedef struct _ActiveConnectors
 {
-	/* todo */
 	pid_t pid;
 	ConnectorState state;
+	ConnectorType type;
 	SynchdbRequest req;
+	char name[SYNCHDB_MAX_DB_NAME_SIZE];
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
 	char dbzoffset[SYNCHDB_ERRMSG_SIZE];
 	char srcdb[SYNCHDB_MAX_DB_NAME_SIZE];
 	char dstdb[SYNCHDB_MAX_DB_NAME_SIZE];
-} MysqlStateInfo;
-
-typedef struct _OracleStateInfo
-{
-	/* todo */
-	pid_t pid;
-	ConnectorState state;
-	SynchdbRequest req;
-	char errmsg[SYNCHDB_ERRMSG_SIZE];
-	char dbzoffset[SYNCHDB_ERRMSG_SIZE];
-	char srcdb[SYNCHDB_MAX_DB_NAME_SIZE];
-	char dstdb[SYNCHDB_MAX_DB_NAME_SIZE];
-} OracleStateInfo;
-
-typedef struct _SqlserverStateInfo
-{
-	/* todo */
-	pid_t pid;
-	ConnectorState state;
-	SynchdbRequest req;
-	char errmsg[SYNCHDB_ERRMSG_SIZE];
-	char dbzoffset[SYNCHDB_ERRMSG_SIZE];
-	char srcdb[SYNCHDB_MAX_DB_NAME_SIZE];
-	char dstdb[SYNCHDB_MAX_DB_NAME_SIZE];
-} SqlserverStateInfo;
+} ActiveConnectors;
 
 /**
  * SynchdbSharedState - Shared state information for synchdb background worker
@@ -115,9 +95,7 @@ typedef struct _SqlserverStateInfo
 typedef struct _SynchdbSharedState
 {
 	LWLock		lock;		/* mutual exclusion */
-	MysqlStateInfo mysqlinfo;
-	OracleStateInfo oracleinfo;
-	SqlserverStateInfo sqlserverinfo;
+	ActiveConnectors connectors[SYNCHDB_MAX_ACTIVE_CONNECTORS];
 } SynchdbSharedState;
 
 /**
@@ -138,16 +116,16 @@ typedef struct _ConnectionInfo
 /* Function prototypes */
 
 const char * get_shm_connector_name(ConnectorType type);
-pid_t get_shm_connector_pid(ConnectorType type);
-void set_shm_connector_pid(ConnectorType type, pid_t pid);
-void set_shm_connector_errmsg(ConnectorType type, const char * err);
-const char * get_shm_connector_errmsg(ConnectorType type);
-void set_shm_connector_state(ConnectorType type, ConnectorState state);
-const char * get_shm_connector_state(ConnectorType type);
-void set_shm_connector_dbs(ConnectorType type, char * srcdb, char * dstdb);
-void set_shm_dbz_offset(ConnectorType type);
-const char * get_shm_dbz_offset(ConnectorType type);
-ConnectorState get_shm_connector_state_enum(ConnectorType type);
+pid_t get_shm_connector_pid(int connectorId);
+void set_shm_connector_pid(int connectorId, pid_t pid);
+void set_shm_connector_errmsg(int connectorId, const char * err);
+const char * get_shm_connector_errmsg(int connectorId);
+void set_shm_connector_state(int connectorId, ConnectorState state);
+const char * get_shm_connector_state(int connectorId);
+void set_shm_connector_dbs(int connectorId, char * srcdb, char * dstdb);
+void set_shm_dbz_offset(int connectorId);
+const char * get_shm_dbz_offset(int connectorId);
+ConnectorState get_shm_connector_state_enum(int connectorId);
 const char* connectorTypeToString(ConnectorType type);
 
 #endif /* SYNCHDB_SYNCHDB_H_ */
