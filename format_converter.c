@@ -50,11 +50,13 @@ static HTAB * sqlserverDatatypeHash;
 
 DatatypeHashEntry mysql_defaultTypeMappings[] =
 {
-	{{"INT", true}, "SERIAL", -1},
-	{{"BIGINT", true}, "BIGSERIAL", -1},
-	{{"SMALLINT", true}, "SMALLSERIAL", -1},
-	{{"MEDIUMINT", true}, "SERIAL", -1},
+	{{"INT", true}, "SERIAL", 0},
+	{{"BIGINT", true}, "BIGSERIAL", 0},
+	{{"SMALLINT", true}, "SMALLSERIAL", 0},
+	{{"MEDIUMINT", true}, "SERIAL", 0},
 	{{"ENUM", false}, "TEXT", 0},
+	{{"SET", false}, "TEXT", 0},
+	{{"BIGINT", false}, "BIGINT", 0},
 	{{"BIGINT UNSIGNED", false}, "NUMERIC", -1},
 	{{"NUMERIC UNSIGNED", false}, "NUMERIC", -1},
 	{{"DEC", false}, "DECIMAL", -1},
@@ -62,21 +64,26 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	{{"DECIMAL UNSIGNED", false}, "DECIMAL", -1},
 	{{"FIXED", false}, "DECIMAL", -1},
 	{{"FIXED UNSIGNED", false}, "DECIMAL", -1},
+	{{"BIT(1)", false}, "BOOLEAN", 0},
 	{{"BIT", false}, "BIT", -1},
 	{{"BOOL", false}, "BOOLEAN", -1},
-	{{"DOUBLE", false}, "DOUBLE PRECISION", -1},
-	{{"DOUBLE PRECISION UNSIGNED", false}, "DOUBLE PRECISION", -1},
-	{{"DOUBLE UNSIGNED", false}, "DOUBLE PRECISION", -1},
-	{{"REAL", false}, "REAL", -1},
-	{{"REAL UNSIGNED", false}, "REAL", -1},
-	{{"FLOAT", false}, "REAL", -1},
-	{{"FLOAT UNSIGNED", false}, "REAL", -1},
-	{{"INT UNSIGNED", false}, "BIGINT", -1},
-	{{"INTEGER UNSIGNED", false}, "BIGINT", -1},
-	{{"MEDIUMINT", false}, "INT", -1},
-	{{"MEDIUMINT UNSIGNED", false}, "INT", -1},
-	{{"YEAR", false}, "INT", -1},
-	{{"SMALLINT UNSIGNED", false}, "INT", -1},
+	{{"DOUBLE", false}, "DOUBLE PRECISION", 0},
+	{{"DOUBLE PRECISION", false}, "DOUBLE PRECISION", 0},
+	{{"DOUBLE PRECISION UNSIGNED", false}, "DOUBLE PRECISION", 0},
+	{{"DOUBLE UNSIGNED", false}, "DOUBLE PRECISION", 0},
+	{{"REAL", false}, "REAL", 0},
+	{{"REAL UNSIGNED", false}, "REAL", 0},
+	{{"FLOAT", false}, "REAL", 0},
+	{{"FLOAT UNSIGNED", false}, "REAL", 0},
+	{{"INT", false}, "INT", 0},
+	{{"INT UNSIGNED", false}, "BIGINT", 0},
+	{{"INTEGER", false}, "INT", 0},
+	{{"INTEGER UNSIGNED", false}, "BIGINT", 0},
+	{{"MEDIUMINT", false}, "INT", 0},
+	{{"MEDIUMINT UNSIGNED", false}, "INT", 0},
+	{{"YEAR", false}, "INT", 0},
+	{{"SMALLINT", false}, "SMALLINT", 0},
+	{{"SMALLINT UNSIGNED", false}, "INT", 0},
 	{{"TINYINT", false}, "SMALLINT", 0},
 	{{"TINYINT UNSIGNED", false}, "SMALLINT", 0},
 	{{"DATETIME", false}, "TIMESTAMP", -1},
@@ -116,6 +123,7 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 	{{"tinyint", false}, "SMALLINT", 0},
 	{{"numeric", false}, "NUMERIC", 0},
 	{{"decimal", false}, "NUMERIC", 0},
+	{{"bit(1)", false}, "BOOL", 0},
 	{{"bit", false}, "BOOL", 0},
 	{{"money", false}, "MONEY", 0},
 	{{"smallmoney", false}, "MONEY", 0},
@@ -203,6 +211,51 @@ reverse_byte_array(unsigned char * array, int length)
 		end--;
 	}
 }
+
+static void
+trim_leading_zeros(char *str)
+{
+	int i = 0, j = 0;
+	while (str[i] == '0')
+	{
+		i++;
+	}
+
+	if (str[i] == '\0')
+	{
+		str[0] = '0';
+		str[1] = '\0';
+		return;
+	}
+
+	while (str[i] != '\0')
+	{
+		str[j++] = str[i++];
+	}
+	str[j] = '\0';
+}
+
+static void
+prepend_zeros(char *str, int num_zeros)
+{
+    int original_len = strlen(str);
+    int new_len = original_len + num_zeros;
+    char * temp = palloc0(new_len + 1);
+
+    for (int i = 0; i < num_zeros; i++)
+    {
+        temp[i] = '0';
+    }
+
+    for (int i = 0; i < original_len; i++)
+    {
+        temp[i + num_zeros] = str[i];
+    }
+    temp[new_len] = '\0';
+    strcpy(str, temp);
+    pfree(temp);
+}
+
 
 static void
 byte_to_binary(unsigned char byte, char * binary_str)
@@ -868,8 +921,19 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 			DatatypeHashKey key = {0};
 			bool found = 0;
 
-			key.autoIncremented = col->autoIncremented;
-			strcpy(key.extTypeName, col->typeName);
+			/* special lookup case: BIT with length 1 */
+			if (!strcasecmp(col->typeName, "BIT") && col->length == 1)
+			{
+				key.autoIncremented = col->autoIncremented;
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
+						col->typeName, col->length);
+			}
+			else
+			{
+				key.autoIncremented = col->autoIncremented;
+				strcpy(key.extTypeName, col->typeName);
+			}
+
 			entry = (DatatypeHashEntry *) hash_search(mysqlDatatypeHash, &key, HASH_FIND, &found);
 			if (!found)
 			{
@@ -900,6 +964,19 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 			DatatypeHashEntry * entry;
 			DatatypeHashKey key = {0};
 			bool found = 0;
+
+			/* special lookup case: BIT with length 1 */
+			if (!strcasecmp(col->typeName, "bit") && col->length == 1)
+			{
+				key.autoIncremented = col->autoIncremented;
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
+						col->typeName, col->length);
+			}
+			else
+			{
+				key.autoIncremented = col->autoIncremented;
+				strcpy(key.extTypeName, col->typeName);
+			}
 
 			key.autoIncremented = col->autoIncremented;
 			strcpy(key.extTypeName, col->typeName);
@@ -1114,13 +1191,39 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			snprintf(buffer, sizeof(buffer), "%ld", value);
 			if (colval->scale > 0)
 			{
-				newlen = strlen(buffer) + 1;	/* plus 1 decimal */
-				out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+				if (strlen(buffer) > colval->scale)
+				{
+					/* ex: 123 -> 1.23*/
+					newlen = strlen(buffer) + 1;	/* plus 1 decimal */
+					out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+					decimalpos = strlen(buffer) - colval->scale;
+					strncpy(out, buffer, decimalpos);
+					out[decimalpos] = '.';
+					strcpy(out + decimalpos + 1, buffer + decimalpos);
+				}
+				else if (strlen(buffer) == colval->scale)
+				{
+					/* ex: 123 -> 0.123 */
+					newlen = strlen(buffer) + 2;	/* plus 1 decimal and 1 zero */
+					out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+					snprintf(out, newlen + 1, "0.%s", buffer);
+				}
+				else
+				{
+					/* ex: 1 -> 0.001*/
+					int scale_factor = 1, i = 0;
+					double res = 0.0;
 
-				decimalpos = strlen(buffer) - colval->scale;
-				strncpy(out, buffer, decimalpos);
-				out[decimalpos] = '.';
-				strcpy(out + decimalpos + 1, buffer + decimalpos);
+					/* plus 1 decimal and 1 zero and the zeros as a result of left shift */
+					newlen = strlen(buffer) + (colval->scale - strlen(buffer)) + 2;
+					out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+
+					for (i = 0; i< colval->scale; i++)
+						scale_factor *= 10;
+
+					res = (double)value / (double)scale_factor;
+					snprintf(out, newlen + 1, "%g", res);
+				}
 			}
 			else
 			{
@@ -1128,13 +1231,40 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				if (colval->datatype == MONEYOID)
 				{
 					colval->scale = 4;
-					newlen = strlen(buffer) + 1;	/* plus 1 decimal */
-					out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+					if (strlen(buffer) > colval->scale)
+					{
+						newlen = strlen(buffer) + 1;	/* plus 1 decimal */
+						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
 
-					decimalpos = strlen(buffer) - colval->scale;
-					strncpy(out, buffer, decimalpos);
-					out[decimalpos] = '.';
-					strcpy(out + decimalpos + 1, buffer + decimalpos);
+						decimalpos = strlen(buffer) - colval->scale;
+						strncpy(out, buffer, decimalpos);
+						out[decimalpos] = '.';
+						strcpy(out + decimalpos + 1, buffer + decimalpos);
+					}
+					else if (strlen(buffer) == colval->scale)
+					{
+						/* ex: 123 -> 0.123 */
+						newlen = strlen(buffer) + 2;	/* plus 1 decimal and 1 zero */
+						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+						snprintf(out, newlen + 1, "0.%s", buffer);
+					}
+					else
+					{
+						/* ex: 1 -> 0.001*/
+						int scale_factor = 1, i = 0;
+						double res = 0.0;
+
+						/* plus 1 decimal and 1 zero and the zeros as a result of left shift */
+						newlen = strlen(buffer) + (colval->scale - strlen(buffer)) + 2;
+						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+
+						for (i = 0; i< colval->scale; i++)
+							scale_factor *= 10;
+
+						res = (double)value / (double)scale_factor;
+						snprintf(out, newlen + 1, "%g", res);
+					}
+
 				}
 				else
 				{
@@ -1205,7 +1335,6 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
 
 			tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
-
 			if (addquote)
 			{
 				/* 8 bits per byte + 2 single quotes + b + terminating null */
@@ -1216,6 +1345,10 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				strcat(tmp, "'b");
 				tmp += 2;
 				bytes_to_binary_string(tmpout, tmpoutlen, tmp);
+				trim_leading_zeros(tmp);
+				if (strlen(tmp) < colval->typemod)
+					prepend_zeros(tmp, colval->typemod - strlen(tmp));
+
 				strcat(tmp, "'");
 			}
 			else
@@ -1224,6 +1357,9 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 				out = (char *) palloc0(tmpoutlen * 8 + 1);
 				reverse_byte_array(tmpout, tmpoutlen);
 				bytes_to_binary_string(tmpout, tmpoutlen, out);
+				trim_leading_zeros(out);
+				if (strlen(out) < colval->typemod)
+					prepend_zeros(out, colval->typemod - strlen(out));
 			}
 			pfree(tmpout);
 
