@@ -1371,7 +1371,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			 * we need to process these time related values based on the timerep
 			 * that has been determined during the parsing stage
 			 */
-			unsigned long long input = atoll(in);
+			long long input = atoll(in);
 			time_t dayssinceepoch = 0;
 			struct tm epoch = {0};
 			time_t epoch_time, target_time;
@@ -1438,7 +1438,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			 * we need to process these time related values based on the timerep
 			 * that has been determined during the parsing stage
 			 */
-			unsigned long long input = atoll(in);
+			long long input = atoll(in);
 			time_t seconds = 0, remains = 0;
 			struct tm *tm_info;
 			char timestamp[26 + 1] = {0};	/* yyyy-MM-ddThh:mm:ss.xxxxxx */
