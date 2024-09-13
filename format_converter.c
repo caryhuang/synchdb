@@ -102,6 +102,7 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	/* spatial types - map to TEXT by default */
 	{{"GEOMETRY", false}, "TEXT", -1},
 	{{"GEOMETRYCOLLECTION", false}, "TEXT", -1},
+	{{"GEOMCOLLECTION", false}, "TEXT", -1},
 	{{"LINESTRING", false}, "TEXT", -1},
 	{{"MULTILINESTRING", false}, "TEXT", -1},
 	{{"MULTIPOINT", false}, "TEXT", -1},
@@ -124,7 +125,7 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 	{{"numeric", false}, "NUMERIC", 0},
 	{{"decimal", false}, "NUMERIC", 0},
 	{{"bit(1)", false}, "BOOL", 0},
-	{{"bit", false}, "BOOL", 0},
+	{{"bit", false}, "BIT", 0},
 	{{"money", false}, "MONEY", 0},
 	{{"smallmoney", false}, "MONEY", 0},
 	{{"real", false}, "REAL", 0},
@@ -977,9 +978,6 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 				key.autoIncremented = col->autoIncremented;
 				strcpy(key.extTypeName, col->typeName);
 			}
-
-			key.autoIncremented = col->autoIncremented;
-			strcpy(key.extTypeName, col->typeName);
 			entry = (DatatypeHashEntry *) hash_search(sqlserverDatatypeHash, &key, HASH_FIND, &found);
 			if (!found)
 			{
@@ -1159,6 +1157,8 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 
 	if (!strcasecmp(in, "NULL"))
 		return NULL;
+
+	elog(DEBUG1," processing %s with value %s", colval->name, colval->value);
 
 	switch(colval->datatype)
 	{
@@ -2677,11 +2677,13 @@ init_mysql(void)
 		if (!found)
 		{
 			entry->key.autoIncremented = mysql_defaultTypeMappings[i].key.autoIncremented;
+			memset(entry->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
 			strncpy(entry->key.extTypeName,
 					mysql_defaultTypeMappings[i].key.extTypeName,
 					strlen(mysql_defaultTypeMappings[i].key.extTypeName));
 
 			entry->pgsqlTypeLength = mysql_defaultTypeMappings[i].pgsqlTypeLength;
+			memset(entry->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
 			strncpy(entry->pgsqlTypeName,
 					mysql_defaultTypeMappings[i].pgsqlTypeName,
 					strlen(mysql_defaultTypeMappings[i].pgsqlTypeName));

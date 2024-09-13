@@ -51,6 +51,13 @@ spi_execute_select_one(const char * query, int * numcols)
 	Datum * rowval;
 	bool isnull;
 
+	if (!IsTransactionOrTransactionBlock())
+	{
+		/* Start a transaction and set up a snapshot */
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
+
 	if (SPI_connect() != SPI_OK_CONNECT)
 	{
 		elog(WARNING, "synchdb_pgsql - SPI_connect failed");
@@ -96,6 +103,13 @@ spi_execute_select_one(const char * query, int * numcols)
 
 	/* Close the connection */
 	SPI_finish();
+
+	if (!IsTransactionOrTransactionBlock())
+	{
+		/* Commit the transaction */
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
 	return rowval;
 }
 
@@ -712,7 +726,8 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"coalesce(data->>'srcdb', 'null'), "
 			"coalesce(data->>'dstdb', 'null'), "
 			"coalesce(data->>'table', 'null'), "
-			"coalesce(data->>'connector', 'null') FROM "
+			"coalesce(data->>'connector', 'null'),"
+			"isactive FROM "
 			"synchdb_conninfo WHERE name = '%s'",
 			SYNCHDB_SECRET, name);
 
@@ -731,6 +746,7 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	conninfo->dst_db = pstrdup(TextDatumGetCString(res[5]));
 	conninfo->table = pstrdup(TextDatumGetCString(res[6]));
 	*connector = pstrdup(TextDatumGetCString(res[7]));
+	conninfo->active = DatumGetBool(res[8]);
 
 	elog(DEBUG2, "name %s hostname %s, port %d, user %s pwd %s srcdb %s dstdb %s table %s connector %s",
 			conninfo->name, conninfo->hostname, conninfo->port,
@@ -740,7 +756,66 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	return 0;
 }
 
-int ra_executeCommand(const char * query)
+int
+ra_executeCommand(const char * query)
 {
 	return spi_execute(query, TYPE_UNDEF);
+}
+
+int
+ra_listConnInfoNames(char ** out, int * numout)
+{
+	int ret = -1, i = 0;
+	char * query = "SELECT name FROM synchdb_conninfo WHERE isactive = true";
+	char * value;
+
+	if (!IsTransactionOrTransactionBlock())
+	{
+		/* Start a transaction and set up a snapshot */
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+	{
+		elog(WARNING, "synchdb_pgsql - SPI_connect failed");
+		return -1;
+	}
+
+	ret = SPI_execute(query, true, 0);
+	switch (ret)
+	{
+		case SPI_OK_SELECT:
+		{
+			break;
+		}
+		default:
+		{
+			SPI_finish();
+			return -1;
+		}
+	}
+	*numout = SPI_processed;
+	if (*numout == 0)
+	{
+		SPI_finish();
+		return -1;
+	}
+
+	for (i = 0; i < *numout; i++)
+	{
+		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1);
+		out[i] = pstrdup(value);
+	}
+
+	/* Close the connection */
+	SPI_finish();
+
+	if (!IsTransactionOrTransactionBlock())
+	{
+		/* Commit the transaction */
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+	return 0;
 }
