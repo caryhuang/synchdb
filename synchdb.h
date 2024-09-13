@@ -111,6 +111,7 @@ typedef struct _ConnectionInfo
     char *src_db;
     char *dst_db;
     char *table;
+    bool active;
 } ConnectionInfo;
 
 /* Function prototypes */

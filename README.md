@@ -206,8 +206,8 @@ CREATE EXTENSION synchdb CASCADE;
 After SynchDB is installed, we can create a connection information entries that represents how to connect to a remote heterogeneous database and what to replicate. This can be done with `synchdb_add_conninfo()` function.
 
 ### Usage of `synchdb_add_conninfo`
-`synchdb_add_conninfo` takes these arguments:
-  `name` - a unique identifier that represents this connection info
+`synchdb_add_conninfo()` takes these arguments:
+* `name` - a unique identifier that represents this connection info
 * `hostname` - the IP address of heterogeneous database.
 * `port` - the port number to connect to.
 * `username` - user name to use to connect.
@@ -244,7 +244,7 @@ SELECT synchdb_add_conninfo('mysqlconn3', '127.0.0.1', 3306, 'mysqluser', 'mysql
 The replicated changes will be mapped to a schema in destination database. For example, a table named `orders` from database `inventory` in MySQL will be replicated to a table named `orders` under schema `inventory`.
 
 ### Review all Connection Information Created
-All connection information are created in the table `synchdb_conninfo`. We are free to view its content and make modification as required. Please note that the password of a user credential is encrypted by pgcrypto. See below for an example output: 
+All connection information are created in the table `synchdb_conninfo`. We are free to view its content and make modification as required. Please note that the password of a user credential is encrypted by pgcrypto using a key only known to synchdb. So please do not modify the password field or it may be decrypted incorrectly if tempered. See below for an example output: 
 
 ```
 postgres=# \x
@@ -269,6 +269,8 @@ select synchdb_start_engine_bgw('mysqlconn');
 select synchdb_start_engine_bgw('sqlserverconn');
 ```
 
+`synchdb_start_engine_bgw()` function also marks a connection info as `active`, which is eligible for automatic-relaunch at server restarts. See below for more details.
+
 ### Check Running Connector Workers
 You can check the running workers using the `ps` command:
 ```
@@ -290,7 +292,7 @@ ubuntu    153900  153865  0 15:49 ?        00:00:46 postgres: synchdb engine: my
 As you can see, there are 2 additional background workers(synchdb engine), one replicating from MySQL, the other replicating from SQL server.
 
 ### View the Connector States
-We can execute the `synchdb_state_view` view to examine all the running connectors and their states. Currently, synchdb can support up to 30 running workers. The output is grouped by a connector ID, which can be used as the key to run other synchdb control routines such as `synchdb_stop_engine_bgw()`
+We can execute the `synchdb_state_view` view to examine all the running connectors and their states. Currently, synchdb can support up to 30 running workers.
 
 See below for an example output:
 ```
@@ -348,37 +350,39 @@ Column Details:
 * last_dbz_offset: the last Debezium offset captured by synchdb. Note that this may not reflect the current and real-time offset value of the connector engine. Rather, this is shown as a checkpoint that we could restart from this offeet point if needed.
 
 ### Pause a Connector Worker
-We can use `synchdb_pause_engine()` SQL function to pause a runnng connector. This will halt the Debezium engine from replicating from the remote heterogeneous database. When paused, it is possible to alter the Debezium connector's offset value to replicate from a specific point in the past using `synchdb_set_offset()` SQL routine. It takes the `connector id` argument which can be found from the output of `synchdb_get_state()` view.
+We can use `synchdb_pause_engine()` SQL function to pause a runnng connector. This will halt the Debezium engine from replicating from the remote heterogeneous database. When paused, it is possible to alter the Debezium connector's offset value to replicate from a specific point in the past using `synchdb_set_offset()` SQL routine. It takes `conninfo_name` as its argument which can be found from the output of `synchdb_get_state()` view.
 
 For example:
 ```
-SELECT synchdb_pause_engine(0);
+SELECT synchdb_pause_engine('mysqlconn');
 ```
 
 ### Update Connector Offset
-We can use `synchdb_set_offset()` SQL function to change a connector worker's starting offset. This can only be done when the connector is put into `paused` state. The function takes 2 parameters, connector Id and a valid offset string, both of which can be found from the output of `synchdb_get_state()` view.
+We can use `synchdb_set_offset()` SQL function to change a connector worker's starting offset. This can only be done when the connector is put into `paused` state. The function takes 2 parameters, conninfo_name and a valid offset string, both of which can be found from the output of `synchdb_get_state()` view.
 
 For example:
 ```
-SELECT synchdb_set_offset(0, '{"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}'); 
+SELECT synchdb_set_offset('mysqlconn', '{"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}'); 
 ```
 
 ### Resume Connector Offset
-We can use `synchdb_resume_engine()` SQL function to resume Debezium operation from a paused state. This function takes conenctor ID as its only parameter, which can be found from the output of `synchdb_get_state()` view.
+We can use `synchdb_resume_engine()` SQL function to resume Debezium operation from a paused state. This function takes conninfo_name as its only parameter, which can be found from the output of `synchdb_get_state()` view.
 
 For example:
 ```
-SELECT synchdb_resume_engine(0);
+SELECT synchdb_resume_engine('mysqlconn');
 ```
 
 ### Stopping a Worker
-We can use `synchdb_stop_engine_bgw()` SQL function to stop a running or paused connector worker. This function takes conenctor ID as its only parameter, which can be found from the output of `synchdb_get_state()` view.
+We can use `synchdb_stop_engine_bgw()` SQL function to stop a running or paused connector worker. This function takes conninfo_name as its only parameter, which can be found from the output of `synchdb_get_state()` view.
 
 For example:
 ```
-select synchdb_stop_engine_bgw(0);
-select synchdb_stop_engine_bgw(1);
+select synchdb_stop_engine_bgw('mysqlconn');
+select synchdb_stop_engine_bgw('mysqlconn2');
 ```
+
+`synchdb_stop_engine_bgw()` function also marks a connection info as `inactive`, which prevents the connection from automatic-relaunch at server restarts. See below for more details.
 
 ### Metadata Files
 During the synchdb operations, metadata files (offsets and schemahistory files) are generated by DBZ engine and they are by default located in `$PGDATA/pg_synchdb` directory:
@@ -399,7 +403,7 @@ Each DBZ engine worker has its own pair of metadata files. These store the schem
 To restart replication from the beginning:
 1. Stop the Debezium engine:
 ```
-select synchdb_stop_engine_bgw(0);
+select synchdb_stop_engine_bgw('mysqlconn');
 ```
 2. Remove the metadata files:
 ```
@@ -410,6 +414,22 @@ rm $PGDATA/pg_synchdb/mysql_mysqlconn_schemahistory.dat
 ```
 select synchdb_start_engine_bgw('mysqlconn');
 ```
+
+### Automatic Worker Launch at Server Restarts
+It is possible to automatically Launch a connector worker that has been created by `synchdb_add_conninfo()` and started by `synchdb_start_engine_bgw()` at PostgreSQL server restart. To do so, we will need to add `synchdb` to `shared_preload_libraries` GUC option:
+
+```
+shared_preload_libraries = 'synchdb'
+```
+
+With `synchdb` preloaded and GUC option `synchdb.synchdb_auto_launcher` set to `true`, PostgreSQL will launch a `synchdb_auto_launcher` background worker that will retrieve all the conninfos in `synchdb_conninfo` table that is marked as `active` ( has `isactive` flag set to `true`). Then, it will start them automatically in the same state as when they exited. If `synchdb`.
+
+## Synchdb GUC Variables
+These are the current GUC variables specifically reserved for synchdb. More is expected to be added:
+
+* synchdb.naptime - the frequency of a synchdb connector worker (in seconds) to fetch new changes from Debezium embedded engine (default: 5)
+* synchdb.dml_use_spi - option to use SPI to handle DML operations. True = use SPI, false = use heap access method (default: false)
+* synchdb.synchdb_auto_launcher - option to automatic launch connector workers at server restarts. This option works when synchdb is included in shared_preload_library option (default: true)
 
 ## Architecture
 SynchDB extension consists of six major components:

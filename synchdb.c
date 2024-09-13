@@ -63,6 +63,7 @@ int myConnectorId = -1;	/* Global index number to SynchdbSharedState in shared m
 /* GUC variables */
 int synchdb_worker_naptime = 5;
 bool synchdb_dml_use_spi = false;
+bool synchdb_auto_launcher = true;
 
 /* JNI-related variables */
 static JavaVM *jvm = NULL; /* represents java vm instance */
@@ -72,6 +73,7 @@ static jobject obj;		   /* represents debezium runner java class object */
 
 /* Function declarations */
 PGDLLEXPORT void synchdb_engine_main(Datum main_arg);
+PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
 
 /* Static function prototypes */
 static int dbz_engine_stop(void);
@@ -1164,6 +1166,79 @@ assign_connector_id(char * name)
 	return -1;
 }
 
+static int
+get_shm_connector_id_by_name(const char * name)
+{
+	int i = 0;
+
+	if (!sdb_state)
+		return -1;
+
+	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	{
+		if (!strcmp(sdb_state->connectors[i].name, name))
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+void
+synchdb_auto_launcher_main(Datum main_arg)
+{
+	int ret = -1, numout = 0, i = 0;
+	char * out[SYNCHDB_MAX_ACTIVE_CONNECTORS];
+
+	/* Establish signal handlers; once that's done, unblock signals. */
+	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
+	pqsignal(SIGHUP, SignalHandlerForConfigReload);
+	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
+	BackgroundWorkerUnblockSignals();
+
+	elog(DEBUG1, "start synchdb_auto_launcher_main");
+	BackgroundWorkerInitializeConnection("postgres", NULL, 0);
+
+	/*
+	 * todo: this auto launcher worker currently assumes that synchdb
+	 * extension is created at the default postgres database. So it connects
+	 * there and try to look up the entries in synchdb_conninfo table in
+	 * public schema. If synchdb is created at another database or schema, then
+	 * it would fail to look up the retries, thus not starting any connector
+	 * workers.
+	 */
+	ret = ra_listConnInfoNames(out, &numout);
+	if (ret == 0)
+	{
+		for (i = 0; i < (numout > SYNCHDB_MAX_ACTIVE_CONNECTORS ?
+				SYNCHDB_MAX_ACTIVE_CONNECTORS : numout); i++)
+		{
+			elog(WARNING, "launching %s...", out[i]);
+			DirectFunctionCall1(synchdb_start_engine_bgw, CStringGetTextDatum(out[i]));
+			sleep(2);
+		}
+	}
+	elog(DEBUG1, "stop synchdb_auto_launcher_main");
+}
+
+static void
+synchdb_start_leader_worker(void)
+{
+	BackgroundWorker worker;
+
+	MemSet(&worker, 0, sizeof(BackgroundWorker));
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+			BGWORKER_BACKEND_DATABASE_CONNECTION;
+	worker.bgw_start_time = BgWorkerStart_ConsistentState;
+	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	strcpy(worker.bgw_library_name, "synchdb");
+	strcpy(worker.bgw_function_name, "synchdb_auto_launcher_main");
+	strcpy(worker.bgw_name, "synchdb auto launcher");
+	strcpy(worker.bgw_type, "synchdb auto launcher");
+
+	RegisterBackgroundWorker(&worker);
+}
+
 const char *
 connectorTypeToString(ConnectorType type)
 {
@@ -1400,11 +1475,23 @@ _PG_init(void)
 							NULL);
 
 	DefineCustomBoolVariable("synchdb.dml_use_spi",
-							 "switch to use SPI to handle DML operations. Default false",
+							 "option to use SPI to handle DML operations. Default false",
 							 NULL,
 							 &synchdb_dml_use_spi,
 							 false,
 							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomBoolVariable("synchdb.synchdb_auto_launcher",
+							 "option to automatic re-launch connector workers at server restarts. This option "
+							 "only works when synchdb is included in shared_preload_library option. Default true",
+							 NULL,
+							 &synchdb_auto_launcher,
+							 true,
+							 PGC_POSTMASTER,
 							 0,
 							 NULL,
 							 NULL,
@@ -1424,6 +1511,12 @@ _PG_init(void)
 	else
 	{
 		fsync_fname(SYNCHDB_METADATA_DIR, true);
+	}
+
+	/* Register synchdb auto launch worker, if enabled. */
+	if (synchdb_auto_launcher && process_shared_preload_libraries_in_progress)
+	{
+		synchdb_start_leader_worker();
 	}
 }
 
@@ -1505,6 +1598,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	ConnectionInfo connInfo;
 	char *connector = NULL;
 	int ret = -1, connectorid = -1;
+	StringInfoData strinfo;
 
 	/* Parse input arguments */
 	text *name_text = PG_GETARG_TEXT_PP(0);
@@ -1567,14 +1661,29 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 				 errmsg("could not start background process"),
 				 errhint("More details may be available in the server log.")));
 
+	/*
+	 * mark this conninfo as active so it can automatically resume running at
+	 * postgresql server restarts given that synchdb is included in
+	 * shared_preload_library GUC
+	 */
+	initStringInfo(&strinfo);
+	appendStringInfo(&strinfo, "UPDATE synchdb_conninfo set isactive = true "
+			"WHERE name = '%s'", text_to_cstring(name_text));
+
+	ra_executeCommand(strinfo.data);
+
 	PG_RETURN_INT32(0);
 }
 
 Datum
 synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 {
-	int connectorId = PG_GETARG_INT32(0);
+	int connectorId;
 	pid_t pid;
+	StringInfoData strinfo;
+
+	/* Parse input arguments */
+	text *name_text = PG_GETARG_TEXT_PP(0);
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -1586,17 +1695,36 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
+	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
+	/*
+	 * mark this conninfo as inactive so it will not automatically resume running
+	 * at postgresql server restarts given that synchdb is included in
+	 * shared_preload_library GUC
+	 */
+	initStringInfo(&strinfo);
+	appendStringInfo(&strinfo, "UPDATE synchdb_conninfo set isactive = false "
+			"WHERE name = '%s'", text_to_cstring(name_text));
+
+	ra_executeCommand(strinfo.data);
+
 	pid = get_shm_connector_pid(connectorId);
 	if (pid != InvalidPid)
 	{
-		elog(WARNING, "terminating dbz connector id (%d) with pid %d", connectorId, (int)pid);
+		elog(WARNING, "terminating dbz connector (%s) with pid %d", text_to_cstring(name_text), (int)pid);
 		DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(5000));
 		set_shm_connector_pid(connectorId, InvalidPid);
+
 	}
 	else
 	{
 		ereport(ERROR,
-				(errmsg("dbz connector id (%d) is not running", connectorId),
+				(errmsg("dbz connector (%s) is not running", text_to_cstring(name_text)),
 				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
 	}
 	PG_RETURN_INT32(0);
@@ -1663,9 +1791,12 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 Datum
 synchdb_pause_engine(PG_FUNCTION_ARGS)
 {
+	int connectorId = -1;
 	pid_t pid;
-	int connectorId = PG_GETARG_INT32(0);
 	SynchdbRequest *req;
+
+	/* Parse input arguments */
+	text *name_text = PG_GETARG_TEXT_PP(0);
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -1677,10 +1808,17 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
+	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
 	pid = get_shm_connector_pid(connectorId);
 	if (pid == InvalidPid)
 		ereport(ERROR,
-				(errmsg("dbz connector id (%d) is not running", connectorId),
+				(errmsg("dbz connector (%s) is not running", text_to_cstring(name_text)),
 				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
 
 	/* point to the right construct based on type */
@@ -1689,23 +1827,28 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 	/* an active state change request is currently in progress */
 	if (req->reqstate != STATE_UNDEF)
 		ereport(ERROR,
-				(errmsg("an active request is currently active for connector id %d", connectorId),
+				(errmsg("an active request is currently active for connector %s",
+						text_to_cstring(name_text)),
 				 errhint("wait for it to finish and try again later")));
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	req->reqstate = STATE_PAUSED;
 	LWLockRelease(&sdb_state->lock);
 
-	elog(WARNING, "sent pause request interrupt to dbz connector (%d)", connectorId);
+	elog(WARNING, "sent pause request interrupt to dbz connector %s (%d)",
+			text_to_cstring(name_text), connectorId);
 	PG_RETURN_INT32(0);
 }
 
 Datum
 synchdb_resume_engine(PG_FUNCTION_ARGS)
 {
+	int connectorId = -1;
 	pid_t pid;
 	SynchdbRequest *req;
-	int connectorId = PG_GETARG_INT32(0);
+
+	/* Parse input arguments */
+	text *name_text = PG_GETARG_TEXT_PP(0);
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -1717,10 +1860,17 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
+	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
 	pid = get_shm_connector_pid(connectorId);
 	if (pid == InvalidPid)
 		ereport(ERROR,
-				(errmsg("dbz connector id (%d) is not running", connectorId),
+				(errmsg("dbz connector id (%s) is not running", text_to_cstring(name_text)),
 				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
 
 	/* point to the right construct based on type */
@@ -1729,14 +1879,16 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 	/* an active state change request is currently in progress */
 	if (req->reqstate != STATE_UNDEF)
 		ereport(ERROR,
-				(errmsg("an active request is currently active for connector id %d", connectorId),
+				(errmsg("an active request is currently active for connector id %s",
+						text_to_cstring(name_text)),
 				 errhint("wait for it to finish and try again later")));
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	req->reqstate = STATE_SYNCING;
 	LWLockRelease(&sdb_state->lock);
 
-	elog(WARNING, "sent resume request interrupt to dbz connector id (%d)", connectorId);
+	elog(WARNING, "sent resume request interrupt to dbz connector (%s)",
+			text_to_cstring(name_text));
 	PG_RETURN_INT32(0);
 }
 
@@ -1744,11 +1896,13 @@ Datum
 synchdb_set_offset(PG_FUNCTION_ARGS)
 {
 	pid_t pid;
-	int connectorId;
+	int connectorId = -1;
 	char *offsetstr;
 	SynchdbRequest *req;
 	ConnectorState currstate;
-	connectorId = PG_GETARG_INT32(0);
+
+	/* Parse input arguments */
+	text *name_text = PG_GETARG_TEXT_PP(0);
 	offsetstr = text_to_cstring(PG_GETARG_TEXT_P(1));
 
 	/*
@@ -1761,16 +1915,25 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
+	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
 	pid = get_shm_connector_pid(connectorId);
 	if (pid == InvalidPid)
 		ereport(ERROR,
-				(errmsg("dbz connector id (%d) is not running", connectorId),
+				(errmsg("dbz connector (%s) is not running",
+						text_to_cstring(name_text)),
 				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
 
 	currstate = get_shm_connector_state_enum(connectorId);
 	if (currstate != STATE_PAUSED)
 		ereport(ERROR,
-				(errmsg("dbz connector id (%d) is not in paused state.", connectorId),
+				(errmsg("dbz connector (%s) is not in paused state.",
+						text_to_cstring(name_text)),
 				 errhint("use synchdb_pause_engine() to pause the worker first")));
 
 	/* point to the right construct based on type */
@@ -1779,7 +1942,8 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 	/* an active state change request is currently in progress */
 	if (req->reqstate != STATE_UNDEF)
 		ereport(ERROR,
-				(errmsg("an active request is currently active for connector id %d", connectorId),
+				(errmsg("an active request is currently active for connector %s",
+						text_to_cstring(name_text)),
 				 errhint("wait for it to finish and try again later")));
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
@@ -1787,7 +1951,8 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 	strncpy(req->reqdata, offsetstr, SYNCHDB_ERRMSG_SIZE);
 	LWLockRelease(&sdb_state->lock);
 
-	elog(WARNING, "sent update offset request interrupt to dbz connector id (%d)", connectorId);
+	elog(WARNING, "sent update offset request interrupt to dbz connector (%s)",
+			text_to_cstring(name_text));
 	PG_RETURN_INT32(0);
 }
 
@@ -1879,12 +2044,13 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	}
 	connector = text_to_cstring(connector_text);
 
-	appendStringInfo(&strinfo, "INSERT INTO %s (name, data)"
-			" VALUES ('%s', jsonb_build_object('hostname', '%s', "
+	appendStringInfo(&strinfo, "INSERT INTO %s (name, isactive, data)"
+			" VALUES ('%s', %s, jsonb_build_object('hostname', '%s', "
 			"'port', %d, 'user', '%s', 'pwd', pgp_sym_encrypt('%s', '%s'), "
 			"'srcdb', '%s', 'dstdb', '%s', 'table', '%s', 'connector', '%s') );",
 			SYNCHDB_CONNINFO_TABLE,
 			connInfo.name,
+			"false",
 			connInfo.hostname,
 			connInfo.port,
 			connInfo.user,
