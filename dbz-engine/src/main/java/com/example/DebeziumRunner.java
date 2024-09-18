@@ -11,6 +11,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.Future;
+import java.util.concurrent.ExecutionException;
 
 import java.io.File;
 import java.nio.ByteBuffer;
@@ -30,6 +32,11 @@ public class DebeziumRunner {
 	private List<String> changeEvents = new ArrayList<>();
 	private DebeziumEngine<ChangeEvent<String, String>> engine;
 	private ExecutorService executor;
+	private Future<?> future;
+	private String lastDbzMessage;
+	private boolean lastDbzSuccess;
+	private Throwable lastDbzError;
+
 	final int TYPE_MYSQL = 1;
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
@@ -104,8 +111,17 @@ public class DebeziumRunner {
 
 		logger.info("Hello from DebeziumRunner class!");
 
+		DebeziumEngine.CompletionCallback completionCallback = (success, message, error) ->
+		{
+			//logger.warn("success = " + success + " message = " + message + " error = " + error);
+			lastDbzMessage = message.replace("\n", " ").replace("\r", " ");
+			lastDbzSuccess = success;
+			lastDbzError = error;
+		};
+
 		engine = DebeziumEngine.create(Json.class)
                 .using(props)
+				.using(completionCallback)
                 .notifying(record -> {
                     System.out.println(record);
                     if (changeEvents == null)
@@ -126,11 +142,26 @@ public class DebeziumRunner {
 						}
                         logger.info("there are " + changeEvents.size() + " change events stored");
                     }
-                }).build();
+                })
+				.build();
 
 		System.out.println("executing...");
 		executor = Executors.newSingleThreadExecutor();
-		executor.execute(engine);
+
+		logger.warn("submit future to executor");
+		future = executor.submit(() ->
+		{
+			try
+			{
+				engine.run();
+			}
+			catch (Exception e)
+			{
+				logger.error("Task failed with exception: " + e.getMessage());
+				throw e;
+			}
+		});
+		//executor.execute(engine);
 		
 		System.out.println("done...");
     }
@@ -163,31 +194,43 @@ public class DebeziumRunner {
 
 	public List<String> getChangeEvents()
 	{
-		/* make a copy of current change list for returning */
 		List<String> listCopy;
-		synchronized (this) {
-			if (changeEvents == null) {
+
+		synchronized (this)
+		{
+			if (changeEvents == null)
+			{
 				logger.warn("changeEvents is null, initializing empty list");
 				changeEvents = new ArrayList<>();
 			}
-			listCopy = new ArrayList<>(changeEvents);
 
-			/* empty the changeEvents as they have been consumed */
-			changeEvents.clear();
-			logger.info("Retrieved {} change events", listCopy.size());
+	        if (!future.isDone())
+			{
+				/* conector task is running, get changes */
+				listCopy = new ArrayList<>(changeEvents);
+
+				/* empty the changeEvents as they have been consumed */
+				changeEvents.clear();
+				logger.info("Retrieved {} change events", listCopy.size());
+			}
+			else
+			{
+				/* conector task is not running, get exit messages */
+				logger.warn("connector is no longer running");
+				logger.warn("success flag = " + lastDbzSuccess + " | message = " + lastDbzMessage +
+						" | error = " + lastDbzError);
+
+				/*
+				 * add the last captured connector exit message and send it to synchdb
+				 * the K- prefix indicated an error rather than a change event
+				 */
+				listCopy = new ArrayList<>();
+				listCopy.add("K-" + lastDbzSuccess + ";" + lastDbzMessage);
+				logger.info("Prepared {} change events", listCopy.size());
+			}
 		}
 
 		return listCopy;
-		/*
-        synchronized (this) {
-
-			if (changeEvents == null)
-			{
-				changeEvents = new ArrayList<>();
-			}
-            return new ArrayList<>(changeEvents);
-        }
-		*/
     }
 	
 	public String getConnectorOffset(int connectorType, String db, String name)
