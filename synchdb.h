@@ -21,7 +21,7 @@
 #include "storage/lwlock.h"
 
 /* Constants */
-#define SYNCHDB_ERRMSG_SIZE 128
+#define SYNCHDB_ERRMSG_SIZE 256
 #define SYNCHDB_MAX_DB_NAME_SIZE 64
 #define SYNCHDB_DATATYPE_NAME_SIZE 64
 #define SYNCHDB_JSON_PATH_SIZE 128

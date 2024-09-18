@@ -78,7 +78,7 @@ PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
 /* Static function prototypes */
 static int dbz_engine_stop(void);
 static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
-static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj);
+static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal);
 static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType);
 static char *dbz_engine_get_offset(int connectorId);
 static TupleDesc synchdb_state_tupdesc(void);
@@ -195,6 +195,39 @@ dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj)
 	return 0;
 }
 
+static void
+processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExitSignal)
+{
+	char * msgcopy = pstrdup(eventStr + 2); /* skip K- */
+	char * successflag = NULL;
+	char * message = NULL;
+
+	elog(WARNING, "completion message: %s", msgcopy);
+
+	/*
+	 * success flag indicates if worker exits successfully or due to an error.
+	 * Currently not used
+	 */
+	successflag = strtok(msgcopy, ";");
+
+	/* remove compiler warning */
+	if (successflag && strlen(successflag) > 0)
+	{
+		/* presence of successflag indicates that the DBZ connector in java has exited */
+		elog(WARNING, "successflag = %s", successflag);
+		*dbzExitSignal = true;
+	}
+
+	/* message is the last error or exit message the connector produced before
+	 * it exited
+	 */
+	message = strtok(NULL, ";");
+	if (message)
+	{
+		/* save it to shm for display to use */
+		set_shm_connector_errmsg(myConnectorId, message);
+	}
+}
 /*
  * dbz_engine_get_change - Retrieve and process change events from the Debezium engine
  *
@@ -208,7 +241,7 @@ dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj)
  * @return: 0 on success, -1 on failure
  */
 static int
-dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
+dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal)
 {
 	jmethodID getChangeEvents, sizeMethod, getMethod;
 	jobject changeEventsList;
@@ -216,6 +249,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
 	jclass listClass;
 	jobject event;
 	const char *eventStr;
+	int ret = 0;
 
 	/* Validate input parameters */
 	if (!jvm || !env || !cls || !obj)
@@ -273,7 +307,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
 
 	/* Process change events */
 	size = (*env)->CallIntMethod(env, changeEventsList, sizeMethod);
-	elog(DEBUG1, "dbz_engine_get_change: Retrieved %d change events", size);
+	elog(DEBUG2, "dbz_engine_get_change: Retrieved %d change events", size);
 
 	for (int i = 0; i < size; i++)
 	{
@@ -294,9 +328,24 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
 
 		elog(WARNING, "Processing DBZ Event: %s", eventStr);
 
-		if (fc_processDBZChangeEvent(eventStr) != 0)
+		/* distinguish message type */
+		if (eventStr[0] == 'K' && eventStr[1] == '-')
 		{
-			elog(WARNING, "dbz_engine_get_change: Failed to process event at index %d", i);
+			/*
+			 * connector completion/error message, consume it right here
+			 * This may also indicates that the dbz connector on java side
+			 * has exited and we may need to exit later as well.
+			 */
+			processCompletionMessage(eventStr, myConnectorId, dbzExitSignal);
+		}
+		else
+		{
+			/* change event message, send to format converter */
+			if (fc_processDBZChangeEvent(eventStr) != 0)
+			{
+				elog(WARNING, "dbz_engine_get_change: Failed to process event at index %d", i);
+			}
+			ret = 0;
 		}
 
 		(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
@@ -305,7 +354,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj)
 
 	(*env)->DeleteLocalRef(env, changeEventsList);
 	(*env)->DeleteLocalRef(env, listClass);
-	return 0;
+	return ret;
 }
 
 /*
@@ -784,6 +833,12 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 			return;
 		}
 		set_shm_connector_state(connectorId, STATE_PAUSED);
+
+		/*
+		 * todo: if a connector is marked paused, it should be noted somewhere in
+		 * synchdb_conninfo table so when it restarts next time, it could start with
+		 * initial state = paused rather than syncing.
+		 */
 	}
 	else if (reqcopy->reqstate == STATE_SYNCING && *currstatecopy == STATE_PAUSED)
 	{
@@ -1070,6 +1125,8 @@ static void
 main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo)
 {
 	ConnectorState currstate;
+	bool dbzExitSignal = false;
+
 	elog(LOG, "Main LOOP ENTER ");
 	while (!ShutdownRequestPending)
 	{
@@ -1079,13 +1136,19 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo)
 			ProcessConfigFile(PGC_SIGHUP);
 		}
 
+		if (dbzExitSignal)
+		{
+			elog(WARNING, "dbz shutdown signal received. Exit now...");
+			break;
+		}
+
 		processRequestInterrupt(connInfo, connectorType, myConnectorId);
 
 		currstate = get_shm_connector_state_enum(myConnectorId);
 		switch (currstate)
 		{
 		case STATE_SYNCING:
-			dbz_engine_get_change(jvm, env, &cls, &obj);
+			dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal);
 			break;
 		case STATE_PAUSED:
 			/* Do nothing when paused */
@@ -1486,7 +1549,7 @@ _PG_init(void)
 							 NULL);
 
 	DefineCustomBoolVariable("synchdb.synchdb_auto_launcher",
-							 "option to automatic re-launch connector workers at server restarts. This option "
+							 "option to automatic launch connector workers at server restarts. This option "
 							 "only works when synchdb is included in shared_preload_library option. Default true",
 							 NULL,
 							 &synchdb_auto_launcher,
