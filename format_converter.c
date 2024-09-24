@@ -363,7 +363,7 @@ populate_primary_keys(StringInfoData * strinfo, const char * jsonin)
 				{
 					case jbvString:
 						value = pnstrdup(v.val.string.val, v.val.string.len);
-						elog(WARNING, "primary key column: %s", value);
+						elog(DEBUG1, "primary key column: %s", value);
 						if (isfirst)
 						{
 							appendStringInfo(strinfo, ", PRIMARY KEY(");
@@ -463,7 +463,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
     {
     	resetStringInfo(strinfoout);
     	appendStringInfoString(strinfoout, "NULL");
-    	elog(WARNING, "%s = NULL", path);
+    	elog(DEBUG1, "%s = NULL", path);
     }
     else
     {
@@ -477,7 +477,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 		 */
 		if (removequotes)
 			remove_double_quotes(strinfoout);
-		elog(WARNING, "%s = %s", path, strinfoout->data);
+		elog(DEBUG1, "%s = %s", path, strinfoout->data);
     }
 
 	pfree(datum_elems);
@@ -713,7 +713,7 @@ parseDBZDDL(Jsonb * jb)
 				switch (r)
 				{
 					case WJB_BEGIN_OBJECT:
-						elog(WARNING, "parsing column --------------------");
+						elog(DEBUG1, "parsing column --------------------");
 						ddlcol = (DBZ_DDL_COLUMN *) palloc0(sizeof(DBZ_DDL_COLUMN));
 
 						if (key)
@@ -728,20 +728,20 @@ parseDBZDDL(Jsonb * jb)
 
 						break;
 					case WJB_BEGIN_ARRAY:
-						elog(WARNING, "Begin array under %s", key ? key : "NULL");
+						elog(DEBUG1, "Begin array under %s", key ? key : "NULL");
 						if (key)
 						{
-							elog(WARNING, "sub array detected, skip it");
+							elog(DEBUG1, "sub array detected, skip it");
 							pause = 1;
 							pfree(key);
 							key = NULL;
 						}
 						break;
 					case WJB_END_ARRAY:
-						elog(WARNING, "End array");
+						elog(DEBUG1, "End array");
 						if (pause)
 						{
-							elog(WARNING, "sub array ended, resume parsing operation");
+							elog(DEBUG1, "sub array ended, resume parsing operation");
 							pause = 0;
 						}
 						break;
@@ -788,7 +788,7 @@ parseDBZDDL(Jsonb * jb)
 						}
 					break;
 					default:
-						elog(WARNING, "Unknown token: %d", r);
+						elog(DEBUG1, "Unknown token: %d", r);
 						break;
 				}
 
@@ -797,52 +797,52 @@ parseDBZDDL(Jsonb * jb)
 				{
 					if (!strcmp(key, "name"))
 					{
-						elog(WARNING, "consuming %s = %s", key, value);
+						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->name = pstrdup(value);
 					}
 					if (!strcmp(key, "length"))
 					{
-						elog(WARNING, "consuming %s = %s", key, value);
+						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->length = strcmp(value, "NULL") == 0 ? 0 : atoi(value);
 					}
 					if (!strcmp(key, "optional"))
 					{
-						elog(WARNING, "consuming %s = %s", key, value);
+						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->optional = strcmp(value, "true") == 0 ? true : false;
 					}
 					if (!strcmp(key, "position"))
 					{
-						elog(WARNING, "consuming %s = %s", key, value);
+						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->position = atoi(value);
 					}
 					if (!strcmp(key, "typeName"))
 					{
-						elog(WARNING, "consuming %s = %s", key, value);
+						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->typeName = pstrdup(value);
 					}
 					if (!strcmp(key, "enumValues"))
 					{
-						elog(WARNING, "consuming %s = %s", key, value);
+						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->enumValues = pstrdup(value);
 					}
 					if (!strcmp(key, "charsetName"))
 					{
-						elog(WARNING, "consuming %s = %s", key, value);
+						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->charsetName = pstrdup(value);
 					}
 					if (!strcmp(key, "autoIncremented"))
 					{
-						elog(WARNING, "consuming %s = %s", key, value);
+						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->autoIncremented = strcmp(value, "true") == 0 ? true : false;
 					}
 					if (!strcmp(key, "defaultValueExpression"))
 					{
-						elog(WARNING, "consuming %s = %s", key, value);
+						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->defaultValueExpression = pstrdup(value);
 					}
 					if (!strcmp(key, "scale"))
 					{
-						elog(WARNING, "consuming %s = %s", key, value);
+						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->scale = strcmp(value, "NULL") == 0 ? 0 : atoi(value);
 					}
 
@@ -939,14 +939,14 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 			if (!found)
 			{
 				/* no mapping found, so no transformation done */
-				elog(WARNING, "no transformation done for %s (autoincrement %d)",
+				elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
 						key.extTypeName, key.autoIncremented);
 				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
 			}
 			else
 			{
 				/* use the mapped values and sizes */
-				elog(WARNING, "transform %s (autoincrement %d) to %s with length %d",
+				elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
 						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
 						entry->pgsqlTypeLength);
 				appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
@@ -982,14 +982,14 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 			if (!found)
 			{
 				/* no mapping found, so no transformation done */
-				elog(WARNING, "no transformation done for %s (autoincrement %d)",
+				elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
 						key.extTypeName, key.autoIncremented);
 				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
 			}
 			else
 			{
 				/* use the mapped values and sizes */
-				elog(WARNING, "transform %s (autoincrement %d) to %s with length %d",
+				elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
 						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
 						entry->pgsqlTypeLength);
 				appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
@@ -1915,7 +1915,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 	/* free the data inside strinfo as we no longer needs it */
 	pfree(strinfo.data);
 
-	elog(WARNING, "pgdml->dmlquery %s", pgdml->dmlquery);
+	elog(DEBUG1, "pgdml->dmlquery %s", pgdml->dmlquery);
 	return pgdml;
 }
 
@@ -1935,7 +1935,7 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 		case NUMERICOID:
 		{
 			/* spcial numeric case: need to obtain scale and precision from json */
-			elog(WARNING, "numeric: retrieving additional scale and precision parameters");
+			elog(DEBUG1, "numeric: retrieving additional scale and precision parameters");
 
 			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.parameters.scale",
 					isbefore ? 0 : 1, pos);
@@ -1980,7 +1980,7 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 					colval->timerep = TIME_ZONEDTIMESTAMP;
 				else
 					colval->timerep = TIME_UNDEF;
-				elog(WARNING, "timerep %d", colval->timerep);
+				elog(DEBUG1, "timerep %d", colval->timerep);
 			}
 			break;
 		}
@@ -2073,7 +2073,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		elog(ERROR, "%s", msg);
 	}
 
-	elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", dbzdml->db, dbzdml->table, dbzdml->tableoid);
+	elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", dbzdml->db, dbzdml->table, dbzdml->tableoid);
 
 	/* prepare a temporary hash table for datatype look up with column name */
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
@@ -2162,25 +2162,25 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 					switch (r)
 					{
 						case WJB_BEGIN_OBJECT:
-							elog(WARNING, "start of object (%s) --------------------", key ? key : "null");
+							elog(DEBUG1, "start of object (%s) --------------------", key ? key : "null");
 
 							if (key != NULL)
 							{
-								elog(WARNING, "sub element detected, skip subsequent parsing");
+								elog(DEBUG1, "sub element detected, skip subsequent parsing");
 								pause = 1;
 							}
 							break;
 						case WJB_END_OBJECT:
 							if (pause)
 							{
-								elog(WARNING, "sub element ended, resume parsing operation");
+								elog(DEBUG1, "sub element ended, resume parsing operation");
 								pause = 0;
 								if (key)
 								{
 									int pathsize = strlen("payload.after.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 
-									elog(WARNING, "parse the entire sub element under %s as string", key);
+									elog(DEBUG1, "parse the entire sub element under %s as string", key);
 
 									snprintf(tmpPath, pathsize, "payload.after.%s", key);
 									getPathElementString(jb, tmpPath, &strinfo, false);
@@ -2189,10 +2189,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 										pfree(tmpPath);
 								}
 							}
-							elog(WARNING, "end of object (%s) --------------------", key ? key : "null");
+							elog(DEBUG1, "end of object (%s) --------------------", key ? key : "null");
 							break;
 						case WJB_BEGIN_ARRAY:
-							elog(WARNING, "start of array (%s) --- array type not expected or handled yet",
+							elog(DEBUG1, "start of array (%s) --- array type not expected or handled yet",
 									key ? key : "null");
 							if (key)
 							{
@@ -2201,7 +2201,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							}
 							break;
 						case WJB_END_ARRAY:
-							elog(WARNING, "end of array (%s) --- array type not expected or handled yet",
+							elog(DEBUG1, "end of array (%s) --- array type not expected or handled yet",
 																key ? key : "null");
 							break;
 						case WJB_KEY:
@@ -2279,7 +2279,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						else
 							elog(WARNING, "cannot find data type for column %s. None-existent column?", colval->name);
 
-						elog(WARNING, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
+						elog(DEBUG1, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
 						dbzdml->columnValuesAfter = lappend(dbzdml->columnValuesAfter, colval);
 
 						pfree(key);
@@ -2314,25 +2314,25 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 					switch (r)
 					{
 						case WJB_BEGIN_OBJECT:
-							elog(WARNING, "start of object (%s) --------------------", key ? key : "null");
+							elog(DEBUG1, "start of object (%s) --------------------", key ? key : "null");
 
 							if (key != NULL)
 							{
-								elog(WARNING, "sub element detected, skip subsequent parsing");
+								elog(DEBUG1, "sub element detected, skip subsequent parsing");
 								pause = 1;
 							}
 							break;
 						case WJB_END_OBJECT:
 							if (pause)
 							{
-								elog(WARNING, "sub element ended, resume parsing operation");
+								elog(DEBUG1, "sub element ended, resume parsing operation");
 								pause = 0;
 								if (key)
 								{
 									int pathsize = strlen("payload.before.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 
-									elog(WARNING, "parse the entire sub element under %s as string", key);
+									elog(DEBUG1, "parse the entire sub element under %s as string", key);
 
 									snprintf(tmpPath, pathsize, "payload.before.%s", key);
 									getPathElementString(jb, tmpPath, &strinfo, false);
@@ -2341,10 +2341,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 										pfree(tmpPath);
 								}
 							}
-							elog(WARNING, "end of object (%s) --------------------", key ? key : "null");
+							elog(DEBUG1, "end of object (%s) --------------------", key ? key : "null");
 							break;
 						case WJB_BEGIN_ARRAY:
-							elog(WARNING, "start of array (%s) --- array type not expected or handled yet",
+							elog(DEBUG1, "start of array (%s) --- array type not expected or handled yet",
 									key ? key : "null");
 							if (key)
 							{
@@ -2353,7 +2353,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							}
 							break;
 						case WJB_END_ARRAY:
-							elog(WARNING, "end of array (%s) --- array type not expected or handled yet",
+							elog(DEBUG1, "end of array (%s) --- array type not expected or handled yet",
 																key ? key : "null");
 							break;
 						case WJB_KEY:
@@ -2424,7 +2424,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-						elog(WARNING, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
+						elog(DEBUG1, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
 						dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
 
 						pfree(key);
@@ -2473,18 +2473,18 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						switch (r)
 						{
 							case WJB_BEGIN_OBJECT:
-								elog(WARNING, "start of object (%s) --------------------", key ? key : "null");
+								elog(DEBUG1, "start of object (%s) --------------------", key ? key : "null");
 
 								if (key != NULL)
 								{
-									elog(WARNING, "sub element detected, skip subsequent parsing");
+									elog(DEBUG1, "sub element detected, skip subsequent parsing");
 									pause = 1;
 								}
 								break;
 							case WJB_END_OBJECT:
 								if (pause)
 								{
-									elog(WARNING, "sub element ended, resume parsing operation");
+									elog(DEBUG1, "sub element ended, resume parsing operation");
 									pause = 0;
 									if (key)
 									{
@@ -2492,7 +2492,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 												strlen("payload.after.") + strlen(key) + 1);
 										char * tmpPath = (char *) palloc0 (pathsize);
 
-										elog(WARNING, "parse the entire sub element under %s as string", key);
+										elog(DEBUG1, "parse the entire sub element under %s as string", key);
 										if (i == 0)
 											snprintf(tmpPath, pathsize, "payload.before.%s", key);
 										else
@@ -2503,10 +2503,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 											pfree(tmpPath);
 									}
 								}
-								elog(WARNING, "end of object (%s) --------------------", key ? key : "null");
+								elog(DEBUG1, "end of object (%s) --------------------", key ? key : "null");
 								break;
 							case WJB_BEGIN_ARRAY:
-								elog(WARNING, "start of array (%s) --- array type not expected or handled yet",
+								elog(DEBUG1, "start of array (%s) --- array type not expected or handled yet",
 										key ? key : "null");
 								if (key)
 								{
@@ -2515,7 +2515,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								}
 								break;
 							case WJB_END_ARRAY:
-								elog(WARNING, "end of array (%s) --- array type not expected or handled yet",
+								elog(DEBUG1, "end of array (%s) --- array type not expected or handled yet",
 																	key ? key : "null");
 								break;
 							case WJB_KEY:
@@ -2589,7 +2589,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							else
 								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-							elog(WARNING, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
+							elog(DEBUG1, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
 							if (i == 0)
 								dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
 							else
@@ -2688,11 +2688,11 @@ init_mysql(void)
 					mysql_defaultTypeMappings[i].pgsqlTypeName,
 					strlen(mysql_defaultTypeMappings[i].pgsqlTypeName));
 
-			elog(WARNING, "Inserted mapping '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+			elog(DEBUG1, "Inserted mapping '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
 		}
 		else
 		{
-			elog(WARNING, "mapping exists '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+			elog(DEBUG1, "mapping exists '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
 		}
 	}
 }
@@ -2731,11 +2731,11 @@ init_sqlserver(void)
 					sqlserver_defaultTypeMappings[i].pgsqlTypeName,
 					strlen(sqlserver_defaultTypeMappings[i].pgsqlTypeName));
 
-			elog(WARNING, "Inserted mapping '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+			elog(DEBUG1, "Inserted mapping '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
 		}
 		else
 		{
-			elog(WARNING, "mapping exists '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+			elog(DEBUG1, "mapping exists '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
 		}
 	}
 }
@@ -2794,6 +2794,279 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 	}
 }
 
+
+bool
+fc_load_rules(ConnectorType connectorType, const char * rulefile)
+{
+	FILE *file = fopen(rulefile, "r");
+	char *json_string;
+	long jsonlength = 0;
+	Datum jsonb_datum;
+	Jsonb * jb;
+	JsonbIterator *it;
+	JsonbIteratorToken r;
+	JsonbValue v;
+	bool inarray = false;
+	char * array = NULL;
+	char * key = NULL;
+	char * value = NULL;
+	bool found = 0;
+
+	HTAB * rulehash = NULL;
+	DatatypeHashEntry hashentry;
+	DatatypeHashEntry * entrylookup;
+
+	switch (connectorType)
+	{
+		case TYPE_MYSQL:
+			rulehash = mysqlDatatypeHash;
+			break;
+		case TYPE_ORACLE:
+			rulehash = NULL; /* todo */
+			break;
+		case TYPE_SQLSERVER:
+			rulehash = sqlserverDatatypeHash;
+			break;
+		default:
+		{
+			set_shm_connector_errmsg(myConnectorId, "unsupported connector type");
+			elog(ERROR, "unsupported connector type");
+		}
+	}
+
+	if (!rulehash)
+	{
+		set_shm_connector_errmsg(myConnectorId, "data type hash not initialized");
+		elog(ERROR, "data type hash not initialized");
+	}
+
+	if (!file)
+	{
+		set_shm_connector_errmsg(myConnectorId, "cannot open rule file");
+		elog(ERROR, "Cannot open rule file: %s", rulefile);
+	}
+
+	/* Get the file size */
+	fseek(file, 0, SEEK_END);
+	jsonlength = ftell(file);
+	fseek(file, 0, SEEK_SET);
+
+	/* Allocate memory to store file contents */
+	json_string = palloc0(jsonlength + 1);
+	fread(json_string, 1, jsonlength, file);
+	json_string[jsonlength] = '\0';
+
+	fclose(file);
+
+	jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(json_string));
+	jb = DatumGetJsonbP(jsonb_datum);
+
+	/*
+	 * This parser expects json in this format:
+	 * {
+     *   "translation_rules":
+     *   [
+     *       {
+     *           "translate_from": "LINESTRING",
+     *           "translate_from_autoinc": false,
+     *           "translate_to": "LINESTRING",
+     *           "translate_to_size": -1
+     *       },
+     *       {
+     *           "translate_from": "LINESTRING",
+     *           "translate_from_autoinc": false,
+     *           "translate_to": "POINT",
+     *           "translate_to_size": -1
+     *       }
+     *       ...
+     *       ...
+     *       ...
+     *   ]
+	 * }
+	 *
+	 */
+	it = JsonbIteratorInit(&jb->root);
+	while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
+	{
+		switch (r)
+		{
+			case WJB_BEGIN_ARRAY:
+			{
+				elog(DEBUG1, "begin array %s", array ? array : "NULL");
+				inarray = true;
+				if (strcasecmp(array, "translation_rules"))
+				{
+					set_shm_connector_errmsg(myConnectorId, "unexpected array token name found");
+					elog(ERROR,"unexpected array token name: %s. Parser expects "
+							"\"translation_rules\"", array);
+				}
+				break;
+			}
+			case WJB_END_ARRAY:
+			{
+				elog(DEBUG1, "end array %s", array ? array : "NULL");
+				inarray = false;
+				break;
+			}
+			case WJB_VALUE:
+			case WJB_ELEM:
+			{
+				switch(v.type)
+				{
+					case jbvString:
+						value = pnstrdup(v.val.string.val, v.val.string.len);
+						elog(DEBUG1, "String Value: %s, key: %s", value, key ? key : "NULL");
+						break;
+					case jbvNull:
+					{
+						elog(DEBUG1, "Value: NULL");
+						value = pnstrdup("NULL", strlen("NULL"));
+						break;
+					}
+					case jbvNumeric:
+					{
+						value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
+						elog(DEBUG1, "Numeric Value: %s, key: %s", value, key ? key : "NULL");
+						break;
+					}
+					case jbvBool:
+					{
+						elog(DEBUG1, "Boolean Value: %s, key: %s", v.val.boolean ? "true" : "false", key ? key : "NULL");
+						if (v.val.boolean)
+							value = pnstrdup("true", strlen("true"));
+						else
+							value = pnstrdup("false", strlen("false"));
+						break;
+					}
+					case jbvBinary:
+					default:
+					{
+						set_shm_connector_errmsg(myConnectorId, "unexpected value type found in rule file");
+						elog(ERROR, "Unknown or unexpected value type: %d while "
+								"parsing primaryKeyColumnNames", v.type);
+						break;
+					}
+				}
+				break;
+			}
+			case WJB_KEY:
+			{
+				if (inarray)
+				{
+					key = pnstrdup(v.val.string.val, v.val.string.len);
+					elog(DEBUG1, "key %s", key);
+				}
+				else
+				{
+					array = pnstrdup(v.val.string.val, v.val.string.len);
+					elog(DEBUG1, "array %s", array);
+				}
+				break;
+			}
+			case WJB_BEGIN_OBJECT:
+			{
+				/* beginning of a json array element. Initialize hashkey */
+				elog(DEBUG1, "begin object");
+				memset(&hashentry, 0, sizeof(hashentry));
+				break;
+			}
+			case WJB_END_OBJECT:
+			{
+				elog(DEBUG1, "end object");
+				if (inarray)
+				{
+					elog(DEBUG1," data type mapping: from %s(%d) to %s(%d)",
+							hashentry.key.extTypeName, hashentry.key.autoIncremented,
+							hashentry.pgsqlTypeName, hashentry.pgsqlTypeLength);
+
+					entrylookup = (DatatypeHashEntry *) hash_search(rulehash,
+							&(hashentry.key), HASH_ENTER, &found);
+
+					/* found or not, just update or insert it */
+					if (!found)
+					{
+						entrylookup->key.autoIncremented = hashentry.key.autoIncremented;
+						memset(entrylookup->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+						strncpy(entrylookup->key.extTypeName,
+								hashentry.key.extTypeName,
+								strlen(hashentry.key.extTypeName));
+
+						entrylookup->pgsqlTypeLength = hashentry.pgsqlTypeLength;
+						memset(entrylookup->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+						strncpy(entrylookup->pgsqlTypeName,
+								hashentry.pgsqlTypeName,
+								strlen(hashentry.pgsqlTypeName));
+
+						elog(WARNING, "Inserted mapping '%s' <-> '%s'", entrylookup->key.extTypeName, entrylookup->pgsqlTypeName);
+					}
+					else
+					{
+						entrylookup->key.autoIncremented = hashentry.key.autoIncremented;
+						memset(entrylookup->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+						strncpy(entrylookup->key.extTypeName,
+								hashentry.key.extTypeName,
+								strlen(hashentry.key.extTypeName));
+
+						entrylookup->pgsqlTypeLength = hashentry.pgsqlTypeLength;
+						memset(entrylookup->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+						strncpy(entrylookup->pgsqlTypeName,
+								hashentry.pgsqlTypeName,
+								strlen(hashentry.pgsqlTypeName));
+
+						elog(WARNING, "Updated mapping '%s' <-> '%s'", entrylookup->key.extTypeName, entrylookup->pgsqlTypeName);
+					}
+
+				}
+				break;
+			}
+			default:
+			{
+				set_shm_connector_errmsg(myConnectorId, "unexpected token found in rule file");
+				elog(ERROR, "Unknown or unexpected token: %d while "
+						"parsing rule file", r);
+				break;
+			}
+		}
+
+		/* check if we have a key - value pair */
+		if (key != NULL && value != NULL)
+		{
+			if (!strcmp(key, "translate_from"))
+			{
+				elog(DEBUG1, "consuming %s = %s", key, value);
+				strncpy(hashentry.key.extTypeName, value, strlen(value));
+			}
+
+			if (!strcmp(key, "translate_from_autoinc"))
+			{
+				elog(DEBUG1, "consuming %s = %s", key, value);
+				if (!strcasecmp(value, "true"))
+					hashentry.key.autoIncremented = true;
+				else
+					hashentry.key.autoIncremented = false;
+			}
+
+			if (!strcmp(key, "translate_to"))
+			{
+				elog(DEBUG1, "consuming %s = %s", key, value);
+				strncpy(hashentry.pgsqlTypeName, value, strlen(value));
+			}
+
+			if (!strcmp(key, "translate_to_size"))
+			{
+				elog(DEBUG1, "consuming %s = %s", key, value);
+				hashentry.pgsqlTypeLength = atoi(value);
+			}
+
+			pfree(key);
+			pfree(value);
+			key = NULL;
+			value = NULL;
+		}
+	}
+	return true;
+}
+
 /* Main function to process Debezium change event */
 int
 fc_processDBZChangeEvent(const char * event)
@@ -2826,7 +3099,7 @@ fc_processDBZChangeEvent(const char * event)
     	PG_DDL * pgddl = NULL;
 
     	/* (1) parse */
-    	elog(WARNING, "parsing DBZ DDL change event...");
+    	elog(DEBUG1, "parsing DBZ DDL change event...");
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
     	dbzddl = parseDBZDDL(jb);
     	if (!dbzddl)
@@ -2836,7 +3109,7 @@ fc_processDBZChangeEvent(const char * event)
     		return -1;
     	}
 
-    	elog(WARNING, "converting to PG DDL change event...");
+    	elog(DEBUG1, "converting to PG DDL change event...");
     	/* (2) convert */
     	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
     	pgddl = convert2PGDDL(dbzddl, type);
@@ -2849,7 +3122,7 @@ fc_processDBZChangeEvent(const char * event)
     	}
 
     	/* (3) execute */
-    	elog(WARNING, "executing PG DDL change event...");
+    	elog(DEBUG1, "executing PG DDL change event...");
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
     	if(ra_executePGDDL(pgddl, type))
     	{
@@ -2865,7 +3138,7 @@ fc_processDBZChangeEvent(const char * event)
 
     	/* (5) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
-    	elog(WARNING, "execution completed. Clean up...");
+    	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDDL(dbzddl);
     	destroyPGDDL(pgddl);
     }
@@ -2875,7 +3148,7 @@ fc_processDBZChangeEvent(const char * event)
     	DBZ_DML * dbzdml = NULL;
     	PG_DML * pgdml = NULL;
 
-    	elog(WARNING, "this is DML change event");
+    	elog(DEBUG1, "this is DML change event");
 
     	/* (1) parse */
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
@@ -2900,7 +3173,7 @@ fc_processDBZChangeEvent(const char * event)
 
     	/* (3) execute */
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	elog(WARNING, "executing PG DML change event...");
+    	elog(DEBUG1, "executing PG DML change event...");
     	if(ra_executePGDML(pgdml, type))
     	{
     		elog(WARNING, "failed to execute PG DML change event");
@@ -2915,7 +3188,7 @@ fc_processDBZChangeEvent(const char * event)
 
        	/* (5) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
-    	elog(WARNING, "execution completed. Clean up...");
+    	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);
     }

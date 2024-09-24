@@ -264,7 +264,7 @@ public class DebeziumRunner {
 
 		if (!inputFile.exists())
         {
-            logger.warn("dbz offset file does not exist yet. Skipping");
+            logger.info("dbz offset file does not exist yet. Skipping");
 			ret = "offset file not flushed yet";
             return ret;
         }
