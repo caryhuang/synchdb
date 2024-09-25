@@ -403,14 +403,14 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		idxoid = GetRelationIdentityOrPK(rel);
 		if (OidIsValid(idxoid))
 		{
-			elog(WARNING, "attempt to find old tuple by index");
+			elog(DEBUG1, "attempt to find old tuple by index");
 			found = RelationFindReplTupleByIndex(rel, idxoid,
 												 LockTupleExclusive,
 												 remoteslot, localslot);
 		}
 		else
 		{
-			elog(WARNING, "attempt to find old tuple by seq scan");
+			elog(DEBUG1, "attempt to find old tuple by seq scan");
 			found = RelationFindReplTupleSeq(rel, LockTupleExclusive,
 											 remoteslot, localslot);
 		}
@@ -453,7 +453,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		}
 		else
 		{
-			elog(WARNING, "tuple to update not found");
+			elog(DEBUG1, "tuple to update not found");
 			ret = -1;
 		}
 
@@ -583,14 +583,14 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		idxoid = GetRelationIdentityOrPK(rel);
 		if (OidIsValid(idxoid))
 		{
-			elog(WARNING, "attempt to find old tuple by index");
+			elog(DEBUG1, "attempt to find old tuple by index");
 			found = RelationFindReplTupleByIndex(rel, idxoid,
 												 LockTupleExclusive,
 												 remoteslot, localslot);
 		}
 		else
 		{
-			elog(WARNING, "attempt to find old tuple by seq scan");
+			elog(DEBUG1, "attempt to find old tuple by seq scan");
 			found = RelationFindReplTupleSeq(rel, LockTupleExclusive,
 											 remoteslot, localslot);
 		}
@@ -607,7 +607,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		}
 		else
 		{
-			elog(WARNING, "tuple to delete not found");
+			elog(DEBUG1, "tuple to delete not found");
 			ret = -1;
 		}
 
@@ -727,7 +727,8 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"coalesce(data->>'dstdb', 'null'), "
 			"coalesce(data->>'table', 'null'), "
 			"coalesce(data->>'connector', 'null'),"
-			"isactive FROM "
+			"isactive,"
+			"coalesce(data->>'rule_file', 'null') FROM "
 			"synchdb_conninfo WHERE name = '%s'",
 			SYNCHDB_SECRET, name);
 
@@ -747,11 +748,14 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	conninfo->table = pstrdup(TextDatumGetCString(res[6]));
 	*connector = pstrdup(TextDatumGetCString(res[7]));
 	conninfo->active = DatumGetBool(res[8]);
+	conninfo->rulefile =  pstrdup(TextDatumGetCString(res[9]));
 
-	elog(DEBUG2, "name %s hostname %s, port %d, user %s pwd %s srcdb %s dstdb %s table %s connector %s",
+	elog(DEBUG2, "name %s hostname %s, port %d, user %s pwd %s srcdb %s "
+			"dstdb %s table %s connector %s rulefile %s",
 			conninfo->name, conninfo->hostname, conninfo->port,
 			conninfo->user, conninfo->pwd, conninfo->src_db,
-			conninfo->dst_db, conninfo->table, *connector);
+			conninfo->dst_db, conninfo->table, *connector,
+			conninfo->rulefile);
 	pfree(res);
 	return 0;
 }
@@ -768,6 +772,7 @@ ra_listConnInfoNames(char ** out, int * numout)
 	int ret = -1, i = 0;
 	char * query = "SELECT name FROM synchdb_conninfo WHERE isactive = true";
 	char * value;
+	MemoryContext oldcontext;
 
 	if (!IsTransactionOrTransactionBlock())
 	{
@@ -802,11 +807,13 @@ ra_listConnInfoNames(char ** out, int * numout)
 		return -1;
 	}
 
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 	for (i = 0; i < *numout; i++)
 	{
 		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1);
 		out[i] = pstrdup(value);
 	}
+	MemoryContextSwitchTo(oldcontext);
 
 	/* Close the connection */
 	SPI_finish();

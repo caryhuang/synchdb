@@ -49,6 +49,7 @@ PG_FUNCTION_INFO_V1(synchdb_pause_engine);
 PG_FUNCTION_INFO_V1(synchdb_resume_engine);
 PG_FUNCTION_INFO_V1(synchdb_set_offset);
 PG_FUNCTION_INFO_V1(synchdb_add_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_load_rules_file);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -202,7 +203,7 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
 	char * successflag = NULL;
 	char * message = NULL;
 
-	elog(WARNING, "completion message: %s", msgcopy);
+	elog(DEBUG1, "completion message: %s", msgcopy);
 
 	/*
 	 * success flag indicates if worker exits successfully or due to an error.
@@ -214,7 +215,7 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
 	if (successflag && strlen(successflag) > 0)
 	{
 		/* presence of successflag indicates that the DBZ connector in java has exited */
-		elog(WARNING, "successflag = %s", successflag);
+		elog(DEBUG1, "successflag = %s", successflag);
 		*dbzExitSignal = true;
 	}
 
@@ -314,19 +315,19 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, i);
 		if (event == NULL)
 		{
-			elog(WARNING, "dbz_engine_get_change: Received NULL event at index %d", i);
+			elog(DEBUG1, "dbz_engine_get_change: Received NULL event at index %d", i);
 			continue;
 		}
 
 		eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
 		if (eventStr == NULL)
 		{
-			elog(WARNING, "dbz_engine_get_change: Failed to get string for event at index %d", i);
+			elog(DEBUG1, "dbz_engine_get_change: Failed to get string for event at index %d", i);
 			(*env)->DeleteLocalRef(env, event);
 			continue;
 		}
 
-		elog(WARNING, "Processing DBZ Event: %s", eventStr);
+		elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
 
 		/* distinguish message type */
 		if (eventStr[0] == 'K' && eventStr[1] == '-')
@@ -343,7 +344,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			/* change event message, send to format converter */
 			if (fc_processDBZChangeEvent(eventStr) != 0)
 			{
-				elog(WARNING, "dbz_engine_get_change: Failed to process event at index %d", i);
+				elog(DEBUG1, "dbz_engine_get_change: Failed to process event at index %d", i);
 			}
 			ret = 0;
 		}
@@ -650,9 +651,10 @@ prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char
 	 * cut off here if exceeding this length. Maybe there is a better way to
 	 * pass these args to background worker?
 	 */
-	snprintf(worker->bgw_extra, BGW_EXTRALEN, "%s:%u:%s:%s:%s:%s:%s:%d:%s",
+	snprintf(worker->bgw_extra, BGW_EXTRALEN, "%s:%u:%s:%s:%s:%s:%s:%d:%s:%s",
 			 connInfo->hostname, connInfo->port, connInfo->user, connInfo->pwd,
-			 connInfo->src_db, connInfo->dst_db, connInfo->table, type, connInfo->name);
+			 connInfo->src_db, connInfo->dst_db, connInfo->table, type, connInfo->name,
+			 connInfo->rulefile);
 }
 
 /*
@@ -822,7 +824,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 			 connectorStateAsString(*currstatecopy),
 			 connectorStateAsString(reqcopy->reqstate));
 
-		elog(WARNING, "shut down dbz engine...");
+		elog(DEBUG1, "shut down dbz engine...");
 		ret = dbz_engine_stop();
 		if (ret)
 		{
@@ -849,7 +851,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 			 connectorStateAsString(reqcopy->reqstate));
 
 		/* restart dbz engine */
-		elog(WARNING, "restart dbz engine...");
+		elog(DEBUG1, "restart dbz engine...");
 
 		ret = dbz_engine_start(connInfo, type);
 		if (ret < 0)
@@ -956,6 +958,9 @@ parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *co
 	tmp = strtok(NULL, ":");
 	if (tmp)
 		connInfo->name = pstrdup(tmp);
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		connInfo->rulefile = pstrdup(tmp);
 
 	pfree(args);
 
@@ -970,14 +975,16 @@ parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *co
 	}
 
 	/* Log parsed arguments (TODO: consider removing or obfuscating sensitive data in production) */
-	elog(LOG, "SynchDB engine initialized with: myConnectorId %d, host %s, port %u, user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s), conninfo_name %s",
+	elog(LOG, "SynchDB engine initialized with: myConnectorId %d, host %s, port %u, "
+			"user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s), conninfo_name %s"
+			" rulefile %s",
 			myConnectorId,
 			connInfo->hostname, connInfo->port, connInfo->user,
 			connInfo->src_db ? connInfo->src_db : "N/A",
 			connInfo->dst_db,
 			connInfo->table ? connInfo->table : "N/A",
 			*connectorType, connectorTypeToString(*connectorType),
-			connInfo->name);
+			connInfo->name, connInfo->rulefile);
 }
 
 /**
@@ -1178,7 +1185,7 @@ cleanup(ConnectorType connectorType)
 	ret = dbz_engine_stop();
 	if (ret)
 	{
-		elog(WARNING, "Failed to call dbz engine stop method");
+		elog(DEBUG1, "Failed to call dbz engine stop method");
 	}
 
 	if (jvm != NULL)
@@ -1589,7 +1596,7 @@ _PG_init(void)
 void
 _PG_fini(void)
 {
-	elog(WARNING," shutdown synchdb");
+	elog(DEBUG1," shutdown synchdb");
 }
 
 /*
@@ -1616,6 +1623,10 @@ synchdb_engine_main(Datum main_arg)
 
 	/* initialize format converter */
 	fc_initFormatConverter(connectorType);
+
+	/* load custom rules if applicable */
+	if (connInfo.rulefile && strlen(connInfo.rulefile) > 0 && strcasecmp(connInfo.rulefile, "null"))
+		fc_load_rules(connectorType, connInfo.rulefile);
 
 	/* Initialize JVM */
 	initialize_jvm();
@@ -2031,6 +2042,7 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	text *dst_db_text = PG_GETARG_TEXT_PP(6);
 	text *table_text = PG_GETARG_TEXT_PP(7);
 	text *connector_text = PG_GETARG_TEXT_PP(8);
+	text *rulefile_text = PG_GETARG_TEXT_PP(9);
 	char *connector;
 
 	ConnectionInfo connInfo;
@@ -2107,10 +2119,17 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	}
 	connector = text_to_cstring(connector_text);
 
+	/* rulefile can be empty or NULL */
+	if (VARSIZE(rulefile_text) - VARHDRSZ == 0)
+		connInfo.rulefile = "null";
+	else
+		connInfo.rulefile = text_to_cstring(rulefile_text);
+
 	appendStringInfo(&strinfo, "INSERT INTO %s (name, isactive, data)"
 			" VALUES ('%s', %s, jsonb_build_object('hostname', '%s', "
 			"'port', %d, 'user', '%s', 'pwd', pgp_sym_encrypt('%s', '%s'), "
-			"'srcdb', '%s', 'dstdb', '%s', 'table', '%s', 'connector', '%s') );",
+			"'srcdb', '%s', 'dstdb', '%s', 'table', '%s', 'connector', '%s',"
+			"'rule_file', '%s') );",
 			SYNCHDB_CONNINFO_TABLE,
 			connInfo.name,
 			"false",
@@ -2122,7 +2141,39 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 			connInfo.src_db,
 			connInfo.dst_db,
 			connInfo.table,
-			connector);
+			connector,
+			connInfo.rulefile);
 
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+Datum
+synchdb_load_rules_file(PG_FUNCTION_ARGS)
+{
+	text *connector_text = PG_GETARG_TEXT_PP(0);
+	text *rulefile_text = PG_GETARG_TEXT_PP(1);
+	char *connector;
+	char *rulefile;
+
+	/* Sanity check on input arguments */
+	if (VARSIZE(connector_text) - VARHDRSZ == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("connector name cannot be empty")));
+	}
+	connector = text_to_cstring(connector_text);
+	(void)connector;
+
+	/* Sanity check on input arguments */
+	if (VARSIZE(rulefile_text) - VARHDRSZ == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("path to rule file cannot be empty")));
+	}
+	rulefile = text_to_cstring(rulefile_text);
+
+	fc_load_rules(1, rulefile);
+	PG_RETURN_INT32(0);
 }
