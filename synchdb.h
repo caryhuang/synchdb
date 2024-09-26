@@ -26,6 +26,7 @@
 #define SYNCHDB_DATATYPE_NAME_SIZE 64
 #define SYNCHDB_JSON_PATH_SIZE 128
 #define SYNCHDB_MAX_ACTIVE_CONNECTORS 30
+#define SYNCHDB_INVALID_BATCH_ID -1
 
 /*
  * ex: 	pg_synchdb/[connector]_[name]_offsets.dat
@@ -63,6 +64,16 @@ typedef enum _connectorState
 	STATE_EXECUTING,	/* conversion done, try to execute it on pg */
 	STATE_OFFSET_UPDATE,/* in this state when user requests offset update */
 } ConnectorState;
+
+/**
+ * BatchInfo - Structure containing the metadata of a batch change request
+ */
+typedef struct _BatchInfo
+{
+	 int batchId;
+	 int batchSize;
+	 int currRecordIndex;
+} BatchInfo;
 
 /**
  * SynchdbRequest - Structure representing a request to change connector state

@@ -661,7 +661,7 @@ parseDBZDDL(Jsonb * jb)
 
     if (!strcmp(ddlinfo->id, "NULL") && !strcmp(ddlinfo->type, "NULL"))
     {
-    	elog(WARNING, "no table change data. Stop parsing...");
+    	elog(DEBUG1, "no table change data. Stop parsing...");
     	destroyDBZDDL(ddlinfo);
     	return NULL;
     }
@@ -1138,7 +1138,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 	/* free the data inside strinfo as we no longer needs it */
 	pfree(strinfo.data);
 
-	elog(WARNING, "pgsql: %s ", pgddl->ddlquery);
+	elog(DEBUG1, "pgsql: %s ", pgddl->ddlquery);
 	return pgddl;
 }
 
@@ -3104,7 +3104,7 @@ fc_processDBZChangeEvent(const char * event)
     	dbzddl = parseDBZDDL(jb);
     	if (!dbzddl)
     	{
-    		elog(WARNING, "malformed DDL event");
+    		elog(DEBUG1, "malformed DDL event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		return -1;
     	}
