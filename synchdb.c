@@ -60,9 +60,10 @@ PG_FUNCTION_INFO_V1(synchdb_load_rules_file);
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
 int myConnectorId = -1;	/* Global index number to SynchdbSharedState in shared memory - global per worker */
+BatchInfo myBatchInfo;
 
 /* GUC variables */
-int synchdb_worker_naptime = 5;
+int synchdb_worker_naptime = 500;
 bool synchdb_dml_use_spi = false;
 bool synchdb_auto_launcher = true;
 
@@ -79,9 +80,10 @@ PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
 /* Static function prototypes */
 static int dbz_engine_stop(void);
 static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
-static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal);
+static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal, BatchInfo * batchinfo);
 static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType);
 static char *dbz_engine_get_offset(int connectorId);
+static int dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto);
 static TupleDesc synchdb_state_tupdesc(void);
 static void synchdb_init_shmem(void);
 static void synchdb_detach_shmem(int code, Datum arg);
@@ -242,7 +244,7 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
  * @return: 0 on success, -1 on failure
  */
 static int
-dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal)
+dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal, BatchInfo * batchinfo)
 {
 	jmethodID getChangeEvents, sizeMethod, getMethod;
 	jobject changeEventsList;
@@ -250,7 +252,6 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	jclass listClass;
 	jobject event;
 	const char *eventStr;
-	int ret = 0;
 
 	/* Validate input parameters */
 	if (!jvm || !env || !cls || !obj)
@@ -308,54 +309,101 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 
 	/* Process change events */
 	size = (*env)->CallIntMethod(env, changeEventsList, sizeMethod);
-	elog(DEBUG2, "dbz_engine_get_change: Retrieved %d change events", size);
+	elog(DEBUG1, "dbz_engine_get_change: Retrieved %d change events", size);
 
-	for (int i = 0; i < size; i++)
+	if (size == 0 || size < 0)
 	{
-		event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, i);
-		if (event == NULL)
-		{
-			elog(DEBUG1, "dbz_engine_get_change: Received NULL event at index %d", i);
-			continue;
-		}
+		/* nothing to process. Return */
+		return -1;
+	}
+	batchinfo->batchSize = size - 1;	/* minus the metadata record */
 
-		eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
-		if (eventStr == NULL)
-		{
-			elog(DEBUG1, "dbz_engine_get_change: Failed to get string for event at index %d", i);
-			(*env)->DeleteLocalRef(env, event);
-			continue;
-		}
+	/* fetch special metadata element at index 0 and convert it to string */
+	event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, 0);
+	if (event == NULL)
+	{
+		elog(WARNING, "dbz_engine_get_change: missing metadata element at index 0");
+		(*env)->DeleteLocalRef(env, changeEventsList);
+		(*env)->DeleteLocalRef(env, listClass);
+		return -1;
+	}
+	eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
+	if (eventStr == NULL)
+	{
+		elog(WARNING, "dbz_engine_get_change: Failed to convert metadata element to string");
+		(*env)->DeleteLocalRef(env, event);
+		(*env)->DeleteLocalRef(env, changeEventsList);
+		(*env)->DeleteLocalRef(env, listClass);
+		return -1;
+	}
 
-		elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
+	/* check if it is a completion message */
+	if (eventStr[0] == 'K' && eventStr[1] == '-')
+	{
+		/*
+		 * connector completion/error message, consume it right here
+		 * This may also indicates that the dbz connector on java side
+		 * has exited and we may need to exit later as well.
+		 */
+		processCompletionMessage(eventStr, myConnectorId, dbzExitSignal);
+		return 0;
+	}
+	/* check if it is a batch change request */
+	else if (eventStr[0] == 'B' && eventStr[1] == '-')
+	{
+		/*
+		 * obtain the batch id as we will need it to commit debezium offsets
+		 * as we process the batch
+		 */
+		batchinfo->batchId = atoi(&eventStr[2]);
+		elog(WARNING, "Synchdb received batchid(%d) with size(%d)", batchinfo->batchId, size-1);
 
-		/* distinguish message type */
-		if (eventStr[0] == 'K' && eventStr[1] == '-')
+		batchinfo->currRecordIndex = -1;
+
+		/* now process the rest of the changes in the batch */
+		for (int i = 1; i < size; i++)
 		{
-			/*
-			 * connector completion/error message, consume it right here
-			 * This may also indicates that the dbz connector on java side
-			 * has exited and we may need to exit later as well.
-			 */
-			processCompletionMessage(eventStr, myConnectorId, dbzExitSignal);
-		}
-		else
-		{
+			event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, i);
+			if (event == NULL)
+			{
+				elog(DEBUG1, "dbz_engine_get_change: Received NULL event at index %d", i);
+				continue;
+			}
+
+			eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
+			if (eventStr == NULL)
+			{
+				elog(DEBUG1, "dbz_engine_get_change: Failed to get string for event at index %d", i);
+				(*env)->DeleteLocalRef(env, event);
+				continue;
+			}
+
+			elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
 			/* change event message, send to format converter */
 			if (fc_processDBZChangeEvent(eventStr) != 0)
 			{
 				elog(DEBUG1, "dbz_engine_get_change: Failed to process event at index %d", i);
 			}
-			ret = 0;
-		}
 
-		(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
-		(*env)->DeleteLocalRef(env, event);
+			(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
+			(*env)->DeleteLocalRef(env, event);
+
+			/*
+			 * if we are still here (not long jump to error handler in case of elog(ERROR)),
+			 * we consider the record as processed though it may have been skipped in
+			 * fc_processDBZChangeEvent()
+			 */
+			batchinfo->currRecordIndex++;
+		}
+	}
+	else
+	{
+		elog(WARNING, "unknown change request");
 	}
 
 	(*env)->DeleteLocalRef(env, changeEventsList);
 	(*env)->DeleteLocalRef(env, listClass);
-	return ret;
+	return 0;
 }
 
 /*
@@ -610,8 +658,9 @@ synchdb_detach_shmem(int code, Datum arg)
 {
 	pid_t enginepid;
 
-	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d",
-		 DatumGetUInt32(arg), code);
+	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d, myBatchId %d, "
+			"currRecordId %d", DatumGetUInt32(arg), code, myBatchInfo.batchId,
+			myBatchInfo.currRecordIndex);
 
 	enginepid = get_shm_connector_pid(DatumGetUInt32(arg));
 	if (enginepid == MyProcPid)
@@ -619,6 +668,35 @@ synchdb_detach_shmem(int code, Datum arg)
 		set_shm_connector_pid(DatumGetUInt32(arg), InvalidPid);
 		set_shm_connector_state(DatumGetUInt32(arg), STATE_UNDEF);
 	}
+
+	/*
+	 * check if we are in the middle of processing a batch. If yes, we need to
+	 * notify dbz the records that we have processed to prevent receiving duplicate
+	 * records upon restart. myBatchInfo.currRecordIndex == -1 means we have not even
+	 * successfully processed at least 1 record in batch, so don't bother marking
+	 * completion.
+	 */
+	if (myBatchInfo.batchId  != SYNCHDB_INVALID_BATCH_ID && myBatchInfo.currRecordIndex != -1)
+	{
+		if (myBatchInfo.batchSize == myBatchInfo.currRecordIndex + 1)
+		{
+			/*
+			 * this means that the every record in current batch has already been
+			 * completed and that we could mark this entire batch as complete
+			 */
+			elog(WARNING, "batch already completed. mark it all done before shutdown...");
+			dbz_mark_batch_complete(myBatchInfo.batchId, true, 0, 0);
+		}
+		else
+		{
+			/* a partially completed batch, we report the ones already completed */
+			elog(WARNING, "partially completed batch. mark records done until record index %d, size of batch %d",
+					myBatchInfo.currRecordIndex, myBatchInfo.batchSize);
+			dbz_mark_batch_complete(myBatchInfo.batchId, false, 0, myBatchInfo.currRecordIndex);
+		}
+	}
+
+	dbz_engine_stop();
 }
 
 /*
@@ -1134,6 +1212,11 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo)
 	ConnectorState currstate;
 	bool dbzExitSignal = false;
 
+	/* initialize batchinfo */
+	myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
+	myBatchInfo.batchSize = 0;
+	myBatchInfo.currRecordIndex = -1;
+
 	elog(LOG, "Main LOOP ENTER ");
 	while (!ShutdownRequestPending)
 	{
@@ -1155,7 +1238,18 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo)
 		switch (currstate)
 		{
 		case STATE_SYNCING:
-			dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal);
+			dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal, &myBatchInfo);
+
+			/*
+			 * if a valid batchid is set by dbz_engine_get_change(), it means we have
+			 * successfully completed a batch change request and we shall notify dbz
+			 * that it's been completed.
+			 */
+			if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
+				dbz_mark_batch_complete(myBatchInfo.batchId, true, -1, -1);
+
+			/* we are done with a batch, make it invalid */
+			myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
 			break;
 		case STATE_PAUSED:
 			/* Do nothing when paused */
@@ -1167,12 +1261,12 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo)
 
 		(void)WaitLatch(MyLatch,
 						WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-						synchdb_worker_naptime * 1000,
+						synchdb_worker_naptime,
 						PG_WAIT_EXTENSION);
 
 		ResetLatch(MyLatch);
 	}
-	elog(LOG, "Main LOOP QUIT ");
+	elog(LOG, "Main LOOP QUIT");
 }
 
 static void
@@ -1252,6 +1346,55 @@ get_shm_connector_id_by_name(const char * name)
 		}
 	}
 	return -1;
+}
+
+static int
+dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
+{
+	jmethodID markBatchComplete;
+	jthrowable exception;
+	jboolean jmarkall;
+
+	if (!jvm)
+	{
+		elog(WARNING, "jvm not initialized");
+		return -1;
+	}
+
+	if (!env)
+	{
+		elog(WARNING, "jvm env not initialized");
+		return -1;
+	}
+
+	if (markall)
+		jmarkall = JNI_TRUE;
+	else
+		jmarkall = JNI_FALSE;
+
+	/* Find the markBatchComplete method */
+	markBatchComplete = (*env)->GetMethodID(env, cls, "markBatchComplete",
+									 "(IZII)V");
+	if (markBatchComplete == NULL)
+	{
+		elog(WARNING, "Failed to find markBatchComplete method");
+		return -1;
+	}
+
+	/* Call the Java method */
+	(*env)->CallVoidMethod(env, obj, markBatchComplete, batchid, jmarkall, markfrom, markto);
+
+	/* Check for exceptions */
+	exception = (*env)->ExceptionOccurred(env);
+	if (exception)
+	{
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		elog(WARNING, "Exception occurred while calling markBatchComplete");
+		return -1;
+	}
+	elog(DEBUG1, "Synchdb -> Debezium: sent batchid(%d) completion request", batchid);
+	return 0;
 }
 
 void

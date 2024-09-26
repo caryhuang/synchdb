@@ -13,6 +13,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.Future;
 import java.util.concurrent.ExecutionException;
+import java.util.LinkedList;
+import java.util.Queue;
 
 import java.io.File;
 import java.nio.ByteBuffer;
@@ -36,10 +38,53 @@ public class DebeziumRunner {
 	private String lastDbzMessage;
 	private boolean lastDbzSuccess;
 	private Throwable lastDbzError;
+	private HashMap<Integer, ChangeRecordBatch> activeBatchHash = new HashMap<>();
+	private BatchManager batchManager = new BatchManager();
 
 	final int TYPE_MYSQL = 1;
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
+
+	/* BatchMaanger represents a Batch request queue */
+	public class BatchManager
+	{
+		private Queue<ChangeRecordBatch> batchQueue;
+		private int batchid;
+
+		public BatchManager()
+		{
+			this.batchQueue = new LinkedList<>();
+			this.batchid = 0;
+		}
+
+		public void addBatch(ChangeRecordBatch batch)
+		{
+			batch.batchid = this.batchid;
+			batchQueue.offer(batch);
+			this.batchid++;
+			logger.info("added a batch task: id = " + batch.batchid + " size = " + batch.records.size());
+		}
+
+		public ChangeRecordBatch getNextBatch()
+		{
+			return batchQueue.poll();
+		}
+	}
+	
+	/* ChangeRecordBatch represents a batch with our own identifier 'batchid' added to it */
+	public class ChangeRecordBatch
+	{
+		public int batchid;
+		public final List<ChangeEvent<String, String>> records;
+		public final DebeziumEngine.RecordCommitter committer;
+
+		public ChangeRecordBatch(List<ChangeEvent<String, String>> records, DebeziumEngine.RecordCommitter committer) 
+		{
+			this.records = new ArrayList<>(records);
+			this.committer = committer;
+		}
+	}
+	
 
 	public void startEngine(String hostname, int port, String user, String password, String database, String table, int connectorType, String name) throws Exception
 	{
@@ -113,42 +158,34 @@ public class DebeziumRunner {
 
 		DebeziumEngine.CompletionCallback completionCallback = (success, message, error) ->
 		{
-			//logger.warn("success = " + success + " message = " + message + " error = " + error);
 			lastDbzMessage = message.replace("\n", " ").replace("\r", " ");
 			lastDbzSuccess = success;
 			lastDbzError = error;
 		};
-
+		
 		engine = DebeziumEngine.create(Json.class)
                 .using(props)
 				.using(completionCallback)
-                .notifying(record -> {
-                    System.out.println(record);
-                    if (changeEvents == null)
-                    {
-                        changeEvents = new ArrayList<>();
-                    }
-                    //synchronized (changeEvents)
-                    synchronized (this)
-                    {
-						if (record.value() == null)
+				.notifying((records, committer) -> {
+					synchronized (this)
+					{
+						if (batchManager == null)
 						{
-							logger.info("skipping a null change record");
+							batchManager = new BatchManager();
 						}
-						else
+						if (activeBatchHash == null)
 						{
-							logger.info("adding a change record of length " + record.value().length());
-                        	changeEvents.add(record.value());
+							activeBatchHash = new HashMap<>();
 						}
-                        logger.info("there are " + changeEvents.size() + " change events stored");
-                    }
-                })
+						
+						batchManager.addBatch(new ChangeRecordBatch(records, committer));
+					}
+				})
 				.build();
 
-		System.out.println("executing...");
 		executor = Executors.newSingleThreadExecutor();
 
-		logger.warn("submit future to executor");
+		logger.info("submit future to executor");
 		future = executor.submit(() ->
 		{
 			try
@@ -161,9 +198,6 @@ public class DebeziumRunner {
 				throw e;
 			}
 		});
-		//executor.execute(engine);
-		
-		System.out.println("done...");
     }
 
 	public void stopEngine() throws Exception
@@ -195,29 +229,45 @@ public class DebeziumRunner {
 	public List<String> getChangeEvents()
 	{
 		List<String> listCopy;
-
 		synchronized (this)
 		{
-			if (changeEvents == null)
+			if (activeBatchHash == null)
 			{
-				logger.warn("changeEvents is null, initializing empty list");
-				changeEvents = new ArrayList<>();
+				activeBatchHash = new HashMap<>();
+			}
+			if (batchManager == null)
+			{
+				batchManager = new BatchManager();
 			}
 
 	        if (!future.isDone())
 			{
-				/* conector task is running, get changes */
-				listCopy = new ArrayList<>(changeEvents);
+				int i = 0;
+				listCopy = new ArrayList<>();
+				ChangeRecordBatch myNextBatch;
+				
+				myNextBatch = batchManager.getNextBatch();
+				if (myNextBatch != null)
+				{
+					logger.info("Debezium -> Synchdb: sent batchid(" + myNextBatch.batchid + ") with size(" + myNextBatch.records.size() + ")");
+					/* first element: batch id */
+					listCopy.add("B-" + String.valueOf(myNextBatch.batchid));
 
-				/* empty the changeEvents as they have been consumed */
-				changeEvents.clear();
-				logger.info("Retrieved {} change events", listCopy.size());
+					/* remaining elements: individual changes*/
+					for (i = 0; i < myNextBatch.records.size(); i++)
+					{
+						listCopy.add(myNextBatch.records.get(i).value());
+					}
+
+					/* save this batch in active batch hash struct */
+					activeBatchHash.put(myNextBatch.batchid, myNextBatch);;
+				}
 			}
 			else
 			{
 				/* conector task is not running, get exit messages */
 				logger.warn("connector is no longer running");
-				logger.warn("success flag = " + lastDbzSuccess + " | message = " + lastDbzMessage +
+				logger.info("success flag = " + lastDbzSuccess + " | message = " + lastDbzMessage +
 						" | error = " + lastDbzError);
 
 				/*
@@ -226,12 +276,81 @@ public class DebeziumRunner {
 				 */
 				listCopy = new ArrayList<>();
 				listCopy.add("K-" + lastDbzSuccess + ";" + lastDbzMessage);
-				logger.info("Prepared {} change events", listCopy.size());
 			}
 		}
 
 		return listCopy;
     }
+
+	/* 
+	 * method to mark a batch as done. This would cause dbz engine to commit the offset.
+	 * if markbatchdone = true, the entire batch task is marked as completed.
+	 * if markbatchdon = false, it indicates a partial completion, then we will only mark
+	 * task from 'markfrom' to 'markto' as completed within the batch
+	 *
+	 */
+	public void markBatchComplete(int batchid, boolean markall, int markfrom, int markto) throws InterruptedException
+    {
+		int i = 0;
+		ChangeRecordBatch myBatch;
+
+		if (activeBatchHash == null)
+		{
+			activeBatchHash = new HashMap<>();
+			return;
+		}
+		
+		logger.info("Debezium receivd batchid(" + batchid + ") completion request");		
+		myBatch = activeBatchHash.get(batchid);
+		if (myBatch == null)
+		{
+			logger.error("batch id " + batchid + " is not found in active batch hash");
+			return;
+		}
+		
+		if (markall)
+		{
+			logger.warn("debezium marked all records in batchid(" + batchid + ") as processed");
+
+			for (i = 0; i < myBatch.records.size(); i++)
+			{
+				myBatch.committer.markProcessed(myBatch.records.get(i));
+			}
+
+			/* mark this batch complete to allow debezium to commit and flush offset */
+			myBatch.committer.markBatchFinished();
+			
+			/* remove hash entry at batch completion */
+			activeBatchHash.remove(batchid);
+		}
+		else
+		{
+			/* sanity check on the given range */
+			if (markfrom >= myBatch.records.size() ||
+				markto >= myBatch.records.size() ||
+				markfrom < 0 || markto < 0)
+			{
+				logger.error("invalid range to mark completion: markfrom = " + markfrom + 
+						" markto = " + markto + " sizeof batch = " + myBatch.records.size());
+				return;
+			}
+
+			/* mark only the tasks within given range */
+			for (i = markfrom; i <= markto; i++)
+			{
+				myBatch.committer.markProcessed(myBatch.records.get(i));
+				logger.info("marked record(" + i + ") as processed within batchid " + batchid);
+			}
+
+			logger.warn("debezium marked " + (markto - markfrom + 1) + " records in batchid(" + batchid + ") as processed");
+			/* we assumes that the only case to mark a batch as partially done is during error
+			 * encounter and that we will exit soon after this function call. So let's mark this
+			 * batch as finished and remove it from active batch hash
+			 */
+			myBatch.committer.markBatchFinished();
+			activeBatchHash.remove(batchid);
+		}
+	}
 	
 	public String getConnectorOffset(int connectorType, String db, String name)
 	{
@@ -276,7 +395,7 @@ public class DebeziumRunner {
 			if (entry.getKey().equals(keyBuffer))
 			{
 				ret = StandardCharsets.UTF_8.decode(entry.getValue()).toString();
-				logger.warn("offset = " + ret);
+				logger.info("offset = " + ret);
 			}
 			else
 			{
@@ -372,70 +491,6 @@ public class DebeziumRunner {
     }
 	public static void main(String[] args)
 	{
-		/* testing codes */
-
-		/* ---------- 1) dbz runner test ---------- */
-		/*
-		DebeziumRunner runner = new DebeziumRunner();
-        try
-		{
-            runner.startEngine("192.168.1.86", 3306, "mysqluser", "mysqlpwd", "inventory", "null", 1);
-        }
-		catch (Exception e)
-		{
-            System.err.println("An error occurred while starting the engine:");
-            e.printStackTrace();
-        }
-		List<String> res = runner.getChangeEvents();
-		System.out.println("there are " + res.size() + " change events");
-		*/
-
-		/* ---------- 2) offset update test ---------- */
-		/*
-		DebeziumRunner runner = new DebeziumRunner();
-		File inputFile = new File(args[0]);
-		File outputFile = new File(args[1]);
-		String newKey = args[2];
-		String newValue = (args.length == 4) ? args[3] : null;
-		Map<ByteBuffer, ByteBuffer> originalData = runner.readOffsetFile(inputFile);
-		Map<byte[], byte[]> rawData = new HashMap<>();
-
-
-		ByteBuffer keyBuffer = ByteBuffer.wrap(newKey.getBytes(StandardCharsets.US_ASCII));
-		ByteBuffer valueBuffer = (newValue != null) ? ByteBuffer.wrap(newValue.getBytes(StandardCharsets.US_ASCII)) : null;
-
-		for (Map.Entry<ByteBuffer, ByteBuffer> entry : originalData.entrySet()) {
-			    System.out.println("Entry Key: " + StandardCharsets.UTF_8.decode(entry.getKey()).toString());
-			    System.out.println("Entry Val: " + StandardCharsets.UTF_8.decode(entry.getValue()).toString());
-			if (newValue != null) {
-				if (entry.getKey().equals(keyBuffer)) {
-					// update value
-					System.out.println("update value");
-					rawData.put(entry.getKey().array(), valueBuffer.array());
-				} else {
-					// insert new entry
-					System.out.println("insert value");
-					rawData.put(keyBuffer.array(), valueBuffer.array());
-				}
-			} else {
-				//rawData.put(entry.getKey().array(), valueBuffer.array());
-				originalData.remove(keyBuffer);
-			}
-		}
-
-		runner.writeOffsetFile(outputFile, rawData);
-		*/
-		String filename = args[0];
-		int type = Integer.parseInt(args[1]);
-		String db = args[2];
-		String value = args[3];
-
-		DebeziumRunner runner = new DebeziumRunner();
-		runner.setConnectorOffset(filename, type, db, value);
-		//runner.getConnectorOffset(1,null);
-		//runner.getConnectorOffset(3,"testDB");
-		//runner.setConnectorOffset(1, "mysql-bin.000003|40603|1|223344|1723067034", null);
-		//runner.setConnectorOffset(3, "0000006d:00000e20:0007|0000006d:00000e20:0007|4567", "testDB");
-
+		/* testing code can be put here */
     }
 }
