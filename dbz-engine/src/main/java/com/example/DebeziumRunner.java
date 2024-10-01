@@ -209,7 +209,7 @@ public class DebeziumRunner {
 		}
 		if (executor != null)
 		{
-			System.out.println("stopping executor...");
+			logger.info("stopping executor...");
             executor.shutdown();
             try
 			{
@@ -223,7 +223,7 @@ public class DebeziumRunner {
                 executor.shutdownNow();
             }
         }
-		System.out.println("done...");
+		logger.info("done...");
 	}
 
 	public List<String> getChangeEvents()
