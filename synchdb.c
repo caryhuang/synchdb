@@ -696,7 +696,7 @@ synchdb_detach_shmem(int code, Datum arg)
 		}
 	}
 
-	dbz_engine_stop();
+	cleanup(sdb_state->connectors[DatumGetUInt32(arg)].type);
 }
 
 /*
@@ -1785,8 +1785,8 @@ synchdb_engine_main(Datum main_arg)
 	/* Main processing loop */
 	main_loop(connectorType, &connInfo);
 
-	/* Cleanup */
-	cleanup(connectorType);
+//	/* Cleanup */
+//	cleanup(connectorType);
 
 	/* Free allocated memory */
 	if (connInfo.hostname)
