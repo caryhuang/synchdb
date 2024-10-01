@@ -76,20 +76,17 @@ sudo make install
 ```
 
 ### Build Debezium Runner Engine
-With Java and Maven setup, we are ready to build Debezium Runner Engine:
+With Java and Maven setup, we are ready to build Debezium Runner Engine. This installs the Debezium Runner Engine jar file to your PostgreSQL's lib folder.
 
 ```
 cd /home/$USER/postgres/contrib/synchdb
 make build_dbz
-```
-
-then install Debezium engine to PostgreSQL lib path
-```
 sudo make install_dbz
 ```
 
 ### Build SynchDB PostgreSQL Extension
 With the Java `lib` and `include` installed in your system, SynchDB can be built by:
+
 ```
 cd /home/$USER/postgres/contrib/synchdb
 make
@@ -216,20 +213,21 @@ After SynchDB is installed, we can create a connection information entries that 
 * `destination` database - the database to apply changes to - For example, the database that exists in PostgreSQL. Must be a valid database that exists.
 * `table` (optional) - expressed in the form of `[database].[table]` that must exists in MySQL so the engine will only replicate the specified tables. If empty, all tables are replicated.
 * `connector` - the connector to use (MySQL, Oracle, or SQLServer). Currently only MySQL and SQLServer are supported.
+* `rule file` - a JSON-formatted rule file placed under $PGDATA that this connector shall apply to its default data type translation rules. See below for more detail.
 
 For example:
 ```
-# create a mysql conninfo called 'mysqlconn' to replicate from source database 'inventory' to destination database 'postgres'
-SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');
+# create a mysql conninfo called 'mysqlconn' to replicate from source database 'inventory' to destination database 'postgres', using rule file `myrule.json`
+SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql', 'myrule.json');
 
 # create a second mysql conninfo called 'mysqlconn2' to replicate from source database 'inventory' to destination database 'mysqldb2'
-SELECT synchdb_add_conninfo('mysqlconn2','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'mysqldb2', '', 'mysql');
+SELECT synchdb_add_conninfo('mysqlconn2','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'mysqldb2', '', 'mysql', '');
 
 # create a sqlserver conninfo called 'sqlserverconn' to replicate from source database 'testDB' to destination database 'sqlserverdb'
-SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver');
+SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver', '');
 
 # create a second sqlserver conninfo called 'sqlserverconn2' to replicate from source database 'testDB' to destination database 'sqlserverdb2'
-SELECT synchdb_add_conninfo('sqlserverconn2','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb2', '', 'sqlserver');
+SELECT synchdb_add_conninfo('sqlserverconn2','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb2', '', 'sqlserver', '');
 
 ```
 
@@ -238,10 +236,19 @@ Other Examples:
 To create a connection information to replicate only specific tables (`orders` and `customers`) from MySQL:
 ```
 # create another mysql conninfo called 'mysqlconn3' to replicate from source database 'inventory''s orders and customers tabls to destination database 'mysqldb3'
-SELECT synchdb_add_conninfo('mysqlconn3', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'mysqldb3', 'inventory.orders,inventory.customers', 'mysql');
+SELECT synchdb_add_conninfo('mysqlconn3', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'mysqldb3', 'inventory.orders,inventory.customers', 'mysql', '');
 ```
 
-The replicated changes will be mapped to a schema in destination database. For example, a table named `orders` from database `inventory` in MySQL will be replicated to a table named `orders` under schema `inventory`.
+Name Mappings:
+
+Synchdb currently uses these strict name mappings to map foreign objects to PostgreSQL. These will be made to configurable in near future, but for now, here's the mapping rules:
+
+* Foreign [database] mapped to PostgreSQL [schema]
+* Foreign [schema] is ignored in PostgreSQL
+* Foreign [table] mapped to PostgreSQL [table]
+
+For example:
+A table named `orders` from database `inventory` in MySQL will be replicated to a table named `orders` under schema `inventory`.
 
 ### Review all Connection Information Created
 All connection information are created in the table `synchdb_conninfo`. We are free to view its content and make modification as required. Please note that the password of a user credential is encrypted by pgcrypto using a key only known to synchdb. So please do not modify the password field or it may be decrypted incorrectly if tempered. See below for an example output: 
@@ -253,16 +260,14 @@ Expanded display is on.
 postgres=# select * from synchdb_conninfo;
 -[ RECORD 1 ]-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 name | mysqlconn
-data | {"pwd": "\\xc30d040703024828cc4d982e47b07bd23901d03e40da5995d2a631fb89d49f748b87247aee94070f71ecacc4990c3e71cad9f68d57c440de42e35bcc78fd145feab03452e454284289db", "port": 3306, "user": "mysqluser", "dstdb": "postgres", "srcdb": "inventory", "table": "null", "hostname": "192.168.1.86", "connector": "mysql"}
+data | {"pwd": "\\xc30d040703024828cc4d982e47b07bd23901d03e40da5995d2a631fb89d49f748b87247aee94070f71ecacc4990c3e71cad9f68d57c440de42e35bcc78fd145feab03452e454284289db", "port": 3306, "user": "mysqluser", "dstdb": "postgres", "srcdb": "inventory", "table": "null", "hostname": "192.168.1.86", "connector": "mysql"i, "myrule.json"}
 -[ RECORD 2 ]-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 name | sqlserverconn
-data | {"pwd": "\\xc30d0407030231678e1bb0f8d3156ad23a010ca3a4b0ad35ed148f8181224885464cdcfcec42de9834878e2311b343cd184fde65e0051f75d6a12d5c91d0a0403549fe00e4219215eafe1b", "port": 1433, "user": "sa", "dstdb": "sqlserverdb", "srcdb": "testDB", "table": "null", "hostname": "192.168.1.86", "connector": "sqlserver"}
+data | {"pwd": "\\xc30d0407030231678e1bb0f8d3156ad23a010ca3a4b0ad35ed148f8181224885464cdcfcec42de9834878e2311b343cd184fde65e0051f75d6a12d5c91d0a0403549fe00e4219215eafe1b", "port": 1433, "user": "sa", "dstdb": "sqlserverdb", "srcdb": "testDB", "table": "null", "hostname": "192.168.1.86", "connector": "sqlserver", "null"}
 ```
 
-Use the SQL function `synchdb_start_engine_bgw` to spawn a new background worker to capture CDC from a heterogeneous database such as MySQL.
-
 ### Start a Connector Worker
-We can use `synchdb_start_engine_bgw` function to start a connector worker. It takes one argument which is the connection information name created above. Based on the connection information, the command will spawn a worker with specific replication configuration. For example:
+Use `synchdb_start_engine_bgw()` function to start a connector worker. It takes one argument which is the connection information name created above. Based on the connection information, the command will spawn a worker with the specified replication configuration. For example:
 
 ```
 select synchdb_start_engine_bgw('mysqlconn');
@@ -271,28 +276,8 @@ select synchdb_start_engine_bgw('sqlserverconn');
 
 `synchdb_start_engine_bgw()` function also marks a connection info as `active`, which is eligible for automatic-relaunch at server restarts. See below for more details.
 
-### Check Running Connector Workers
-You can check the running workers using the `ps` command:
-```
-ps -ef | grep postgres
-```
-
-Sample Output:
-```
-ubuntu    153865       1  0 15:49 ?        00:00:00 /usr/local/pgsql/bin/postgres -D ../../synchdbtest
-ubuntu    153866  153865  0 15:49 ?        00:00:00 postgres: checkpointer
-ubuntu    153867  153865  0 15:49 ?        00:00:00 postgres: background writer
-ubuntu    153869  153865  0 15:49 ?        00:00:00 postgres: walwriter
-ubuntu    153870  153865  0 15:49 ?        00:00:00 postgres: autovacuum launcher
-ubuntu    153871  153865  0 15:49 ?        00:00:00 postgres: logical replication launcher
-ubuntu    153875  153865  0 15:49 ?        00:00:46 postgres: synchdb engine: sqlserver@127.0.0.1:1433 -> sqlserverdb
-ubuntu    153900  153865  0 15:49 ?        00:00:46 postgres: synchdb engine: mysql@127.0.0.1:3306 -> postgres
-```
-
-As you can see, there are 2 additional background workers(synchdb engine), one replicating from MySQL, the other replicating from SQL server.
-
 ### View the Connector States
-We can execute the `synchdb_state_view` view to examine all the running connectors and their states. Currently, synchdb can support up to 30 running workers.
+Use `synchdb_state_view()` view to examine all the running connectors and their states. Currently, synchdb can support up to 30 running workers.
 
 See below for an example output:
 ```
@@ -300,9 +285,9 @@ postgres=# select * from synchdb_state_view;
  id | connector | conninfo_name  |  pid   |  state  |   err    |                                          last_dbz_offset
 ----+-----------+----------------+--------+---------+----------+---------------------------------------------------------------------------------------------------
   0 | mysql     | mysqlconn      | 461696 | syncing | no error | {"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}
-  1 | mysql     | mysqlconn2     | 461535 | syncing | no error | {"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}
-  2 | sqlserver | sqlserverconn  | 461739 | syncing | no error | {"event_serial_no":1,"commit_lsn":"00000100:00000c00:0003","change_lsn":"00000100:00000c00:0002"}
-  3 | sqlserver | sqlserverconn2 | 461971 | syncing | no error | offset file not flushed yet
+  1 | sqlserver | sqlserverconn  | 461739 | syncing | no error | {"event_serial_no":1,"commit_lsn":"00000100:00000c00:0003","change_lsn":"00000100:00000c00:0002"}
+  3 | null      |                |     -1 | stopped | no error | no offset
+  4 | null      |                |     -1 | stopped | no error | no offset
   4 | null      |                |     -1 | stopped | no error | no offset
   5 | null      |                |     -1 | stopped | no error | no offset
   6 | null      |                |     -1 | stopped | no error | no offset
@@ -334,7 +319,7 @@ postgres=# select * from synchdb_state_view;
 Column Details:
 * id: unique identifier of a connector slot
 * connector: the type of connector (mysql, oracle, sqlserver...etc)
-* conninfo_name: the associated connection info name created by `synchdb_add_conninfo`
+* conninfo_name: the associated connection info name created by `synchdb_add_conninfo()`
 * pid: the PID of the connector worker process
 * state: the state of the connector. Possible states are:
 	* stopped
@@ -346,11 +331,11 @@ Column Details:
 	* executing
 	* updating offset
 	* unknown
-* err: the last error message encountered by the worker which would have caused it to exit
+* err: the last error message encountered by the worker which would have caused it to exit. This error could originated from PostgreSQL while processing a change, or originated from Debezium running engine while accessing data from heterogeneous database.
 * last_dbz_offset: the last Debezium offset captured by synchdb. Note that this may not reflect the current and real-time offset value of the connector engine. Rather, this is shown as a checkpoint that we could restart from this offeet point if needed.
 
 ### Pause a Connector Worker
-We can use `synchdb_pause_engine()` SQL function to pause a runnng connector. This will halt the Debezium engine from replicating from the remote heterogeneous database. When paused, it is possible to alter the Debezium connector's offset value to replicate from a specific point in the past using `synchdb_set_offset()` SQL routine. It takes `conninfo_name` as its argument which can be found from the output of `synchdb_get_state()` view.
+Use `synchdb_pause_engine()` SQL function to pause a runnng connector. This will halt the Debezium runner engine from replicating from the heterogeneous database. When paused, it is possible to alter the Debezium connector's offset value to replicate from a specific point in the past using `synchdb_set_offset()` SQL routine. It takes `conninfo_name` as its argument which can be found from the output of `synchdb_get_state()` view.
 
 For example:
 ```
@@ -358,7 +343,7 @@ SELECT synchdb_pause_engine('mysqlconn');
 ```
 
 ### Update Connector Offset
-We can use `synchdb_set_offset()` SQL function to change a connector worker's starting offset. This can only be done when the connector is put into `paused` state. The function takes 2 parameters, conninfo_name and a valid offset string, both of which can be found from the output of `synchdb_get_state()` view.
+Use `synchdb_set_offset()` SQL function to change a connector worker's starting offset. This can only be done when the connector is put into `paused` state. The function takes 2 parameters, `conninfo_name` and `a valid offset string`, both of which can be found from the output of `synchdb_get_state()` view.
 
 For example:
 ```
@@ -366,7 +351,7 @@ SELECT synchdb_set_offset('mysqlconn', '{"ts_sec":1725644339,"file":"mysql-bin.0
 ```
 
 ### Resume Connector Offset
-We can use `synchdb_resume_engine()` SQL function to resume Debezium operation from a paused state. This function takes conninfo_name as its only parameter, which can be found from the output of `synchdb_get_state()` view.
+Use `synchdb_resume_engine()` SQL function to resume Debezium operation from a paused state. This function takes `conninfo_name` as its only parameter, which can be found from the output of `synchdb_get_state()` view.
 
 For example:
 ```
@@ -374,18 +359,17 @@ SELECT synchdb_resume_engine('mysqlconn');
 ```
 
 ### Stopping a Worker
-We can use `synchdb_stop_engine_bgw()` SQL function to stop a running or paused connector worker. This function takes conninfo_name as its only parameter, which can be found from the output of `synchdb_get_state()` view.
+Use `synchdb_stop_engine_bgw()` SQL function to stop a running or paused connector worker. This function takes `conninfo_name` as its only parameter, which can be found from the output of `synchdb_get_state()` view.
 
 For example:
 ```
 select synchdb_stop_engine_bgw('mysqlconn');
-select synchdb_stop_engine_bgw('mysqlconn2');
 ```
 
-`synchdb_stop_engine_bgw()` function also marks a connection info as `inactive`, which prevents the connection from automatic-relaunch at server restarts. See below for more details.
+`synchdb_stop_engine_bgw()` function also marks a connection info as `inactive`, which prevents the this worker from automatic-relaunch at server restarts. See below for more details.
 
 ### Metadata Files
-During the synchdb operations, metadata files (offsets and schemahistory files) are generated by DBZ engine and they are by default located in `$PGDATA/pg_synchdb` directory:
+During the synchdb operations, metadata files (offsets and schemahistory files) are generated by Debezium runner engine and they are by default located in `$PGDATA/pg_synchdb` directory:
 
 ```
 ls $PGDATA/pg_synchdb
@@ -400,7 +384,8 @@ mysql_mysqlconn_schemahistory.dat  sqlserver_sqlserverconn_schemahistory.dat
 Each DBZ engine worker has its own pair of metadata files. These store the schema information to build the source tables and the offsets to resume upon restarting.
 
 ### Restarting Replication from the Beginning
-To restart replication from the beginning:
+To restart replication from the beginning, we shall follow the procedure below. In the future, we will add a new SQL function that takes care of this process. In the meantime, we will stick with the procedure below:
+
 1. Stop the Debezium engine:
 ```
 select synchdb_stop_engine_bgw('mysqlconn');
@@ -416,20 +401,59 @@ select synchdb_start_engine_bgw('mysqlconn');
 ```
 
 ### Automatic Worker Launch at Server Restarts
-It is possible to automatically Launch a connector worker that has been created by `synchdb_add_conninfo()` and started by `synchdb_start_engine_bgw()` at PostgreSQL server restart. To do so, we will need to add `synchdb` to `shared_preload_libraries` GUC option:
+A connection worker becomes eligible for automatic Launch when `synchdb_start_engine_bgw()` is issued on a particular `conninfo_name`. Likewise, it becomes ineligible when `synchdb_stop_engine_bgw()` is issued on a particular `conninfo_name`. Enable automatic worker launcher by following the procedure below:
 
+* add `synchdb` to `shared_preload_libraries` GUC option in postgresql.conf
+* set new GUC option `synchdb.synchdb_auto_launcher` to true in postgresql.conf
+* restart the PostgreSQL server for the changes to take effect
+
+For example:
 ```
 shared_preload_libraries = 'synchdb'
+synchdb.synchdb_auto_launcher = true
 ```
 
-With `synchdb` preloaded and GUC option `synchdb.synchdb_auto_launcher` set to `true`, PostgreSQL will launch a `synchdb_auto_launcher` background worker that will retrieve all the conninfos in `synchdb_conninfo` table that is marked as `active` ( has `isactive` flag set to `true`). Then, it will start them automatically in the same state as when they exited. If `synchdb`.
+At startup, PostgreSQL will launch a `synchdb_auto_launcher` background worker that will retrieve all the conninfos in `synchdb_conninfo` table that is marked as `active` ( has `isactive` flag set to `true`). Then, it will start them automatically. `synchdb_auto_launcher` will exit after.
+
+### Custom Data Type Mapping Rule File
+For each supported connector type, SynchDB has a default, built-in data type translation rule that maps heterogeneous data types to those compatible in PostgreSQL. This default rule can be partially overwritten with a custom JSON formatted rule file that is specified during `synchdb_add_conninfo()`. Synchdb seraches for specified rule file under $PGDATA directory where PostgreSQL server runs on. Here's an example of rule file:
+
+myrule.json
+```
+{
+    "translation_rules":
+    [
+        {
+            "translate_from": "LINESTRING",
+            "translate_from_autoinc": false,
+            "translate_to": "TEXT",
+            "translate_to_size": 0
+        },
+        {
+            "translate_from": "BIGINT UNSIGNED",
+            "translate_from_autoinc": false,
+            "translate_to": "NUMERIC",
+            "translate_to_size": -1
+        }
+    ]
+}
+```
+
+The rule file must contain a JSON array with name `"translation_rules"` that contains multiple objects:
+* "translate_from": the data type name from heterogeneous database to translate from. 
+* "translate_from_autoinc": indicate if the data type specified in `"translate_from"` is marked as auto increment.
+* "translate_to": the PostgreSQL data type to translate to.
+* "translate_to_size": indicate if we should transform the size of the data type specifed in `"translate_to"`. For example:
+	* 0: Remove any length specifier because the PostgreSQL data type translated to does not need length specifier. For example: TEXT
+	* -1: Use whatever length specifier from the source heterogeneous database (if available) and map it directly to the translated datatype. For example: VARCHAR.
+	* others: put any other values to force the size of translated data type. Use it with caution.
 
 ## Synchdb GUC Variables
 These are the current GUC variables specifically reserved for synchdb. More is expected to be added:
 
-* synchdb.naptime - the frequency of a synchdb connector worker (in seconds) to fetch new changes from Debezium embedded engine (default: 5)
+* synchdb.naptime - the frequency of a synchdb connector worker (in milliseconds) to fetch new batch of changes from Debezium runner engine (default: 500)
 * synchdb.dml_use_spi - option to use SPI to handle DML operations. True = use SPI, false = use heap access method (default: false)
-* synchdb.synchdb_auto_launcher - option to automatic launch connector workers at server restarts. This option works when synchdb is included in shared_preload_library option (default: true)
+* synchdb.synchdb_auto_launcher - option to automatically launch active connector workers at server restarts. This option works when synchdb is included in shared_preload_library option (default: true)
 
 ## Architecture
 SynchDB extension consists of six major components:
@@ -438,7 +462,7 @@ SynchDB extension consists of six major components:
 * SynchDB Worker
 * Format Converter
 * Replication Agent
-* Table Synch Agent
+* Table Synch Agent (TBD)
 
 Refer to the architecture diagram for a visual representation of the components and their interactions.
 ![img](https://www.highgo.ca/wp-content/uploads/2024/07/synchdb.drawio.png)
@@ -471,34 +495,3 @@ Refer to the architecture diagram for a visual representation of the components 
 ### Table Sync Agent
 * Design details and implementation are not available yet. TBD
 * Intended to provide a more efficient alternative to perform initial table synchronization.
-
-## Feature Highlights and TODOs
-
-### Debezium Runner Engine (Java)
-* support more connector types
-
-### SynchDB Launcher
-* Support more connector types
-* Define and implement potential configuration parameters
-* Configurable starting offsets for each worker
-* Utility SQL functions to display worker status, current offsets, potential errors...etc
-* Automatic worker re-launch upon PostgreSQL restart
-* Support multiple workers for the same connector
-
-### SynchDB Worker
-* Support more column data type translations to PostgreSQL based on connector types
-* Support ALTER TABLE, TRUNCATE, CREATE INDEX, DROP INDEX...
-
-### Format Converter
-* Support more data conversions based on column data type
-* Support HeapTupleData conversions for DMLs
-
-### Replication Agent
-* Support direct data update via Heap Access Method in addition to SPI
-
-### Table Synch Agent
-* Design and POC.
-* Proposed features:
-	* Same table concurrency
-	* Concurrent table synchronization
-	* ...
