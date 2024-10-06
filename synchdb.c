@@ -49,7 +49,6 @@ PG_FUNCTION_INFO_V1(synchdb_pause_engine);
 PG_FUNCTION_INFO_V1(synchdb_resume_engine);
 PG_FUNCTION_INFO_V1(synchdb_set_offset);
 PG_FUNCTION_INFO_V1(synchdb_add_conninfo);
-PG_FUNCTION_INFO_V1(synchdb_load_rules_file);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -378,7 +377,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 				continue;
 			}
 
-			elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
+			elog(WARNING, "Processing DBZ Event: %s", eventStr);
 			/* change event message, send to format converter */
 			if (fc_processDBZChangeEvent(eventStr) != 0)
 			{
@@ -1675,7 +1674,7 @@ void
 _PG_init(void)
 {
 	DefineCustomIntVariable("synchdb.naptime",
-							"Duration between each data polling (in seconds).",
+							"Duration between each data polling (in milliseconds).",
 							NULL,
 							&synchdb_worker_naptime,
 							5,
@@ -2288,35 +2287,4 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 			connInfo.rulefile);
 
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
-}
-
-Datum
-synchdb_load_rules_file(PG_FUNCTION_ARGS)
-{
-	text *connector_text = PG_GETARG_TEXT_PP(0);
-	text *rulefile_text = PG_GETARG_TEXT_PP(1);
-	char *connector;
-	char *rulefile;
-
-	/* Sanity check on input arguments */
-	if (VARSIZE(connector_text) - VARHDRSZ == 0)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("connector name cannot be empty")));
-	}
-	connector = text_to_cstring(connector_text);
-	(void)connector;
-
-	/* Sanity check on input arguments */
-	if (VARSIZE(rulefile_text) - VARHDRSZ == 0)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("path to rule file cannot be empty")));
-	}
-	rulefile = text_to_cstring(rulefile_text);
-
-	fc_load_rules(1, rulefile);
-	PG_RETURN_INT32(0);
 }

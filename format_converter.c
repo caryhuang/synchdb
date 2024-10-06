@@ -324,7 +324,7 @@ remove_double_quotes(StringInfoData * str)
  * ["col1","col2"]
  */
 static void
-populate_primary_keys(StringInfoData * strinfo, const char * jsonin)
+populate_primary_keys(StringInfoData * strinfo, const char * jsonin, bool alter)
 {
 	Datum jsonb_datum;
 	Jsonb * jb;
@@ -364,15 +364,31 @@ populate_primary_keys(StringInfoData * strinfo, const char * jsonin)
 					case jbvString:
 						value = pnstrdup(v.val.string.val, v.val.string.len);
 						elog(DEBUG1, "primary key column: %s", value);
-						if (isfirst)
+						if (alter)
 						{
-							appendStringInfo(strinfo, ", PRIMARY KEY(");
-							appendStringInfo(strinfo, "%s,", value);
-							isfirst = false;
+							if (isfirst)
+							{
+								appendStringInfo(strinfo, ", ADD PRIMARY KEY(");
+								appendStringInfo(strinfo, "%s,", value);
+								isfirst = false;
+							}
+							else
+							{
+								appendStringInfo(strinfo, "%s,", value);
+							}
 						}
 						else
 						{
-							appendStringInfo(strinfo, "%s,", value);
+							if (isfirst)
+							{
+								appendStringInfo(strinfo, ", PRIMARY KEY(");
+								appendStringInfo(strinfo, "%s,", value);
+								isfirst = false;
+							}
+							else
+							{
+								appendStringInfo(strinfo, "%s,", value);
+							}
 						}
 						pfree(value);
 						break;
@@ -666,7 +682,7 @@ parseDBZDDL(Jsonb * jb)
     	return NULL;
     }
 
-    if (!strcmp(ddlinfo->type, "CREATE"))
+    if (!strcmp(ddlinfo->type, "CREATE") || !strcmp(ddlinfo->type, "ALTER"))
     {
 		/* fetch payload.tableChanges.0.table.columns as jsonb */
 		ddlpayload = getPathElementJsonb(jb, "payload.tableChanges.0.table.columns");
@@ -1036,7 +1052,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 	if (!strcmp(dbzddl->type, "CREATE"))
 	{
-		/* assume CREATE table */
 		/* todo: dbzddl->id is can be exprssed in either database.table or
 		 * database.schema.table formats. Right now we will transform like this:
 		 *
@@ -1051,7 +1066,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		 *
 		 * todo: We should make this behavior configurable in the future
 		 */
-		char * tmp = pstrdup(dbzddl->id);
 		char * db = NULL, * schema = NULL, * table = NULL;
 
 		splitIdString(dbzddl->id, &db, &schema, &table);
@@ -1071,7 +1085,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 		/* database mapped to schema */
 		appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; ", db);
-		pfree(tmp);
 
 		/* table stays as table, schema ignored */
 		appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s.%s (", db, table);
@@ -1091,6 +1104,9 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			/* if a only length if specified, add it. For example VARCHAR(30)*/
 			if (col->length > 0 && col->scale == 0)
 			{
+				/* make sure it does not exceed postgresql allowed maximum */
+				if (col->length > 10485760)
+					col->length = 10485760;
 				appendStringInfo(&strinfo, "(%d) ", col->length);
 			}
 
@@ -1124,13 +1140,227 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		 * finally, declare primary keys if any. iterate dbzddl->primaryKeyColumnNames
 		 * and build into primary key(x, y, z) clauses. todo
 		 */
-		populate_primary_keys(&strinfo, dbzddl->primaryKeyColumnNames);
+		populate_primary_keys(&strinfo, dbzddl->primaryKeyColumnNames, false);
 
 		appendStringInfo(&strinfo, ");");
 	}
 	else if (!strcmp(dbzddl->type, "DROP"))
 	{
 		appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s;", dbzddl->id);
+	}
+	else if (!strcmp(dbzddl->type, "ALTER"))
+	{
+		/* todo: dbzddl->id is can be exprssed in either database.table or
+		 * database.schema.table formats. Right now we will transform like this:
+		 *
+		 * database.table:
+		 * 	- database becomes schema in PG
+		 * 	- table name stays
+		 *
+		 * database.schema.table:
+		 * 	- database becomes schema in PG
+		 * 	- schema is ignored
+		 * 	- table name stays
+		 *
+		 * todo: We should make this behavior configurable in the future
+		 */
+		char * db = NULL, * schema = NULL, * table = NULL;
+		int i = 0, attnum;
+		Oid schemaoid = -1;
+		Oid tableoid = -1;
+		bool found = false, altered = false;
+
+		Relation rel;
+		TupleDesc tupdesc;
+
+		splitIdString(dbzddl->id, &db, &schema, &table);
+
+		/* database and table must be present. schema is optional */
+		if (!db || !table)
+		{
+			/* save the error */
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "malformed id field in dbz change event: %s",
+					dbzddl->id);
+			set_shm_connector_errmsg(myConnectorId, msg);
+
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
+		}
+
+		/*
+		 * For ALTER, we must obtain the current schema in PostgreSQL and identify
+		 * which column is the new column added. We will first check if table exists
+		 * and then add its column to a temporary hash table that we can compare
+		 * with the new column list.
+		 */
+		for (i = 0; i < strlen(db); i++)
+			db[i] = (char) pg_tolower((unsigned char) db[i]);
+
+		for (i = 0; i < strlen(table); i++)
+			table[i] = (char) pg_tolower((unsigned char) table[i]);
+
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+
+		schemaoid = get_namespace_oid(db, false);
+		if (!OidIsValid(schemaoid))
+		{
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", db);
+			set_shm_connector_errmsg(myConnectorId, msg);
+
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
+		}
+
+		tableoid = get_relname_relid(table, schemaoid);
+		if (!OidIsValid(tableoid))
+		{
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", table);
+			set_shm_connector_errmsg(myConnectorId, msg);
+
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
+		}
+
+		elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", db, table, tableoid);
+
+		/* put PostgreSQL table column names into pgsqlColNameList */
+		rel = table_open(tableoid, NoLock);
+		tupdesc = RelationGetDescr(rel);
+		table_close(rel, NoLock);
+
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+
+		appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", db, table);
+
+		if (list_length(dbzddl->columns) > tupdesc->natts)
+		{
+			elog(WARNING, "adding new column");
+			altered = false;
+			foreach(cell, dbzddl->columns)
+			{
+				DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
+				found = false;
+				for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+				{
+					Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+					if (!strcasecmp(col->name, NameStr(attr->attname)))
+					{
+						found = true;
+					}
+				}
+				if (!found)
+				{
+					elog(WARNING, "adding new column %s", col->name);
+					altered = true;
+					appendStringInfo(&strinfo, "ADD COLUMN");
+
+					transformDDLColumns(col, type, &strinfo);
+
+					/* if both length and scale are specified, add them. For example DECIMAL(10,2) */
+					if (col->length > 0 && col->scale > 0)
+					{
+						appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
+					}
+
+					/* if a only length if specified, add it. For example VARCHAR(30)*/
+					if (col->length > 0 && col->scale == 0)
+					{
+						/* make sure it does not exceed postgresql allowed maximum */
+						if (col->length > 10485760)
+							col->length = 10485760;
+						appendStringInfo(&strinfo, "(%d) ", col->length);
+					}
+
+					/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
+					if (strstr(col->typeName, "UNSIGNED"))
+					{
+						appendStringInfo(&strinfo, "CHECK (%s >= 0) ", col->name);
+					}
+
+					/* is it optional? */
+					if (!col->optional)
+					{
+						appendStringInfo(&strinfo, "NOT NULL ");
+					}
+
+					/* does it have defaults? */
+					if (col->defaultValueExpression && strlen(col->defaultValueExpression) > 0
+							&& !col->autoIncremented)
+					{
+						appendStringInfo(&strinfo, "DEFAULT %s ", col->defaultValueExpression);
+					}
+
+					appendStringInfo(&strinfo, ",");
+				}
+			}
+
+			if (altered)
+			{
+				/* something has been altered, continue to wrap up... */
+				/* remove the last extra comma */
+				strinfo.data[strinfo.len - 1] = '\0';
+				strinfo.len = strinfo.len - 1;
+
+				/*
+				 * finally, declare primary keys if any. iterate dbzddl->primaryKeyColumnNames
+				 * and build into primary key(x, y, z) clauses. todo
+				 */
+				populate_primary_keys(&strinfo, dbzddl->primaryKeyColumnNames, true);
+			}
+			else
+			{
+				elog(WARNING, "no column altered");
+				pfree(pgddl);
+				return NULL;
+			}
+		}
+		else
+		{
+			elog(WARNING, "dropping old column");
+			altered = false;
+			for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+			{
+				Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+				found = false;
+
+				/* skip special attname indicated a dropped column */
+				if (strstr(NameStr(attr->attname), "pg.dropped"))
+					continue;
+
+				foreach(cell, dbzddl->columns)
+				{
+					DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
+					if (!strcasecmp(col->name, NameStr(attr->attname)))
+					{
+						found = true;
+					}
+				}
+				if (!found)
+				{
+					elog(WARNING, "dropping old column %s", NameStr(attr->attname));
+					altered = true;
+					appendStringInfo(&strinfo, "DROP COLUMN %s,", NameStr(attr->attname));
+				}
+			}
+			if(altered)
+			{
+				/* something has been altered, continue to wrap up... */
+				/* remove the last extra comma */
+				strinfo.data[strinfo.len - 1] = '\0';
+				strinfo.len = strinfo.len - 1;
+			}
+			else
+			{
+				elog(WARNING, "no column altered");
+				pfree(pgddl);
+				return NULL;
+			}
+		}
 	}
 
 	pgddl->ddlquery = pstrdup(strinfo.data);
@@ -1748,6 +1978,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 						pgcolval->value = pstrdup("NULL");
 
 					pgcolval->datatype = colval->datatype;
+					pgcolval->position = colval->position;
 
 					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval);
 				}
@@ -1804,6 +2035,8 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 						pgcolval->value = pstrdup("NULL");
 
 					pgcolval->datatype = colval->datatype;
+					pgcolval->position = colval->position;
+
 					pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval);
 				}
 				pgdml->columnValuesAfter = NULL;
@@ -1884,6 +2117,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 						pgcolval_after->value = pstrdup("NULL");
 
 					pgcolval_after->datatype = colval_after->datatype;
+					pgcolval_after->position = colval_after->position;
 					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
 
 					data = processDataByType(colval_before, false, type);
@@ -1897,6 +2131,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 						pgcolval_before->value = pstrdup("NULL");
 
 					pgcolval_before->datatype = colval_before->datatype;
+					pgcolval_before->position = colval_before->position;
 					pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval_before);
 				}
 			}

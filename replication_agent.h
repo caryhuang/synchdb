@@ -34,6 +34,7 @@ typedef struct pg_ddl_column_value
 					 * into TupleTableSlot.
 					 */
 	Oid datatype;
+	int position;	/* position of this value's attribute in tupdesc */
 } PG_DML_COLUMN_VALUE;
 
 typedef struct pg_dml
