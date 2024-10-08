@@ -86,7 +86,7 @@ public class DebeziumRunner {
 	}
 	
 
-	public void startEngine(String hostname, int port, String user, String password, String database, String table, int connectorType, String name) throws Exception
+	public void startEngine(String hostname, int port, String user, String password, String database, String table, int connectorType, String name, String snapshot_mode) throws Exception
 	{
 		String offsetfile = "/dev/shm/offsets.dat";
 		String schemahistoryfile = "/dev/shm/schemahistory.dat";
@@ -142,6 +142,11 @@ public class DebeziumRunner {
 			logger.warn("table is null - skip setting table.include.list property");
 		else
 			props.setProperty("table.include.list", table);
+		
+		if (snapshot_mode.equals("null"))
+			logger.warn("snapshot_mode is null - skip setting snapshot.mode property");
+		else
+			props.setProperty("snapshot.mode", snapshot_mode);
 
 		props.setProperty("database.hostname", hostname);
 		props.setProperty("database.port", String.valueOf(port));

@@ -49,7 +49,7 @@ PG_FUNCTION_INFO_V1(synchdb_pause_engine);
 PG_FUNCTION_INFO_V1(synchdb_resume_engine);
 PG_FUNCTION_INFO_V1(synchdb_set_offset);
 PG_FUNCTION_INFO_V1(synchdb_add_conninfo);
-PG_FUNCTION_INFO_V1(synchdb_load_rules_file);
+PG_FUNCTION_INFO_V1(synchdb_restart_connector);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -81,7 +81,7 @@ PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
 static int dbz_engine_stop(void);
 static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
 static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal, BatchInfo * batchinfo);
-static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType);
+static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshot_mode);
 static char *dbz_engine_get_offset(int connectorId);
 static int dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto);
 static TupleDesc synchdb_state_tupdesc(void);
@@ -378,7 +378,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 				continue;
 			}
 
-			elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
+			elog(WARNING, "Processing DBZ Event: %s", eventStr);
 			/* change event message, send to format converter */
 			if (fc_processDBZChangeEvent(eventStr) != 0)
 			{
@@ -417,10 +417,10 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
  * @return: 0 on success, -1 on failure
  */
 static int
-dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType)
+dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshot_mode)
 {
 	jmethodID mid;
-	jstring jHostname, jUser, jPassword, jDatabase, jTable, jName;
+	jstring jHostname, jUser, jPassword, jDatabase, jTable, jName, jSnapshot;
 	jthrowable exception;
 
 	elog(LOG, "dbz_engine_start: Starting dbz engine %s:%d ", connInfo->hostname, connInfo->port);
@@ -438,7 +438,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType)
 
 	/* Find the startEngine method */
 	mid = (*env)->GetMethodID(env, cls, "startEngine",
-							  "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;)V");
+							  "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
 	if (mid == NULL)
 	{
 		elog(WARNING, "Failed to find startEngine method");
@@ -452,9 +452,10 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType)
 	jDatabase = (*env)->NewStringUTF(env, connInfo->src_db);
 	jTable = (*env)->NewStringUTF(env, connInfo->table);
 	jName = (*env)->NewStringUTF(env, connInfo->name);
+	jSnapshot = (*env)->NewStringUTF(env, snapshot_mode);
 
 	/* Call the Java method */
-	(*env)->CallVoidMethod(env, obj, mid, jHostname, connInfo->port, jUser, jPassword, jDatabase, jTable, connectorType, jName);
+	(*env)->CallVoidMethod(env, obj, mid, jHostname, connInfo->port, jUser, jPassword, jDatabase, jTable, connectorType, jName, jSnapshot);
 
 	/* Check for exceptions */
 	exception = (*env)->ExceptionOccurred(env);
@@ -482,6 +483,8 @@ cleanup:
 		(*env)->DeleteLocalRef(env, jTable);
 	if (jName)
 		(*env)->DeleteLocalRef(env, jName);
+	if (jSnapshot)
+		(*env)->DeleteLocalRef(env, jSnapshot);
 
 	return exception ? -1 : 0;
 }
@@ -760,6 +763,8 @@ connectorStateAsString(ConnectorState state)
 		return "executing";
 	case STATE_OFFSET_UPDATE:
 		return "updating offset";
+	case STATE_RESTARTING:
+		return "restarting";
 	}
 	return "UNKNOWN";
 }
@@ -931,7 +936,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 		/* restart dbz engine */
 		elog(DEBUG1, "restart dbz engine...");
 
-		ret = dbz_engine_start(connInfo, type);
+		ret = dbz_engine_start(connInfo, type, "null");
 		if (ret < 0)
 		{
 			elog(WARNING, "Failed to restart dbz engine");
@@ -971,6 +976,37 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 
 		/* and also update this worker's shm offset */
 		set_shm_dbz_offset(connectorId);
+	}
+	else if (reqcopy->reqstate == STATE_RESTARTING && *currstatecopy == STATE_SYNCING)
+	{
+		elog(WARNING, "got a restart request: %s", reqcopy->reqdata);
+		set_shm_connector_state(connectorId, STATE_RESTARTING);
+
+		elog(WARNING, "stopping dbz engine...");
+		ret = dbz_engine_stop();
+		if (ret)
+		{
+			elog(WARNING, "failed to stop dbz engine...");
+			reset_shm_request_state(connectorId);
+			pfree(reqcopy);
+			pfree(currstatecopy);
+			set_shm_connector_state(connectorId, STATE_SYNCING);
+			return;
+		}
+		sleep(1);
+
+		elog(WARNING, "resuimg dbz engine with snapshot_mode %s...", reqcopy->reqdata);
+		ret = dbz_engine_start(connInfo, type, reqcopy->reqdata);
+		if (ret < 0)
+		{
+			elog(WARNING, "Failed to restart dbz engine");
+			reset_shm_request_state(connectorId);
+			pfree(reqcopy);
+			pfree(currstatecopy);
+			set_shm_connector_state(connectorId, STATE_STOPPED);
+			return;
+		}
+		set_shm_connector_state(connectorId, STATE_SYNCING);
 	}
 	else
 	{
@@ -1193,7 +1229,7 @@ initialize_jvm(void)
 static void
 start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo)
 {
-	int ret = dbz_engine_start(connInfo, connectorType);
+	int ret = dbz_engine_start(connInfo, connectorType, "null");
 	if (ret < 0)
 	{
 		set_shm_connector_errmsg(myConnectorId, "Failed to start dbz engine");
@@ -1675,7 +1711,7 @@ void
 _PG_init(void)
 {
 	DefineCustomIntVariable("synchdb.naptime",
-							"Duration between each data polling (in seconds).",
+							"Duration between each data polling (in milliseconds).",
 							NULL,
 							&synchdb_worker_naptime,
 							5,
@@ -2291,32 +2327,72 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 }
 
 Datum
-synchdb_load_rules_file(PG_FUNCTION_ARGS)
+synchdb_restart_connector(PG_FUNCTION_ARGS)
 {
-	text *connector_text = PG_GETARG_TEXT_PP(0);
-	text *rulefile_text = PG_GETARG_TEXT_PP(1);
-	char *connector;
-	char *rulefile;
+	text *name_text = PG_GETARG_TEXT_PP(0);
+	text *snapshot_mode_text = PG_GETARG_TEXT_PP(1);
+
+	int connectorId;
+	pid_t pid;
+	char * snapshot_mode;
+
+	SynchdbRequest *req;
 
 	/* Sanity check on input arguments */
-	if (VARSIZE(connector_text) - VARHDRSZ == 0)
+	if (VARSIZE(name_text) - VARHDRSZ == 0)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("connector name cannot be empty")));
+				 errmsg("connection name cannot be empty")));
 	}
-	connector = text_to_cstring(connector_text);
-	(void)connector;
 
-	/* Sanity check on input arguments */
-	if (VARSIZE(rulefile_text) - VARHDRSZ == 0)
-	{
+	/* snapshot_mode can be empty or NULL */
+	if (VARSIZE(snapshot_mode_text) - VARHDRSZ == 0)
+		snapshot_mode = "null";
+	else
+		snapshot_mode = text_to_cstring(snapshot_mode_text);
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
 		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("path to rule file cannot be empty")));
-	}
-	rulefile = text_to_cstring(rulefile_text);
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	fc_load_rules(1, rulefile);
+	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
+	pid = get_shm_connector_pid(connectorId);
+	if (pid == InvalidPid)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) is not running",
+						text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
+
+	/* point to the right construct based on type */
+	req = &(sdb_state->connectors[connectorId].req);
+
+	/* an active state change request is currently in progress */
+	if (req->reqstate != STATE_UNDEF)
+		ereport(ERROR,
+				(errmsg("an active request is currently active for connector %s",
+						text_to_cstring(name_text)),
+				 errhint("wait for it to finish and try again later")));
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	req->reqstate = STATE_RESTARTING;
+	strncpy(req->reqdata, "", SYNCHDB_ERRMSG_SIZE);
+	snprintf(req->reqdata, SYNCHDB_ERRMSG_SIZE, "%s", snapshot_mode);
+	LWLockRelease(&sdb_state->lock);
+
+	elog(WARNING, "sent restart request interrupt to dbz connector (%s)",
+			text_to_cstring(name_text));
 	PG_RETURN_INT32(0);
 }

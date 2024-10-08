@@ -248,25 +248,30 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 
 		ExecClearTuple(slot);
 
-		i = 0;
+		/* initialize all values in slot to null */
+		for (i = 0; i < tupdesc->natts; i++)
+		{
+			slot->tts_isnull[i] = true;
+		}
+
+		/* then we fill valid data to slot */
 		foreach(cell, colval)
 		{
 			PG_DML_COLUMN_VALUE * colval = (PG_DML_COLUMN_VALUE *) lfirst(cell);
-			Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, i);
+			Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, colval->position - 1);
 			Oid			typinput;
 			Oid			typioparam;
 
 			if (!strcasecmp(colval->value, "NULL"))
-				slot->tts_isnull[i] = true;
+				slot->tts_isnull[colval->position - 1] = true;
 			else
 			{
 				getTypeInputInfo(colval->datatype, &typinput, &typioparam);
-				slot->tts_values[i] =
+				slot->tts_values[colval->position - 1] =
 					OidInputFunctionCall(typinput, colval->value,
 										 typioparam, attr->atttypmod);
-				slot->tts_isnull[i] = false;
+				slot->tts_isnull[colval->position - 1] = false;
 			}
-			i++;
 		}
 		ExecStoreVirtualTuple(slot);
 
@@ -368,25 +373,30 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 
 		ExecClearTuple(remoteslot);
 
-		i = 0;
+		/* initialize all values in slot to null */
+		for (i = 0; i < tupdesc->natts; i++)
+		{
+			remoteslot->tts_isnull[i] = true;
+		}
+
+		/* then we fill valid data to slot */
 		foreach(cell, colvalbefore)
 		{
 			PG_DML_COLUMN_VALUE * colval = (PG_DML_COLUMN_VALUE *) lfirst(cell);
-			Form_pg_attribute attr = TupleDescAttr(remoteslot->tts_tupleDescriptor, i);
+			Form_pg_attribute attr = TupleDescAttr(remoteslot->tts_tupleDescriptor, colval->position - 1);
 			Oid			typinput;
 			Oid			typioparam;
 
 			if (!strcasecmp(colval->value, "NULL"))
-				remoteslot->tts_isnull[i] = true;
+				remoteslot->tts_isnull[colval->position - 1] = true;
 			else
 			{
 				getTypeInputInfo(colval->datatype, &typinput, &typioparam);
-				remoteslot->tts_values[i] =
+				remoteslot->tts_values[colval->position - 1] =
 					OidInputFunctionCall(typinput, colval->value,
 										 typioparam, attr->atttypmod);
-				remoteslot->tts_isnull[i] = false;
+				remoteslot->tts_isnull[colval->position - 1] = false;
 			}
-			i++;
 		}
 		ExecStoreVirtualTuple(remoteslot);
 		EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1, NIL);
@@ -424,25 +434,30 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			/* turn colvalafter into TupleTableSlot */
 			ExecClearTuple(remoteslot);
 
-			i = 0;
+			/* initialize all values in slot to null */
+			for (i = 0; i < tupdesc->natts; i++)
+			{
+				remoteslot->tts_isnull[i] = true;
+			}
+
+			/* then we fill valid data to slot */
 			foreach(cell, colvalafter)
 			{
 				PG_DML_COLUMN_VALUE * colval = (PG_DML_COLUMN_VALUE *) lfirst(cell);
-				Form_pg_attribute attr = TupleDescAttr(remoteslot->tts_tupleDescriptor, i);
+				Form_pg_attribute attr = TupleDescAttr(remoteslot->tts_tupleDescriptor, colval->position - 1);
 				Oid			typinput;
 				Oid			typioparam;
 
 				if (!strcasecmp(colval->value, "NULL"))
-					remoteslot->tts_isnull[i] = true;
+					remoteslot->tts_isnull[colval->position - 1] = true;
 				else
 				{
 					getTypeInputInfo(colval->datatype, &typinput, &typioparam);
-					remoteslot->tts_values[i] =
+					remoteslot->tts_values[colval->position - 1] =
 						OidInputFunctionCall(typinput, colval->value,
 											 typioparam, attr->atttypmod);
-					remoteslot->tts_isnull[i] = false;
+					remoteslot->tts_isnull[colval->position - 1] = false;
 				}
-				i++;
 			}
 			ExecStoreVirtualTuple(remoteslot);
 
@@ -548,25 +563,30 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 
 		ExecClearTuple(remoteslot);
 
-		i = 0;
+		/* initialize all values in slot to null */
+		for (i = 0; i < tupdesc->natts; i++)
+		{
+			localslot->tts_isnull[i] = true;
+		}
+
+		/* then we fill valid data to slot */
 		foreach(cell, colvalbefore)
 		{
 			PG_DML_COLUMN_VALUE * colval = (PG_DML_COLUMN_VALUE *) lfirst(cell);
-			Form_pg_attribute attr = TupleDescAttr(remoteslot->tts_tupleDescriptor, i);
+			Form_pg_attribute attr = TupleDescAttr(remoteslot->tts_tupleDescriptor, colval->position - 1);
 			Oid			typinput;
 			Oid			typioparam;
 
 			if (!strcasecmp(colval->value, "NULL"))
-				remoteslot->tts_isnull[i] = true;
+				remoteslot->tts_isnull[colval->position - 1] = true;
 			else
 			{
 				getTypeInputInfo(colval->datatype, &typinput, &typioparam);
-				remoteslot->tts_values[i] =
+				remoteslot->tts_values[colval->position - 1] =
 					OidInputFunctionCall(typinput, colval->value,
 										 typioparam, attr->atttypmod);
-				remoteslot->tts_isnull[i] = false;
+				remoteslot->tts_isnull[colval->position - 1] = false;
 			}
-			i++;
 		}
 		ExecStoreVirtualTuple(remoteslot);
 		EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1, NIL);
