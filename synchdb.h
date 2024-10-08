@@ -63,6 +63,7 @@ typedef enum _connectorState
 	STATE_CONVERTING,	/* parsing done, try to convert it to pg */
 	STATE_EXECUTING,	/* conversion done, try to execute it on pg */
 	STATE_OFFSET_UPDATE,/* in this state when user requests offset update */
+	STATE_RESTARTING,	/* connector is restarting with new snapshot mode */
 } ConnectorState;
 
 /**
