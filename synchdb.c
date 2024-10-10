@@ -378,7 +378,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 				continue;
 			}
 
-			elog(WARNING, "Processing DBZ Event: %s", eventStr);
+			elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
 			/* change event message, send to format converter */
 			if (fc_processDBZChangeEvent(eventStr) != 0)
 			{

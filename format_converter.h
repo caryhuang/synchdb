@@ -23,6 +23,10 @@
 #include "replication_agent.h"
 #include "synchdb.h"
 
+/* constants */
+#define RULEFILE_TRANSLATION_RULE 1
+#define RULEFILE_OBJECT_MAPPING 2
+
 /* structure to hold possible time representations in DBZ engine */
 typedef enum _timeRep
 {
@@ -85,8 +89,9 @@ typedef struct dbz_dml_column_value
 typedef struct dbz_dml
 {
 	char op;
-	char * db;
+	char * schema;
 	char * table;
+	char * mappedObjectId;			/* schema.table, or just table */
 	Oid tableoid;
 	List * columnValuesBefore;	/* list of DBZ_DML_COLUMN_VALUE */
 	List * columnValuesAfter;	/* list of DBZ_DML_COLUMN_VALUE */
@@ -104,6 +109,18 @@ typedef struct datatypeHashEntry
 	char pgsqlTypeName[SYNCHDB_DATATYPE_NAME_SIZE];
 	int pgsqlTypeLength;
 } DatatypeHashEntry;
+
+typedef struct objMapHashKey
+{
+	char extObjName[SYNCHDB_OBJ_NAME_SIZE];
+	char extObjType[SYNCHDB_OBJ_TYPE_SIZE];
+} ObjMapHashKey;
+
+typedef struct objMapHashEntry
+{
+	ObjMapHashKey key;
+	char pgsqlObjName[SYNCHDB_OBJ_NAME_SIZE];
+} ObjMapHashEntry;
 
 /* Function prototypes */
 int fc_processDBZChangeEvent(const char * event);
