@@ -1026,14 +1026,12 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 
 	if (mappedColumnName)
 	{
-		elog(WARNING, "transformed column object ID '%s'to '%s'",
+		elog(DEBUG1, "transformed column object ID '%s'to '%s'",
 				colNameObjId.data, mappedColumnName);
 		/* replace the column name with looked up value here */
 		pfree(col->name);
 		col->name = pstrdup(mappedColumnName);
 	}
-	if (colNameObjId.data)
-		pfree(colNameObjId.data);
 
 	switch (conntype)
 	{
@@ -1043,31 +1041,71 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 			DatatypeHashKey key = {0};
 			bool found = 0;
 
-			/* special lookup case: BIT with length 1 */
+			/*
+			 * check if there is a translation rule applied specifically for this column using
+			 * key format: [column object id].[data type]
+			 */
 			if (!strcasecmp(col->typeName, "BIT") && col->length == 1)
 			{
+				/* special lookup case: BIT with length 1 */
 				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
-						col->typeName, col->length);
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s(%d)",
+						colNameObjId.data, col->typeName, col->length);
 			}
 			else
 			{
+				/* all other cases - no special handling */
 				key.autoIncremented = col->autoIncremented;
-				strcpy(key.extTypeName, col->typeName);
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s",
+						colNameObjId.data, col->typeName);
 			}
 
 			entry = (DatatypeHashEntry *) hash_search(mysqlDatatypeHash, &key, HASH_FIND, &found);
 			if (!found)
 			{
-				/* no mapping found, so no transformation done */
-				elog(WARNING, "no transformation done for %s (autoincrement %d)",
-						key.extTypeName, key.autoIncremented);
-				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+				/*
+				 * no mapping found, so no data type translation for this particular column.
+				 * Now, check if there is a global data type translation rule
+				 */
+				memset(&key, 0, sizeof(DatatypeHashKey));
+				if (!strcasecmp(col->typeName, "BIT") && col->length == 1)
+				{
+					/* special lookup case: BIT with length 1 */
+					key.autoIncremented = col->autoIncremented;
+					snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
+							col->typeName, col->length);
+				}
+				else
+				{
+					/* all other cases - no special handling */
+					key.autoIncremented = col->autoIncremented;
+					snprintf(key.extTypeName, sizeof(key.extTypeName), "%s",
+							col->typeName);
+				}
+				entry = (DatatypeHashEntry *) hash_search(mysqlDatatypeHash, &key, HASH_FIND, &found);
+				if (!found)
+				{
+					/* no mapping found, so no transformation done */
+					elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
+							key.extTypeName, key.autoIncremented);
+					appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+				}
+				else
+				{
+					/* use the mapped values and sizes */
+					elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
+							key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+							entry->pgsqlTypeLength);
+					appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+					if (entry->pgsqlTypeLength != -1)
+						col->length = entry->pgsqlTypeLength;
+				}
 			}
 			else
 			{
 				/* use the mapped values and sizes */
-				elog(WARNING, "transform %s (autoincrement %d) to %s with length %d",
+				elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
 						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
 						entry->pgsqlTypeLength);
 				appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
@@ -1087,25 +1125,66 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 			DatatypeHashKey key = {0};
 			bool found = 0;
 
-			/* special lookup case: BIT with length 1 */
+			/*
+			 * check if there is a translation rule applied specifically for this column using
+			 * key format: [column object id].[data type]
+			 */
 			if (!strcasecmp(col->typeName, "bit") && col->length == 1)
 			{
+				/* special lookup case: BIT with length 1 */
 				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
-						col->typeName, col->length);
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s(%d)",
+						colNameObjId.data, col->typeName, col->length);
 			}
 			else
 			{
+				/* all other cases - no special handling */
 				key.autoIncremented = col->autoIncremented;
-				strcpy(key.extTypeName, col->typeName);
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s",
+						colNameObjId.data, col->typeName);
 			}
+
 			entry = (DatatypeHashEntry *) hash_search(sqlserverDatatypeHash, &key, HASH_FIND, &found);
 			if (!found)
 			{
-				/* no mapping found, so no transformation done */
-				elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
-						key.extTypeName, key.autoIncremented);
-				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+				/*
+				 * no mapping found, so no data type translation for this particular column.
+				 * Now, check if there is a global data type translation rule
+				 */
+				memset(&key, 0, sizeof(DatatypeHashKey));
+				if (!strcasecmp(col->typeName, "bit") && col->length == 1)
+				{
+					/* special lookup case: BIT with length 1 */
+					key.autoIncremented = col->autoIncremented;
+					snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
+							col->typeName, col->length);
+				}
+				else
+				{
+					/* all other cases - no special handling */
+					key.autoIncremented = col->autoIncremented;
+					snprintf(key.extTypeName, sizeof(key.extTypeName), "%s",
+							col->typeName);
+				}
+				entry = (DatatypeHashEntry *) hash_search(sqlserverDatatypeHash, &key, HASH_FIND, &found);
+				if (!found)
+				{
+					/* no mapping found, so no transformation done */
+					elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
+							key.extTypeName, key.autoIncremented);
+					appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+				}
+				else
+				{
+					/* use the mapped values and sizes */
+					elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
+							key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+							entry->pgsqlTypeLength);
+					appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+					if (entry->pgsqlTypeLength != -1)
+						col->length = entry->pgsqlTypeLength;
+				}
 			}
 			else
 			{
@@ -1117,22 +1196,22 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 
 				if (entry->pgsqlTypeLength != -1)
 					col->length = entry->pgsqlTypeLength;
+			}
 
-				/*
-				 * special handling for sqlserver: the scale parameter for timestamp,
-				 * and time date types are sent as "scale" not as "length" as in
-				 * mysql case. So we need to use the scale value here
-				 */
-				if (col->scale > 0 && (find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMP") ||
-						find_exact_string_match(entry->pgsqlTypeName, "TIME") ||
-						find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMPTZ")))
-				{
-					/* postgresql can only support up to 6 */
-					if (col->scale > 6)
-						appendStringInfo(strinfo, "(6) ");
-					else
-						appendStringInfo(strinfo, "(%d) ", col->scale);
-				}
+			/*
+			 * special handling for sqlserver: the scale parameter for timestamp,
+			 * and time date types are sent as "scale" not as "length" as in
+			 * mysql case. So we need to use the scale value here
+			 */
+			if (col->scale > 0 && (find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMP") ||
+					find_exact_string_match(entry->pgsqlTypeName, "TIME") ||
+					find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMPTZ")))
+			{
+				/* postgresql can only support up to 6 */
+				if (col->scale > 6)
+					appendStringInfo(strinfo, "(6) ");
+				else
+					appendStringInfo(strinfo, "(%d) ", col->scale);
 			}
 			break;
 		}
@@ -1143,6 +1222,9 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 			break;
 		}
 	}
+
+	if (colNameObjId.data)
+		pfree(colNameObjId.data);
 }
 
 /* Function to convert Debezium DDL to PostgreSQL DDL */
@@ -1212,7 +1294,8 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			 * 	- schema is ignored
 			 * 	- table name stays
 			 */
-			splitIdString(dbzddl->id, &db, &schema, &table, true);
+			char * idcopy = pstrdup(dbzddl->id);
+			splitIdString(idcopy, &db, &schema, &table, true);
 
 			/* database and table must be present. schema is optional */
 			if (!db || !table)
@@ -1232,6 +1315,8 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 			/* table stays as table, schema ignored */
 			appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s.%s (", db, table);
+
+			pfree(idcopy);
 		}
 
 		foreach(cell, dbzddl->columns)
@@ -3503,16 +3588,16 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
      *   "translation_rules":
      *   [
      *       {
-     *           "translate_from": "LINESTRING",
+     *           "translate_from": "GEOMETRY",
      *           "translate_from_autoinc": false,
-     *           "translate_to": "LINESTRING",
+     *           "translate_to": "TEXT",
      *           "translate_to_size": -1
      *       },
      *       {
-     *           "translate_from": "LINESTRING",
+     *           "translate_from": "inventory.geom.g.GEOMETRY",
      *           "translate_from_autoinc": false,
-     *           "translate_to": "POINT",
-     *           "translate_to_size": -1
+     *           "translate_to": "VARCHAR",
+     *           "translate_to_size": 300000
      *       }
      *       ...
      *       ...
@@ -3521,12 +3606,19 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
      *   "object_mapping_rules":
      *   [
      *       {
+     *           "object_type": "table",
      *           "source_object": "inventory.orders",
      *           "destination_object": "inventory.orders"
      *       },
      *       {
+     *           "object_type": "table",
      *           "source_object": "inventory.products",
      *           "destination_object": "products"
+     *       }
+     *       {
+     *           "object_type": "column",
+     *           "source_object": "inventory.orders.order_number",
+     *           "destination_object": "ididid"
      *       }
      *       ...
      *       ...
