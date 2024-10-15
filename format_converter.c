@@ -46,6 +46,7 @@ extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
 
 static HTAB * objectMappingHash;
+static HTAB * transformExpressionHash;
 
 static HTAB * mysqlDatatypeHash;
 static HTAB * sqlserverDatatypeHash;
@@ -318,6 +319,91 @@ remove_double_quotes(StringInfoData * str)
 	}
 	*dst = '\0';
 	str->len = newlen;
+}
+
+static char *
+escapeSingleQuote(const char * in, bool addquote)
+{
+	int i = 0, j = 0, outlen = 0;
+	char * out = NULL;
+
+	/* escape possible single quotes */
+	for (i = 0; i < strlen(in); i++)
+	{
+		if (in[i] == '\'')
+		{
+			/* single quote will be escaped so +2 in size */
+			outlen += 2;
+		}
+		else
+		{
+			outlen++;
+		}
+	}
+
+	if (addquote)
+		/* 2 more to account for open and closing quotes */
+		out = (char *) palloc0(outlen + 1 + 2);
+	else
+		out = (char *) palloc0(outlen + 1);
+
+	if (addquote)
+		out[j++] = '\'';
+	for (i = 0; i < strlen(in); i++)
+	{
+		if (in[i] == '\'')
+		{
+			out[j++] = '\'';
+			out[j++] = '\'';
+		}
+		else
+		{
+			out[j++] = in[i];
+		}
+	}
+	if (addquote)
+		out[j++] = '\'';
+
+	return out;
+}
+
+static char *
+transform_data_expression(const char * remoteObjid, const char * colname)
+{
+	TransformExpressionHashEntry * entry = NULL;
+	TransformExpressionHashKey key = {0};
+	bool found = false;
+	char * res = NULL;
+
+	/*
+	 * return NULL immediately if objectMappingHash has not been initialized. Most
+	 * likely the connector does not have a rule file specified
+	 */
+	if (!transformExpressionHash)
+		return NULL;
+
+	if (!remoteObjid || !colname)
+		return NULL;
+
+	/*
+	 * expression lookup key consists of [remoteobjid].[colname] and remoteobjid consists of
+	 * [database].[schema].[table] or [database].[table]
+	 */
+	snprintf(key.extObjName, sizeof(key.extObjName), "%s.%s", remoteObjid, colname);
+	entry = (TransformExpressionHashEntry *) hash_search(transformExpressionHash, &key, HASH_FIND, &found);
+	if (!found)
+	{
+		/* no object mapping found, so no transformation done */
+		elog(DEBUG1, "no data transformation needed for %s", key.extObjName);
+	}
+	else
+	{
+		/* return the expression to run */
+		elog(DEBUG1, "%s needs data transformation with expression '%s'",
+				key.extObjName, entry->pgsqlTransExpress);
+		res = pstrdup(entry->pgsqlTransExpress);
+	}
+	return res;
 }
 
 static char *
@@ -687,6 +773,9 @@ destroyDBZDML(DBZ_DML * dmlinfo)
 
 		if (dmlinfo->schema)
 			pfree(dmlinfo->schema);
+
+		if (dmlinfo->remoteObjectId)
+			pfree(dmlinfo->remoteObjectId);
 
 		if (dmlinfo->mappedObjectId)
 			pfree(dmlinfo->mappedObjectId);
@@ -1694,10 +1783,11 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
  * as string and output a processed string based on type
  */
 static char *
-processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType conntype)
+processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObjectId)
 {
 	char * out = NULL;
 	char * in = colval->value;
+	char * transformExpression = NULL;
 
 	if (!in || strlen(in) == 0)
 		return NULL;
@@ -1833,40 +1923,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 		{
 			if (addquote)
 			{
-				size_t i = 0, j = 0;
-				size_t outlen = 0;
-
-				/* escape possible single quotes */
-				for (i = 0; i < strlen(in); i++)
-				{
-					if (in[i] == '\'')
-					{
-						/* single quote will be escaped so +2 in size */
-						outlen += 2;
-					}
-					else
-					{
-						outlen++;
-					}
-				}
-
-				/* 2 more to account for open and closing quotes */
-				out = (char *) palloc0(outlen + 2 + 1);
-
-				out[j++] = '\'';
-				for (i = 0; i < strlen(in); i++)
-				{
-					if (in[i] == '\'')
-					{
-						out[j++] = '\'';
-						out[j++] = '\'';
-					}
-					else
-					{
-						out[j++] = in[i];
-					}
-				}
-				out[j++] = '\'';
+				escapeSingleQuote(in, addquote);
 			}
 			else
 			{
@@ -2014,40 +2071,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 					 */
 					if (addquote)
 					{
-						size_t i = 0, j = 0;
-						size_t outlen = 0;
-
-						/* escape possible single quotes */
-						for (i = 0; i < strlen(in); i++)
-						{
-							if (in[i] == '\'')
-							{
-								/* single quote will be escaped so +2 in size */
-								outlen += 2;
-							}
-							else
-							{
-								outlen++;
-							}
-						}
-
-						/* 2 more to account for open and closing quotes */
-						out = (char *) palloc0(outlen + 2 + 1);
-
-						out[j++] = '\'';
-						for (i = 0; i < strlen(in); i++)
-						{
-							if (in[i] == '\'')
-							{
-								out[j++] = '\'';
-								out[j++] = '\'';
-							}
-							else
-							{
-								out[j++] = in[i];
-							}
-						}
-						out[j++] = '\'';
+						escapeSingleQuote(in, addquote);
 					}
 					else
 					{
@@ -2192,13 +2216,112 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			break;
 		}
 		case TIMETZOID:
+		/* todo: support more data types as needed */
 		default:
 		{
-			/* todo: support more */
-			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "unsupported data type %d", colval->datatype);
-			set_shm_connector_errmsg(myConnectorId, msg);
-			elog(ERROR, "%s", msg);
+			/*
+			 * control will come in here if a data type does not have any special
+			 * processing, such as geometry data type added by postgis extension.
+			 * We will treat them as text in their original form. todo: if data type
+			 * is number-oriented, and with addquote=true, it will produce the number
+			 * in quotes which may not be desirable.
+			 */
+			elog(DEBUG1,"no special handling for data type %d, treat it as text",
+					colval->datatype);
+
+			if (addquote)
+			{
+				escapeSingleQuote(in, addquote);
+			}
+			else
+			{
+				out = (char *) palloc0(strlen(in) + 1);
+				strlcpy(out, in, strlen(in) + 1);
+			}
+			break;
+		}
+	}
+
+	/*
+	 * after the data is prepared, we need to check if we need to transform the data
+	 * with a user-defined expression by looking up against transformExpressionHash.
+	 * Note, we have to use colval->remoteColumnName to look up because colval->name
+	 * may have been transformed to something else.
+	 */
+	transformExpression = transform_data_expression(remoteObjectId, colval->remoteColumnName);
+	if (transformExpression)
+	{
+		StringInfoData strinfo;
+		Datum jsonb_datum;
+		Jsonb *jb;
+		char * wkb = NULL, * srid = NULL;
+		char * transData = NULL;
+		char * escapedData = NULL;
+
+		elog(DEBUG1, "transforming remote column %s.%s's data '%s' with expression '%s'",
+				remoteObjectId, colval->remoteColumnName, out, transformExpression);
+
+		/*
+		 * data could be expressed in JSON to represent a geometry with
+		 * wkb and srid fields, so let's check if this is the case
+		 */
+		initStringInfo(&strinfo);
+
+		/*
+		 * assume json if it contains "wkb" todo: need a better way to check if data
+		 * is in JSON format without erroring out in the case it is not
+		 */
+		if (strstr(out, "\"wkb\""))
+		{
+			jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(out));
+			jb = DatumGetJsonbP(jsonb_datum);
+
+			getPathElementString(jb, "wkb", &strinfo, true);
+			if (!strcasecmp(strinfo.data, "null"))
+				wkb = pstrdup("0");
+			else
+				wkb = pstrdup(strinfo.data);
+
+			getPathElementString(jb, "srid", &strinfo, true);
+			if (!strcasecmp(strinfo.data, "null"))
+				srid = pstrdup("0");
+			else
+				srid = pstrdup(strinfo.data);
+
+			elog(DEBUG1,"wkb = %s, srid = %s", wkb, srid);
+
+			escapedData = escapeSingleQuote(out, false);
+			transData = ra_transformDataExpression(escapedData, wkb, srid, transformExpression);
+			if (transData)
+			{
+				elog(DEBUG1, "transformed remote column %s.%s's data '%s' to '%s' with expression '%s'",
+						remoteObjectId, colval->remoteColumnName, out, transData, transformExpression);
+
+				/* replace return value with transData */
+				pfree(out);
+				out = pstrdup(transData);
+				pfree(transData);
+				pfree(escapedData);
+			}
+			pfree(wkb);
+			pfree(srid);
+		}
+		else
+		{
+			/* regular data - no handling needed */
+			escapedData = escapeSingleQuote(out, false);
+			transData = ra_transformDataExpression(escapedData, NULL, NULL, transformExpression);
+			if (transData)
+			{
+				elog(DEBUG1, "transformed remote column %s.%s's data '%s' to '%s' with expression '%s'",
+						remoteObjectId, colval->remoteColumnName, out, transData, transformExpression);
+
+				/* replace return value with transData */
+				pfree(out);
+				out = pstrdup(transData);
+				pfree(transData);
+				pfree(escapedData);
+			}
 		}
 	}
 	return out;
@@ -2217,12 +2340,6 @@ list_sort_cmp(const ListCell *a, const ListCell *b)
 	return 0;
 }
 
-/*
- * todo: currently, this function converts DBZ DML to a DML query to be sent to
- * PostgreSQL's SPI for fast implementation. In the future, we can convert into
- * a string of tuples following PostgreSQL replication wire protocol and send this
- * stream directly to PostgreSQL's logical replication APIs to handle.
- */
 static PG_DML *
 convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 {
@@ -2258,7 +2375,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 				foreach(cell, dbzdml->columnValuesAfter)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
-					char * data = processDataByType(colval, true, type);
+					char * data = processDataByType(colval, true, dbzdml->remoteObjectId);
 
 					if (data != NULL)
 					{
@@ -2284,7 +2401,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval, false, type);
+					char * data = processDataByType(colval, false, dbzdml->remoteObjectId);
 
 					if (data != NULL)
 					{
@@ -2315,7 +2432,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval, true, type);
+					data = processDataByType(colval, true, dbzdml->remoteObjectId);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s", data);
@@ -2341,7 +2458,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval, false, type);
+					char * data = processDataByType(colval, false, dbzdml->remoteObjectId);
 
 					if (data != NULL)
 					{
@@ -2372,7 +2489,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval, true, type);
+					data = processDataByType(colval, true, dbzdml->remoteObjectId);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s,", data);
@@ -2394,7 +2511,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval, true, type);
+					data = processDataByType(colval, true, dbzdml->remoteObjectId);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s", data);
@@ -2423,7 +2540,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 					PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval_after, false, type);
+					char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId);
 
 					if (data != NULL)
 					{
@@ -2437,7 +2554,6 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					pgcolval_after->position = colval_after->position;
 					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
 
-					data = processDataByType(colval_before, false, type);
 
 					if (data != NULL)
 					{
@@ -2611,6 +2727,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	}
 	table = pstrdup(strinfo.data);
 	appendStringInfo(&objid, "%s", table);
+
+	dbzdml->remoteObjectId = pstrdup(objid.data);
 
 	dbzdml->mappedObjectId = transform_object_name(objid.data, "table");
 	if (dbzdml->mappedObjectId)
@@ -2901,6 +3019,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 						colval->value = pstrdup(value);
+						/* a copy of original column name for expression rule lookup at later stage */
+						colval->remoteColumnName = pstrdup(colval->name);
 
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
@@ -3071,6 +3191,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 						colval->value = pstrdup(value);
+						/* a copy of original column name for expression rule lookup at later stage */
+						colval->remoteColumnName = pstrdup(colval->name);
 
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
@@ -3253,6 +3375,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 							colval->name = pstrdup(key);
 							colval->value = pstrdup(value);
+							/* a copy of original column name for expression rule lookup at later stage */
+							colval->remoteColumnName = pstrdup(colval->name);
 
 							/* transform the column name if needed */
 							initStringInfo(&colNameObjId);
@@ -3514,10 +3638,14 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 	HTAB * rulehash = NULL;
 	DatatypeHashEntry hashentry;
 	DatatypeHashEntry * entrylookup;
+
 	HASHCTL	info;
 	int current_section = 0;
 	ObjMapHashEntry objmapentry;
 	ObjMapHashEntry * objmaplookup;
+
+	TransformExpressionHashEntry expressentry;
+	TransformExpressionHashEntry * expressentrylookup;
 
 	if (!file)
 	{
@@ -3563,6 +3691,16 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 
 	/* initialize object mapping hash common to all connector types */
 	objectMappingHash = hash_create("object mapping hash",
+									 256,
+									 &info,
+									 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	info.keysize = sizeof(TransformExpressionHashKey);
+	info.entrysize = sizeof(TransformExpressionHashEntry);
+	info.hcxt = CurrentMemoryContext;
+
+	/* initialize transform expression hash common to all connector types */
+	transformExpressionHash = hash_create("transform expression hash",
 									 256,
 									 &info,
 									 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
@@ -3636,14 +3774,19 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 			{
 				/* this part of logic only parses the array named "translation_rules" */
 				elog(DEBUG1, "begin array %s", array ? array : "NULL");
-				if (!strcasecmp(array, "translation_rules"))
+				if (!strcasecmp(array, "transform_datatype_rules"))
 				{
-					current_section = RULEFILE_TRANSLATION_RULE;
+					current_section = RULEFILE_DATATYPE_TRANSFORM;
 					inarray = true;
 				}
-				else if(!strcasecmp(array, "object_mapping_rules"))
+				else if(!strcasecmp(array, "transform_objectname_rules"))
 				{
-					current_section = RULEFILE_OBJECT_MAPPING;
+					current_section = RULEFILE_OBJECTNAME_TRANSFORM;
+					inarray = true;
+				}
+				else if(!strcasecmp(array, "transform_expression_rules"))
+				{
+					current_section = RULEFILE_EXPRESSION_TRANSFORM;
 					inarray = true;
 				}
 				else
@@ -3724,10 +3867,12 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 
 				/* beginning of a json array element. Initialize hashkey */
 				elog(DEBUG1, "begin object - %d", current_section);
-				if (current_section == RULEFILE_TRANSLATION_RULE)
+				if (current_section == RULEFILE_DATATYPE_TRANSFORM)
 					memset(&hashentry, 0, sizeof(hashentry));
-				else
+				else if (current_section == RULEFILE_OBJECTNAME_TRANSFORM)
 					memset(&objmapentry, 0, sizeof(objmapentry));
+				else	/* RULEFILE_EXPRESSION_TRANSFORM */
+					memset(&expressentry, 0, sizeof(expressentry));
 				break;
 			}
 			case WJB_END_OBJECT:
@@ -3735,9 +3880,9 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 				elog(DEBUG1, "end object - %d", current_section);
 				if (inarray)
 				{
-					if (current_section == RULEFILE_TRANSLATION_RULE)
+					if (current_section == RULEFILE_DATATYPE_TRANSFORM)
 					{
-						elog(DEBUG1," data type mapping: from %s(%d) to %s(%d)",
+						elog(DEBUG1,"data type mapping: from %s(%d) to %s(%d)",
 								hashentry.key.extTypeName, hashentry.key.autoIncremented,
 								hashentry.pgsqlTypeName, hashentry.pgsqlTypeLength);
 
@@ -3745,44 +3890,25 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 								&(hashentry.key), HASH_ENTER, &found);
 
 						/* found or not, just update or insert it */
-						if (!found)
-						{
-							entrylookup->key.autoIncremented = hashentry.key.autoIncremented;
-							memset(entrylookup->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
-							strncpy(entrylookup->key.extTypeName,
-									hashentry.key.extTypeName,
-									strlen(hashentry.key.extTypeName));
+						entrylookup->key.autoIncremented = hashentry.key.autoIncremented;
+						memset(entrylookup->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+						strncpy(entrylookup->key.extTypeName,
+								hashentry.key.extTypeName,
+								strlen(hashentry.key.extTypeName));
 
-							entrylookup->pgsqlTypeLength = hashentry.pgsqlTypeLength;
-							memset(entrylookup->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
-							strncpy(entrylookup->pgsqlTypeName,
-									hashentry.pgsqlTypeName,
-									strlen(hashentry.pgsqlTypeName));
+						entrylookup->pgsqlTypeLength = hashentry.pgsqlTypeLength;
+						memset(entrylookup->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+						strncpy(entrylookup->pgsqlTypeName,
+								hashentry.pgsqlTypeName,
+								strlen(hashentry.pgsqlTypeName));
 
-							elog(WARNING, "Inserted mapping '%s' <-> '%s'", entrylookup->key.extTypeName,
-									entrylookup->pgsqlTypeName);
-						}
-						else
-						{
-							entrylookup->key.autoIncremented = hashentry.key.autoIncremented;
-							memset(entrylookup->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
-							strncpy(entrylookup->key.extTypeName,
-									hashentry.key.extTypeName,
-									strlen(hashentry.key.extTypeName));
+						elog(DEBUG1, "Inserted / updated data type mapping '%s' <-> '%s'", entrylookup->key.extTypeName,
+								entrylookup->pgsqlTypeName);
 
-							entrylookup->pgsqlTypeLength = hashentry.pgsqlTypeLength;
-							memset(entrylookup->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
-							strncpy(entrylookup->pgsqlTypeName,
-									hashentry.pgsqlTypeName,
-									strlen(hashentry.pgsqlTypeName));
-
-							elog(WARNING, "Updated mapping '%s' <-> '%s'", entrylookup->key.extTypeName,
-									entrylookup->pgsqlTypeName);
-						}
 					}
-					else	/* RULEFILE_OBJECT_MAPPING */
+					else if (current_section == RULEFILE_OBJECTNAME_TRANSFORM)
 					{
-						elog(DEBUG1," object mapping: from %s(%s)to %s",
+						elog(DEBUG1,"object mapping: from %s(%s)to %s",
 								objmapentry.key.extObjName, objmapentry.key.extObjType,
 								objmapentry.pgsqlObjName);
 
@@ -3790,36 +3916,43 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 								&(objmapentry.key), HASH_ENTER, &found);
 
 						/* found or not, just update or insert it */
-						if (!found)
-						{
-							memset(objmaplookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
-							strncpy(objmaplookup->key.extObjName,
-									objmapentry.key.extObjName,
-									strlen(objmapentry.key.extObjName));
+						memset(objmaplookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+						strncpy(objmaplookup->key.extObjName,
+								objmapentry.key.extObjName,
+								strlen(objmapentry.key.extObjName));
 
-							memset(objmaplookup->pgsqlObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
-							strncpy(objmaplookup->pgsqlObjName,
-									objmapentry.pgsqlObjName,
-									strlen(objmapentry.pgsqlObjName));
+						memset(objmaplookup->pgsqlObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+						strncpy(objmaplookup->pgsqlObjName,
+								objmapentry.pgsqlObjName,
+								strlen(objmapentry.pgsqlObjName));
 
-							elog(WARNING, "Inserted mapping '%s(%s)' <-> '%s'", objmaplookup->key.extObjName,
-									objmapentry.key.extObjType, objmaplookup->pgsqlObjName);
-						}
-						else
-						{
-							memset(objmaplookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
-							strncpy(objmaplookup->key.extObjName,
-									objmapentry.key.extObjName,
-									strlen(objmapentry.key.extObjName));
+						elog(DEBUG1, "Inserted / updated object mapping '%s(%s)' <-> '%s'", objmaplookup->key.extObjName,
+								objmapentry.key.extObjType, objmaplookup->pgsqlObjName);
 
-							memset(objmaplookup->pgsqlObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
-							strncpy(objmaplookup->pgsqlObjName,
-									objmapentry.pgsqlObjName,
-									strlen(objmapentry.pgsqlObjName));
+					}
+					else	/* RULEFILE_EXPRESSION_TRANSFORM */
+					{
+						elog(DEBUG1,"transform source object '%s' with expression '%s'",
+								expressentry.key.extObjName,
+								expressentry.pgsqlTransExpress);
 
-							elog(WARNING, "Updated mapping '%s(%s)' <-> '%s'", objmaplookup->key.extObjName,
-									objmapentry.key.extObjType, objmaplookup->pgsqlObjName);
-						}
+						expressentrylookup = (TransformExpressionHashEntry *) hash_search(transformExpressionHash,
+								&(expressentry.key), HASH_ENTER, &found);
+
+						/* found or not, just update or insert it */
+						memset(expressentrylookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+						strncpy(expressentrylookup->key.extObjName,
+								expressentry.key.extObjName,
+								strlen(expressentry.key.extObjName));
+
+						memset(expressentrylookup->pgsqlTransExpress, 0, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+						strncpy(expressentrylookup->pgsqlTransExpress,
+								expressentry.pgsqlTransExpress,
+								strlen(expressentry.pgsqlTransExpress));
+
+						elog(DEBUG1, "Inserted / updated transform expression mapping '%s' <-> '%s'",
+								expressentrylookup->key.extObjName,
+								expressentrylookup->pgsqlTransExpress);
 					}
 				}
 				break;
@@ -3836,7 +3969,7 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 		/* check if we have a key - value pair */
 		if (key != NULL && value != NULL)
 		{
-			if (current_section == RULEFILE_TRANSLATION_RULE)
+			if (current_section == RULEFILE_DATATYPE_TRANSFORM)
 			{
 				if (!strcmp(key, "translate_from"))
 				{
@@ -3865,7 +3998,7 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 					hashentry.pgsqlTypeLength = atoi(value);
 				}
 			}
-			else	/* RULEFILE_OBJECT_MAPPING */
+			else if (current_section == RULEFILE_OBJECTNAME_TRANSFORM)
 			{
 				if (!strcmp(key, "object_type"))
 				{
@@ -3881,6 +4014,19 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 				{
 					elog(DEBUG1, "consuming %s = %s", key, value);
 					strncpy(objmapentry.pgsqlObjName, value, strlen(value));
+				}
+			}
+			else	/* RULEFILE_EXPRESSION_TRANSFORM */
+			{
+				if (!strcmp(key, "transform_from"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					strncpy(expressentry.key.extObjName, value, strlen(value));
+				}
+				if (!strcmp(key, "transform_expression"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					strncpy(expressentry.pgsqlTransExpress, value, strlen(value));
 				}
 			}
 
