@@ -1526,52 +1526,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		Relation rel;
 		TupleDesc tupdesc;
 
-		/*
-		 * For ALTER, we must obtain the current schema in PostgreSQL and identify
-		 * which column is the new column added. We will first check if table exists
-		 * and then add its column to a temporary hash table that we can compare
-		 * with the new column list.
-		 */
-		for (i = 0; i < strlen(db); i++)
-			db[i] = (char) pg_tolower((unsigned char) db[i]);
-
-		for (i = 0; i < strlen(table); i++)
-			table[i] = (char) pg_tolower((unsigned char) table[i]);
-
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
-		schemaoid = get_namespace_oid(db, false);
-		if (!OidIsValid(schemaoid))
-		{
-			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", db);
-			set_shm_connector_errmsg(myConnectorId, msg);
-
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
-		}
-
-		tableoid = get_relname_relid(table, schemaoid);
-		if (!OidIsValid(tableoid))
-		{
-			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", table);
-			set_shm_connector_errmsg(myConnectorId, msg);
-
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
-		}
-
-		elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", db, table, tableoid);
-
-		rel = table_open(tableoid, NoLock);
-		tupdesc = RelationGetDescr(rel);
-		table_close(rel, NoLock);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
-
 		mappedObjName = transform_object_name(dbzddl->id, "table");
 		if (mappedObjName)
 		{
@@ -1602,23 +1556,13 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			else if (!schema && table)
 			{
 				/* table stays as table but no schema */
+				schema = pstrdup("public");
 				appendStringInfo(&strinfo, "ALTER TABLE %s ", table);
 			}
 		}
 		else
 		{
-			/*
-			 * no object name mapping found. Transform it using default methods below:
-			 *
-			 * database.table:
-			 * 	- database becomes schema in PG
-			 * 	- table name stays
-			 *
-			 * database.schema.table:
-			 * 	- database becomes schema in PG
-			 * 	- schema is ignored
-			 * 	- table name stays
-			 */
+			/* by default, remote's db is mapped to schema in pg */
 			splitIdString(dbzddl->id, &db, &schema, &table, true);
 
 			/* database and table must be present. schema is optional */
@@ -1633,8 +1577,57 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				/* trigger pg's error shutdown routine */
 				elog(ERROR, "%s", msg);
 			}
-			appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", db, table);
+
+			for (i = 0; i < strlen(db); i++)
+				db[i] = (char) pg_tolower((unsigned char) db[i]);
+
+			for (i = 0; i < strlen(table); i++)
+				table[i] = (char) pg_tolower((unsigned char) table[i]);
+
+			/* make schema points to db */
+			schema = db;
+			appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", schema, table);
 		}
+
+		/*
+		 * For ALTER, we must obtain the current schema in PostgreSQL and identify
+		 * which column is the new column added. We will first check if table exists
+		 * and then add its column to a temporary hash table that we can compare
+		 * with the new column list.
+		 */
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+
+		schemaoid = get_namespace_oid(schema, false);
+		if (!OidIsValid(schemaoid))
+		{
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", schema);
+			set_shm_connector_errmsg(myConnectorId, msg);
+
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
+		}
+
+		tableoid = get_relname_relid(table, schemaoid);
+		if (!OidIsValid(tableoid))
+		{
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", table);
+			set_shm_connector_errmsg(myConnectorId, msg);
+
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
+		}
+
+		elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", schema, table, tableoid);
+
+		rel = table_open(tableoid, NoLock);
+		tupdesc = RelationGetDescr(rel);
+		table_close(rel, NoLock);
+
+		PopActiveSnapshot();
+		CommitTransactionCommand();
 
 		if (list_length(dbzddl->columns) > tupdesc->natts)
 		{
