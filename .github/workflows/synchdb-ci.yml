@@ -1,0 +1,122 @@
+name: SynchDB CI
+
+on:
+  push:
+    branches: [ main, synchdb-devel ]
+  pull_request:
+    branches: [ main, synchdb-devel ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up JDK 22
+      uses: actions/setup-java@v2
+      with:
+        java-version: '22'
+        distribution: 'oracle'
+    
+    - name: Set up Maven
+      uses: stCarolas/setup-maven@v4.5
+      with:
+        maven-version: 3.9.8
+    
+    - name: Install PostgreSQL build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libxslt-dev libssl-dev libxml2-utils xsltproc ccache
+    
+    - name: Clone and build PostgreSQL
+      run: |
+        git clone https://github.com/postgres/postgres.git
+        cd postgres
+        git checkout REL_16_3
+        ./configure
+        make
+        sudo make install
+        cd contrib
+        make
+        sudo make install
+    
+    - name: Clone SynchDB
+      run: |
+        cd postgres/contrib
+        git clone https://github.com/Hornetlabs/synchdb.git -b synchdb-devel
+    
+    - name: Build and install Debezium Runner Engine
+      run: |
+        cd postgres/contrib/synchdb
+        make build_dbz
+        sudo make install_dbz
+    
+    - name: Build and install SynchDB PostgreSQL Extension
+      run: |
+        cd postgres/contrib/synchdb
+        make
+        sudo make install
+    
+    - name: Configure linker
+      run: |
+        JAVA_PATH=$(which java)
+        JDK_HOME_PATH=$(readlink -f ${JAVA_PATH} | sed 's:/bin/java::')
+        JDK_LIB_PATH=${JDK_HOME_PATH}/lib
+        echo $JDK_LIB_PATH | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        echo $JDK_LIB_PATH/server | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        sudo ldconfig
+    
+    - name: Set up test environment
+      run: |
+        sudo apt-get install -y docker-compose
+        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml up -d
+        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml up -d
+
+    - name: Prepare MySQL test database
+      run: |
+        sudo apt-get install -y mysql-client
+        mysql -h 127.0.0.1 -u root -ppassword << EOF
+        GRANT replication client on *.* to mysqluser;
+        GRANT replication slave  on *.* to mysqluser;
+        GRANT RELOAD ON *.* TO 'mysqluser'@'%';
+        FLUSH PRIVILEGES;
+        EOF
+
+    - name: Prepare SQL Server test database
+      run: |
+        docker ps
+        id=$(docker ps | grep sqlserver | awk '{print $1}')
+        docker cp postgres/contrib/synchdb/inventory.sql $id:/
+        docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -i /inventory.sql
+        docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
+
+    - name: Check installation
+      run: |
+        ldd postgres/contrib/synchdb/synchdb.so
+
+    - name: Initialize and start PostgreSQL
+      run: |
+        mkdir synchdbtest
+        initdb -D synchdbtest
+        pg_ctl -D synchdbtest -l logfile start
+        createdb test_db
+
+    - name: Install SynchDB extension
+      run: |
+        psql -d test_db -c "CREATE EXTENSION synchdb CASCADE;"
+
+    - name: Create connection information and start connectors
+      run: |
+        psql -d test_db << EOF
+        SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql', '');
+        SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver', '');
+        SELECT synchdb_start_engine_bgw('mysqlconn');
+        SELECT synchdb_start_engine_bgw('sqlserverconn');
+        EOF
+
+    - name: View connector states
+      run: |
+        psql -d test_db -c "SELECT * FROM synchdb_state_view;"
+
+    # Add any additional tests or checks here
