@@ -43,7 +43,7 @@ jobs:
         make
         sudo make install
     
-   - name: Clone SynchDB
+    - name: Clone SynchDB
       run: |
         cd postgres/contrib
         git clone https://x-access-token:${GITHUB_TOKEN}@github.com/Hornetlabs/synchdb.git -b synchdb-devel
