@@ -157,6 +157,20 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 
 #define SIZE_SQLSERVER_DATATYPE_MAPPING (sizeof(sqlserver_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
+/* this helper function counts the number of active (not dropped) columns */
+static int
+count_active_columns(TupleDesc tupdesc)
+{
+	int count = 0, i = 0;
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+		if (!attr->attisdropped)
+			count++;
+	}
+	return count;
+}
+
 static void
 bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char *output_string)
 {
@@ -1101,7 +1115,7 @@ splitIdString(char * id, char ** db, char ** schema, char ** table, bool usedb)
 
 /* Function to transform DDL columns */
 static void
-transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData * strinfo)
+transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntype, bool datatypeonly, StringInfoData * strinfo)
 {
 	/* transform the column name if needed */
 	char * mappedColumnName = NULL;
@@ -1177,7 +1191,10 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					/* no mapping found, so no transformation done */
 					elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
 							key.extTypeName, key.autoIncremented);
-					appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", col->typeName);
+					else
+						appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
 				}
 				else
 				{
@@ -1185,7 +1202,10 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
 							key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
 							entry->pgsqlTypeLength);
-					appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+					else
+						appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
 
 					if (entry->pgsqlTypeLength != -1)
 						col->length = entry->pgsqlTypeLength;
@@ -1197,7 +1217,11 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
 						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
 						entry->pgsqlTypeLength);
-				appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+				if (datatypeonly)
+					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+				else
+					appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
 
 				if (entry->pgsqlTypeLength != -1)
 					col->length = entry->pgsqlTypeLength;
@@ -1261,7 +1285,10 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					/* no mapping found, so no transformation done */
 					elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
 							key.extTypeName, key.autoIncremented);
-					appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", col->typeName);
+					else
+						appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
 				}
 				else
 				{
@@ -1269,7 +1296,10 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
 							key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
 							entry->pgsqlTypeLength);
-					appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+					else
+						appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
 
 					if (entry->pgsqlTypeLength != -1)
 						col->length = entry->pgsqlTypeLength;
@@ -1281,7 +1311,11 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
 						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
 						entry->pgsqlTypeLength);
-				appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+				if (datatypeonly)
+					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+				else
+					appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
 
 				if (entry->pgsqlTypeLength != -1)
 					col->length = entry->pgsqlTypeLength;
@@ -1314,6 +1348,133 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 
 	if (colNameObjId.data)
 		pfree(colNameObjId.data);
+}
+
+static char *
+composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols, TupleDesc tupdesc)
+{
+	ListCell * cell;
+	int attnum = 1;
+	StringInfoData colNameObjId;
+	StringInfoData strinfo;
+	char * mappedColumnName = NULL;
+	char * ret = NULL;
+	bool found = false;
+
+	initStringInfo(&colNameObjId);
+	initStringInfo(&strinfo);
+
+	foreach(cell, dbzcols)
+	{
+		DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
+
+		resetStringInfo(&colNameObjId);
+		appendStringInfo(&colNameObjId, "%s.%s", objid, col->name);
+		mappedColumnName = transform_object_name(colNameObjId.data, "column");
+
+		/* use the name as it came if no column name mapping found */
+		if (!mappedColumnName)
+			mappedColumnName = pstrdup(col->name);
+
+		found = false;
+		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+
+			/* skip dropped columns */
+			if (attr->attisdropped)
+				continue;
+
+			/* found a matching column, build the alter column clauses */
+			if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+			{
+				found = true;
+
+				/* check data type */
+				appendStringInfo(&strinfo, "ALTER COLUMN %s SET DATA TYPE",
+						mappedColumnName);
+				transformDDLColumns(objid, col, type, true, &strinfo);
+				if (col->length > 0 && col->scale > 0)
+				{
+					appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
+				}
+
+				/* if a only length if specified, add it. For example VARCHAR(30)*/
+				if (col->length > 0 && col->scale == 0)
+				{
+					/* make sure it does not exceed postgresql allowed maximum */
+					if (col->length > 10485760)
+						col->length = 10485760;
+					appendStringInfo(&strinfo, "(%d) ", col->length);
+				}
+
+				/*
+				 * todo: for complex data type transformation, postgresql requires
+				 * the user to specify a function to cast existing values to the new
+				 * data type via the USING clause. This is needed for INT -> TEXT,
+				 * INT -> DATE or NUMERIC -> VARCHAR. We do not support USING now as
+				 * we do not know what function the user wants to use for casting the
+				 * values. Perhaps we can include these cast functions in the rule file
+				 * as well, but for now this is not supported and PostgreSQL may complain
+				 * if we attempt to do complex data type changes.
+				 */
+				appendStringInfo(&strinfo, ", ");
+
+				if (col->defaultValueExpression)
+				{
+					/* add default value */
+					appendStringInfo(&strinfo, "ALTER COLUMN %s SET DEFAULT %s",
+							mappedColumnName, col->defaultValueExpression);
+				}
+				else
+				{
+					/* remove default value */
+					appendStringInfo(&strinfo, "ALTER COLUMN %s DROP DEFAULT",
+							mappedColumnName);
+				}
+
+				/* check column rename */
+
+				appendStringInfo(&strinfo, ", ");
+
+				/* check if nullable or not nullable */
+				if (!col->optional)
+				{
+					appendStringInfo(&strinfo, "ALTER COLUMN %s SET NOT NULL",
+							mappedColumnName);
+				}
+				else
+				{
+					appendStringInfo(&strinfo, "ALTER COLUMN %s DROP NOT NULL",
+							mappedColumnName);
+				}
+
+				appendStringInfo(&strinfo, ",");
+			}
+		}
+		if (!found)
+		{
+			/*
+			 * todo: support renamed columns? The challenge is to find out which column
+			 * got renamed on remote site because dbz did not tell us the old column name
+			 * that was renamed. Only the new name is given to us to figure it out :(
+			 */
+			elog(WARNING, "column %s missing in PostgreSQL, indicating a renamed column?! -"
+					"Not supported now",
+					mappedColumnName);
+		}
+	}
+
+	/* remove extra "," */
+	strinfo.data[strinfo.len - 1] = '\0';
+	strinfo.len = strinfo.len - 1;
+
+	ret = pstrdup(strinfo.data);
+
+	if(strinfo.data)
+		pfree(strinfo.data);
+
+	return ret;
 }
 
 /* Function to convert Debezium DDL to PostgreSQL DDL */
@@ -1412,7 +1573,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		{
 			DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
 
-			transformDDLColumns(dbzddl->id, col, type, &strinfo);
+			transformDDLColumns(dbzddl->id, col, type, false, &strinfo);
 
 			/* if both length and scale are specified, add them. For example DECIMAL(10,2) */
 			if (col->length > 0 && col->scale > 0)
@@ -1629,7 +1790,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		PopActiveSnapshot();
 		CommitTransactionCommand();
 
-		if (list_length(dbzddl->columns) > tupdesc->natts)
+		if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
 		{
 			elog(WARNING, "adding new column");
 			altered = false;
@@ -1651,7 +1812,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					altered = true;
 					appendStringInfo(&strinfo, "ADD COLUMN");
 
-					transformDDLColumns(dbzddl->id, col, type, &strinfo);
+					transformDDLColumns(dbzddl->id, col, type, false, &strinfo);
 
 					/* if both length and scale are specified, add them. For example DECIMAL(10,2) */
 					if (col->length > 0 && col->scale > 0)
@@ -1711,7 +1872,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				return NULL;
 			}
 		}
-		else if (list_length(dbzddl->columns) < tupdesc->natts)
+		else if (list_length(dbzddl->columns) < count_active_columns(tupdesc))
 		{
 			elog(WARNING, "dropping old column");
 			altered = false;
@@ -1755,10 +1916,20 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		}
 		else
 		{
-			/* todo: need to check every column attribute to identify the alteration */
-			elog(WARNING, "no new columns added or dropped - not supported yet");
-			pfree(pgddl);
-			return NULL;
+			char * alterclause = NULL;
+			alterclause = composeAlterColumnClauses(dbzddl->id, type, dbzddl->columns, tupdesc);
+			if (alterclause)
+			{
+				appendStringInfo(&strinfo, "%s", alterclause);
+				elog(WARNING, "alter clause: %s", strinfo.data);
+				pfree(alterclause);
+			}
+			else
+			{
+				elog(WARNING, "no column altered");
+				pfree(pgddl);
+				return NULL;
+			}
 		}
 	}
 
