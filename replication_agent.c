@@ -35,6 +35,68 @@ extern bool synchdb_dml_use_spi;
 extern uint64 SPI_processed;
 extern int myConnectorId;
 
+static char *
+swap_tokens(const char * expression, const char * data, const char * wkb, const char * srid)
+{
+	char		filledexpression[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
+	char	   *dp;
+	char	   *endp;
+	const char *sp;
+
+	/*
+	 * construct the expression to run
+	 */
+	dp = filledexpression;
+	endp = filledexpression + SYNCHDB_TRANSFORM_EXPRESSION_SIZE - 1;
+	*endp = '\0';
+
+	for (sp = expression; *sp; sp++)
+	{
+		if (*sp == '%')
+		{
+			switch (sp[1])
+			{
+				case 'd':
+					/* %d: data */
+					sp++;
+					strlcpy(dp, data == NULL ? "null" : data, endp - dp);
+					dp += strlen(dp);
+					break;
+				case 'w':
+					/* %w: well-known-binary for geometry, aka wkb */
+					sp++;
+					strlcpy(dp, wkb == NULL ? "null" : wkb, endp - dp);
+					dp += strlen(dp);
+					break;
+				case 's':
+					/* %s: srid for geometry */
+					sp++;
+					strlcpy(dp, srid == NULL ? "null" : srid, endp - dp);
+					dp += strlen(dp);
+					break;
+				case '%':
+					/* convert %% to a single % */
+					sp++;
+					if (dp < endp)
+						*dp++ = *sp;
+					break;
+				default:
+					/* otherwise treat the % as not special */
+					if (dp < endp)
+						*dp++ = *sp;
+					break;
+			}
+		}
+		else
+		{
+			if (dp < endp)
+				*dp++ = *sp;
+		}
+	}
+	*dp = '\0';
+
+	return pstrdup(filledexpression);
+}
 /*
  * This function performs SPI_execute SELECT and returns an array of
  * Datums that represent each column, Caller is expected to know exactly
@@ -50,8 +112,16 @@ spi_execute_select_one(const char * query, int * numcols)
 	Datum colval;
 	Datum * rowval;
 	bool isnull;
+	bool skiptx = false;
 
-	if (!IsTransactionOrTransactionBlock())
+	/*
+	 * if we are already in transaction or transaction block, we can skip
+	 * the transaction and snapshot acquisition code below
+	 */
+	if (IsTransactionOrTransactionBlock())
+		skiptx = true;
+
+	if (!skiptx)
 	{
 		/* Start a transaction and set up a snapshot */
 		StartTransactionCommand();
@@ -104,7 +174,7 @@ spi_execute_select_one(const char * query, int * numcols)
 	/* Close the connection */
 	SPI_finish();
 
-	if (!IsTransactionOrTransactionBlock())
+	if (!skiptx)
 	{
 		/* Commit the transaction */
 		PopActiveSnapshot();
@@ -793,8 +863,16 @@ ra_listConnInfoNames(char ** out, int * numout)
 	char * query = "SELECT name FROM synchdb_conninfo WHERE isactive = true";
 	char * value;
 	MemoryContext oldcontext;
+	bool skiptx = false;
 
-	if (!IsTransactionOrTransactionBlock())
+	/*
+	 * if we are already in transaction or transaction block, we can skip
+	 * the transaction and snapshot acquisition code below
+	 */
+	if (IsTransactionOrTransactionBlock())
+		skiptx = true;
+
+	if (!skiptx)
 	{
 		/* Start a transaction and set up a snapshot */
 		StartTransactionCommand();
@@ -838,11 +916,94 @@ ra_listConnInfoNames(char ** out, int * numout)
 	/* Close the connection */
 	SPI_finish();
 
-	if (!IsTransactionOrTransactionBlock())
+	if (!skiptx)
 	{
 		/* Commit the transaction */
 		PopActiveSnapshot();
 		CommitTransactionCommand();
 	}
 	return 0;
+}
+
+char *
+ra_transformDataExpression(char * data, char * wkb, char * srid, char * expression)
+{
+	char * filledExpression = NULL;
+	int ret = -1, i = 0;
+	char * value = NULL;
+	MemoryContext oldcontext;
+	StringInfoData strinfo;
+	bool skiptx = false;
+
+	/*
+	 * if we are already in transaction or transaction block, we can skip
+	 * the transaction and snapshot acquisition code below
+	 */
+	if (IsTransactionOrTransactionBlock())
+		skiptx = true;
+
+	initStringInfo(&strinfo);
+
+	filledExpression = swap_tokens(expression, data, wkb, srid);
+	appendStringInfo(&strinfo, "SELECT %s;", filledExpression);
+
+	elog(DEBUG1,"expression to execute = '%s'", strinfo.data);
+
+	/* run the filled expression with SPI and obtain result as string */
+	if (!skiptx)
+	{
+		/* Start a transaction and set up a snapshot */
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+	{
+		elog(WARNING, "transform data expression - SPI_connect failed");
+		goto end;
+	}
+
+	ret = SPI_execute(strinfo.data, true, 1);
+	switch (ret)
+	{
+		case SPI_OK_SELECT:
+		{
+			break;
+		}
+		default:
+		{
+			SPI_finish();
+			goto end;
+		}
+	}
+	if (SPI_processed == 0)
+	{
+		SPI_finish();
+		elog(WARNING, "data transform expression results in no value");
+		goto end;
+	}
+
+	/* only 1 record at most is expected */
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	value = pstrdup(SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1));
+	MemoryContextSwitchTo(oldcontext);
+
+	/* Close the connection */
+	SPI_finish();
+
+	if (!skiptx)
+	{
+		/* Commit the transaction */
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+
+end:
+	if (filledExpression)
+		pfree(filledExpression);
+
+	if (strinfo.data)
+		pfree(strinfo.data);
+
+	return value;
 }

@@ -23,6 +23,11 @@
 #include "replication_agent.h"
 #include "synchdb.h"
 
+/* constants */
+#define RULEFILE_DATATYPE_TRANSFORM 1
+#define RULEFILE_OBJECTNAME_TRANSFORM 2
+#define RULEFILE_EXPRESSION_TRANSFORM 3
+
 /* structure to hold possible time representations in DBZ engine */
 typedef enum _timeRep
 {
@@ -73,6 +78,7 @@ typedef struct
 typedef struct dbz_dml_column_value
 {
 	char * name;
+	char * remoteColumnName;	/* original column name from remote server */
 	char * value;	/* expressed as string as taken from json */
 	Oid datatype;	/* data type Oid as defined by PostgreSQL */
 	int position;	/* position of this column value, start from 1 */
@@ -85,8 +91,10 @@ typedef struct dbz_dml_column_value
 typedef struct dbz_dml
 {
 	char op;
-	char * db;
+	char * schema;
 	char * table;
+	char * remoteObjectId;		/* db.schema.table or db.table on remote side */
+	char * mappedObjectId;		/* schema.table, or just table on PG side */
 	Oid tableoid;
 	List * columnValuesBefore;	/* list of DBZ_DML_COLUMN_VALUE */
 	List * columnValuesAfter;	/* list of DBZ_DML_COLUMN_VALUE */
@@ -104,6 +112,29 @@ typedef struct datatypeHashEntry
 	char pgsqlTypeName[SYNCHDB_DATATYPE_NAME_SIZE];
 	int pgsqlTypeLength;
 } DatatypeHashEntry;
+
+typedef struct objMapHashKey
+{
+	char extObjName[SYNCHDB_OBJ_NAME_SIZE];
+	char extObjType[SYNCHDB_OBJ_TYPE_SIZE];
+} ObjMapHashKey;
+
+typedef struct objMapHashEntry
+{
+	ObjMapHashKey key;
+	char pgsqlObjName[SYNCHDB_OBJ_NAME_SIZE];
+} ObjMapHashEntry;
+
+typedef struct transformExpressionHashKey
+{
+	char extObjName[SYNCHDB_OBJ_NAME_SIZE];
+} TransformExpressionHashKey;
+
+typedef struct transformExpressionHashEntry
+{
+	TransformExpressionHashKey key;
+	char pgsqlTransExpress[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
+} TransformExpressionHashEntry;
 
 /* Function prototypes */
 int fc_processDBZChangeEvent(const char * event);

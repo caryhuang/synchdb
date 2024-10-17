@@ -45,6 +45,9 @@
 extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
 
+static HTAB * objectMappingHash;
+static HTAB * transformExpressionHash;
+
 static HTAB * mysqlDatatypeHash;
 static HTAB * sqlserverDatatypeHash;
 
@@ -153,6 +156,20 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 };
 
 #define SIZE_SQLSERVER_DATATYPE_MAPPING (sizeof(sqlserver_defaultTypeMappings) / sizeof(DatatypeHashEntry))
+
+/* this helper function counts the number of active (not dropped) columns */
+static int
+count_active_columns(TupleDesc tupdesc)
+{
+	int count = 0, i = 0;
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+		if (!attr->attisdropped)
+			count++;
+	}
+	return count;
+}
 
 static void
 bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char *output_string)
@@ -318,13 +335,133 @@ remove_double_quotes(StringInfoData * str)
 	str->len = newlen;
 }
 
+static char *
+escapeSingleQuote(const char * in, bool addquote)
+{
+	int i = 0, j = 0, outlen = 0;
+	char * out = NULL;
+
+	/* escape possible single quotes */
+	for (i = 0; i < strlen(in); i++)
+	{
+		if (in[i] == '\'')
+		{
+			/* single quote will be escaped so +2 in size */
+			outlen += 2;
+		}
+		else
+		{
+			outlen++;
+		}
+	}
+
+	if (addquote)
+		/* 2 more to account for open and closing quotes */
+		out = (char *) palloc0(outlen + 1 + 2);
+	else
+		out = (char *) palloc0(outlen + 1);
+
+	if (addquote)
+		out[j++] = '\'';
+	for (i = 0; i < strlen(in); i++)
+	{
+		if (in[i] == '\'')
+		{
+			out[j++] = '\'';
+			out[j++] = '\'';
+		}
+		else
+		{
+			out[j++] = in[i];
+		}
+	}
+	if (addquote)
+		out[j++] = '\'';
+
+	return out;
+}
+
+static char *
+transform_data_expression(const char * remoteObjid, const char * colname)
+{
+	TransformExpressionHashEntry * entry = NULL;
+	TransformExpressionHashKey key = {0};
+	bool found = false;
+	char * res = NULL;
+
+	/*
+	 * return NULL immediately if objectMappingHash has not been initialized. Most
+	 * likely the connector does not have a rule file specified
+	 */
+	if (!transformExpressionHash)
+		return NULL;
+
+	if (!remoteObjid || !colname)
+		return NULL;
+
+	/*
+	 * expression lookup key consists of [remoteobjid].[colname] and remoteobjid consists of
+	 * [database].[schema].[table] or [database].[table]
+	 */
+	snprintf(key.extObjName, sizeof(key.extObjName), "%s.%s", remoteObjid, colname);
+	entry = (TransformExpressionHashEntry *) hash_search(transformExpressionHash, &key, HASH_FIND, &found);
+	if (!found)
+	{
+		/* no object mapping found, so no transformation done */
+		elog(DEBUG1, "no data transformation needed for %s", key.extObjName);
+	}
+	else
+	{
+		/* return the expression to run */
+		elog(DEBUG1, "%s needs data transformation with expression '%s'",
+				key.extObjName, entry->pgsqlTransExpress);
+		res = pstrdup(entry->pgsqlTransExpress);
+	}
+	return res;
+}
+
+static char *
+transform_object_name(const char * objid, const char * objtype)
+{
+	ObjMapHashEntry * entry = NULL;
+	ObjMapHashKey key = {0};
+	bool found = false;
+	char * res = NULL;
+
+	/*
+	 * return NULL immediately if objectMappingHash has not been initialized. Most
+	 * likely the connector does not have a rule file specified
+	 */
+	if (!objectMappingHash)
+		return NULL;
+
+	if (!objid || !objtype)
+		return NULL;
+
+	strncpy(key.extObjName, objid, strlen(objid));
+	strncpy(key.extObjType, objtype, strlen(objtype));
+	entry = (ObjMapHashEntry *) hash_search(objectMappingHash, &key, HASH_FIND, &found);
+	if (!found)
+	{
+		/* no object mapping found, so no transformation done */
+		elog(DEBUG1, "no object name transformation done for %s", objid);
+	}
+	else
+	{
+		/* return the mapped object mapped value */
+		elog(DEBUG1, "transform %s to %s", key.extObjName, entry->pgsqlObjName);
+		res = pstrdup(entry->pgsqlObjName);
+	}
+	return res;
+}
+
 /*
  * this function constructs primary key clauses based on jsonin. jsonin
  * is expected to be a json array with string element, for example:
  * ["col1","col2"]
  */
 static void
-populate_primary_keys(StringInfoData * strinfo, const char * jsonin, bool alter)
+populate_primary_keys(StringInfoData * strinfo, const char * id, const char * jsonin, bool alter)
 {
 	Datum jsonb_datum;
 	Jsonb * jb;
@@ -362,8 +499,28 @@ populate_primary_keys(StringInfoData * strinfo, const char * jsonin, bool alter)
 				switch(v.type)
 				{
 					case jbvString:
+						char * mappedColumnName = NULL;
+						StringInfoData colNameObjId;
+
 						value = pnstrdup(v.val.string.val, v.val.string.len);
 						elog(DEBUG1, "primary key column: %s", value);
+
+						/* transform the column name if needed */
+						initStringInfo(&colNameObjId);
+
+						/* express a column name in fully qualified id */
+						appendStringInfo(&colNameObjId, "%s.%s", id, value);
+						mappedColumnName = transform_object_name(colNameObjId.data, "column");
+						if (mappedColumnName)
+						{
+							/* replace the column name with looked up value here */
+							pfree(value);
+							value = pstrdup(mappedColumnName);
+						}
+
+						if(colNameObjId.data)
+							pfree(colNameObjId.data);
+
 						if (alter)
 						{
 							if (isfirst)
@@ -628,8 +785,14 @@ destroyDBZDML(DBZ_DML * dmlinfo)
 		if (dmlinfo->table)
 			pfree(dmlinfo->table);
 
-		if (dmlinfo->db)
-			pfree(dmlinfo->db);
+		if (dmlinfo->schema)
+			pfree(dmlinfo->schema);
+
+		if (dmlinfo->remoteObjectId)
+			pfree(dmlinfo->remoteObjectId);
+
+		if (dmlinfo->mappedObjectId)
+			pfree(dmlinfo->mappedObjectId);
 
 		if (dmlinfo->columnValuesBefore)
 			list_free_deep(dmlinfo->columnValuesBefore);
@@ -894,12 +1057,12 @@ parseDBZDDL(Jsonb * jb)
 /*
  * Function to split ID string into database, schema, and table.
  *
- * This function transforms id format 'database.schema.table' to
- * 'database.schema_table'. If the id format is 'database.table'
- * then no transformation is applied.
+ * This function breaks down a fully qualified id string (database.
+ * schema.table, schema.table, or database.table) into individual
+ * components.
  */
 static void
-splitIdString(char * id, char ** db, char ** schema, char ** table)
+splitIdString(char * id, char ** db, char ** schema, char ** table, bool usedb)
 {
 	int dotCount = 0;
 	char *p = NULL;
@@ -912,24 +1075,67 @@ splitIdString(char * id, char ** db, char ** schema, char ** table)
 
 	if (dotCount == 1)
 	{
-		/* assume to be: database.table */
-		*db = strtok(id, ".");
-		*schema = NULL;
-		*table = strtok(NULL, ".");
+		if (usedb)
+		{
+			/* treat it as database.table */
+			*db = strtok(id, ".");
+			*schema = NULL;
+			*table = strtok(NULL, ".");
+		}
+		else
+		{
+			/* treat it as schema.table */
+			*db = NULL;
+			*schema = strtok(id, ".");
+			*table = strtok(NULL, ".");
+		}
 	}
-	else
+	else if (dotCount == 2)
 	{
-		/* assume to be: database.schema.table */
+		/* treat it as database.schema.table */
 		*db = strtok(id, ".");
 		*schema = strtok(NULL, ".");
 		*table = strtok(NULL, ".");
+	}
+	else if (dotCount == 0)
+	{
+		/* treat it as table */
+		*db = NULL;
+		*schema = NULL;
+		*table = id;
+	}
+	else
+	{
+		elog(WARNING, "invalid ID string format %s", id);
+		*db = NULL;
+		*schema = NULL;
+		*table = NULL;
 	}
 }
 
 /* Function to transform DDL columns */
 static void
-transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData * strinfo)
+transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntype, bool datatypeonly, StringInfoData * strinfo)
 {
+	/* transform the column name if needed */
+	char * mappedColumnName = NULL;
+	StringInfoData colNameObjId;
+
+	initStringInfo(&colNameObjId);
+	/* express a column name in fully qualified id */
+	appendStringInfo(&colNameObjId, "%s.%s", id, col->name);
+
+	mappedColumnName = transform_object_name(colNameObjId.data, "column");
+
+	if (mappedColumnName)
+	{
+		elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+				colNameObjId.data, mappedColumnName);
+		/* replace the column name with looked up value here */
+		pfree(col->name);
+		col->name = pstrdup(mappedColumnName);
+	}
+
 	switch (conntype)
 	{
 		case TYPE_MYSQL:
@@ -938,26 +1144,72 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 			DatatypeHashKey key = {0};
 			bool found = 0;
 
-			/* special lookup case: BIT with length 1 */
+			/*
+			 * check if there is a translation rule applied specifically for this column using
+			 * key format: [column object id].[data type]
+			 */
 			if (!strcasecmp(col->typeName, "BIT") && col->length == 1)
 			{
+				/* special lookup case: BIT with length 1 */
 				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
-						col->typeName, col->length);
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s(%d)",
+						colNameObjId.data, col->typeName, col->length);
 			}
 			else
 			{
+				/* all other cases - no special handling */
 				key.autoIncremented = col->autoIncremented;
-				strcpy(key.extTypeName, col->typeName);
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s",
+						colNameObjId.data, col->typeName);
 			}
 
 			entry = (DatatypeHashEntry *) hash_search(mysqlDatatypeHash, &key, HASH_FIND, &found);
 			if (!found)
 			{
-				/* no mapping found, so no transformation done */
-				elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
-						key.extTypeName, key.autoIncremented);
-				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+				/*
+				 * no mapping found, so no data type translation for this particular column.
+				 * Now, check if there is a global data type translation rule
+				 */
+				memset(&key, 0, sizeof(DatatypeHashKey));
+				if (!strcasecmp(col->typeName, "BIT") && col->length == 1)
+				{
+					/* special lookup case: BIT with length 1 */
+					key.autoIncremented = col->autoIncremented;
+					snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
+							col->typeName, col->length);
+				}
+				else
+				{
+					/* all other cases - no special handling */
+					key.autoIncremented = col->autoIncremented;
+					snprintf(key.extTypeName, sizeof(key.extTypeName), "%s",
+							col->typeName);
+				}
+				entry = (DatatypeHashEntry *) hash_search(mysqlDatatypeHash, &key, HASH_FIND, &found);
+				if (!found)
+				{
+					/* no mapping found, so no transformation done */
+					elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
+							key.extTypeName, key.autoIncremented);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", col->typeName);
+					else
+						appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+				}
+				else
+				{
+					/* use the mapped values and sizes */
+					elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
+							key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+							entry->pgsqlTypeLength);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+					else
+						appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+					if (entry->pgsqlTypeLength != -1)
+						col->length = entry->pgsqlTypeLength;
+				}
 			}
 			else
 			{
@@ -965,7 +1217,11 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 				elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
 						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
 						entry->pgsqlTypeLength);
-				appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+				if (datatypeonly)
+					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+				else
+					appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
 
 				if (entry->pgsqlTypeLength != -1)
 					col->length = entry->pgsqlTypeLength;
@@ -982,25 +1238,72 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 			DatatypeHashKey key = {0};
 			bool found = 0;
 
-			/* special lookup case: BIT with length 1 */
+			/*
+			 * check if there is a translation rule applied specifically for this column using
+			 * key format: [column object id].[data type]
+			 */
 			if (!strcasecmp(col->typeName, "bit") && col->length == 1)
 			{
+				/* special lookup case: BIT with length 1 */
 				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
-						col->typeName, col->length);
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s(%d)",
+						colNameObjId.data, col->typeName, col->length);
 			}
 			else
 			{
+				/* all other cases - no special handling */
 				key.autoIncremented = col->autoIncremented;
-				strcpy(key.extTypeName, col->typeName);
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s",
+						colNameObjId.data, col->typeName);
 			}
+
 			entry = (DatatypeHashEntry *) hash_search(sqlserverDatatypeHash, &key, HASH_FIND, &found);
 			if (!found)
 			{
-				/* no mapping found, so no transformation done */
-				elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
-						key.extTypeName, key.autoIncremented);
-				appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+				/*
+				 * no mapping found, so no data type translation for this particular column.
+				 * Now, check if there is a global data type translation rule
+				 */
+				memset(&key, 0, sizeof(DatatypeHashKey));
+				if (!strcasecmp(col->typeName, "bit") && col->length == 1)
+				{
+					/* special lookup case: BIT with length 1 */
+					key.autoIncremented = col->autoIncremented;
+					snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
+							col->typeName, col->length);
+				}
+				else
+				{
+					/* all other cases - no special handling */
+					key.autoIncremented = col->autoIncremented;
+					snprintf(key.extTypeName, sizeof(key.extTypeName), "%s",
+							col->typeName);
+				}
+				entry = (DatatypeHashEntry *) hash_search(sqlserverDatatypeHash, &key, HASH_FIND, &found);
+				if (!found)
+				{
+					/* no mapping found, so no transformation done */
+					elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
+							key.extTypeName, key.autoIncremented);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", col->typeName);
+					else
+						appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+				}
+				else
+				{
+					/* use the mapped values and sizes */
+					elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
+							key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+							entry->pgsqlTypeLength);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+					else
+						appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+					if (entry->pgsqlTypeLength != -1)
+						col->length = entry->pgsqlTypeLength;
+				}
 			}
 			else
 			{
@@ -1008,26 +1311,30 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 				elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
 						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
 						entry->pgsqlTypeLength);
-				appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+				if (datatypeonly)
+					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+				else
+					appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
 
 				if (entry->pgsqlTypeLength != -1)
 					col->length = entry->pgsqlTypeLength;
+			}
 
-				/*
-				 * special handling for sqlserver: the scale parameter for timestamp,
-				 * and time date types are sent as "scale" not as "length" as in
-				 * mysql case. So we need to use the scale value here
-				 */
-				if (col->scale > 0 && (find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMP") ||
-						find_exact_string_match(entry->pgsqlTypeName, "TIME") ||
-						find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMPTZ")))
-				{
-					/* postgresql can only support up to 6 */
-					if (col->scale > 6)
-						appendStringInfo(strinfo, "(6) ");
-					else
-						appendStringInfo(strinfo, "(%d) ", col->scale);
-				}
+			/*
+			 * special handling for sqlserver: the scale parameter for timestamp,
+			 * and time date types are sent as "scale" not as "length" as in
+			 * mysql case. So we need to use the scale value here
+			 */
+			if (col->scale > 0 && (find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMP") ||
+					find_exact_string_match(entry->pgsqlTypeName, "TIME") ||
+					find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMPTZ")))
+			{
+				/* postgresql can only support up to 6 */
+				if (col->scale > 6)
+					appendStringInfo(strinfo, "(6) ");
+				else
+					appendStringInfo(strinfo, "(%d) ", col->scale);
 			}
 			break;
 		}
@@ -1038,6 +1345,136 @@ transformDDLColumns(DBZ_DDL_COLUMN * col, ConnectorType conntype, StringInfoData
 			break;
 		}
 	}
+
+	if (colNameObjId.data)
+		pfree(colNameObjId.data);
+}
+
+static char *
+composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols, TupleDesc tupdesc)
+{
+	ListCell * cell;
+	int attnum = 1;
+	StringInfoData colNameObjId;
+	StringInfoData strinfo;
+	char * mappedColumnName = NULL;
+	char * ret = NULL;
+	bool found = false;
+
+	initStringInfo(&colNameObjId);
+	initStringInfo(&strinfo);
+
+	foreach(cell, dbzcols)
+	{
+		DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
+
+		resetStringInfo(&colNameObjId);
+		appendStringInfo(&colNameObjId, "%s.%s", objid, col->name);
+		mappedColumnName = transform_object_name(colNameObjId.data, "column");
+
+		/* use the name as it came if no column name mapping found */
+		if (!mappedColumnName)
+			mappedColumnName = pstrdup(col->name);
+
+		found = false;
+		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+
+			/* skip dropped columns */
+			if (attr->attisdropped)
+				continue;
+
+			/* found a matching column, build the alter column clauses */
+			if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+			{
+				found = true;
+
+				/* check data type */
+				appendStringInfo(&strinfo, "ALTER COLUMN %s SET DATA TYPE",
+						mappedColumnName);
+				transformDDLColumns(objid, col, type, true, &strinfo);
+				if (col->length > 0 && col->scale > 0)
+				{
+					appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
+				}
+
+				/* if a only length if specified, add it. For example VARCHAR(30)*/
+				if (col->length > 0 && col->scale == 0)
+				{
+					/* make sure it does not exceed postgresql allowed maximum */
+					if (col->length > 10485760)
+						col->length = 10485760;
+					appendStringInfo(&strinfo, "(%d) ", col->length);
+				}
+
+				/*
+				 * todo: for complex data type transformation, postgresql requires
+				 * the user to specify a function to cast existing values to the new
+				 * data type via the USING clause. This is needed for INT -> TEXT,
+				 * INT -> DATE or NUMERIC -> VARCHAR. We do not support USING now as
+				 * we do not know what function the user wants to use for casting the
+				 * values. Perhaps we can include these cast functions in the rule file
+				 * as well, but for now this is not supported and PostgreSQL may complain
+				 * if we attempt to do complex data type changes.
+				 */
+				appendStringInfo(&strinfo, ", ");
+
+				if (col->defaultValueExpression)
+				{
+					/* add default value */
+					appendStringInfo(&strinfo, "ALTER COLUMN %s SET DEFAULT %s",
+							mappedColumnName, col->defaultValueExpression);
+				}
+				else
+				{
+					/* remove default value */
+					appendStringInfo(&strinfo, "ALTER COLUMN %s DROP DEFAULT",
+							mappedColumnName);
+				}
+
+				/* check column rename */
+
+				appendStringInfo(&strinfo, ", ");
+
+				/* check if nullable or not nullable */
+				if (!col->optional)
+				{
+					appendStringInfo(&strinfo, "ALTER COLUMN %s SET NOT NULL",
+							mappedColumnName);
+				}
+				else
+				{
+					appendStringInfo(&strinfo, "ALTER COLUMN %s DROP NOT NULL",
+							mappedColumnName);
+				}
+
+				appendStringInfo(&strinfo, ",");
+			}
+		}
+		if (!found)
+		{
+			/*
+			 * todo: support renamed columns? The challenge is to find out which column
+			 * got renamed on remote site because dbz did not tell us the old column name
+			 * that was renamed. Only the new name is given to us to figure it out :(
+			 */
+			elog(WARNING, "column %s missing in PostgreSQL, indicating a renamed column?! -"
+					"Not supported now",
+					mappedColumnName);
+		}
+	}
+
+	/* remove extra "," */
+	strinfo.data[strinfo.len - 1] = '\0';
+	strinfo.len = strinfo.len - 1;
+
+	ret = pstrdup(strinfo.data);
+
+	if(strinfo.data)
+		pfree(strinfo.data);
+
+	return ret;
 }
 
 /* Function to convert Debezium DDL to PostgreSQL DDL */
@@ -1047,53 +1484,96 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 	PG_DDL * pgddl = (PG_DDL*) palloc0(sizeof(PG_DDL));
 	ListCell * cell;
 	StringInfoData strinfo;
+	char * mappedObjName = NULL;
+	char * db = NULL, * schema = NULL, * table = NULL;
 
 	initStringInfo(&strinfo);
 
 	if (!strcmp(dbzddl->type, "CREATE"))
 	{
-		/* todo: dbzddl->id is can be exprssed in either database.table or
-		 * database.schema.table formats. Right now we will transform like this:
-		 *
-		 * database.table:
-		 * 	- database becomes schema in PG
-		 * 	- table name stays
-		 *
-		 * database.schema.table:
-		 * 	- database becomes schema in PG
-		 * 	- schema is ignored
-		 * 	- table name stays
-		 *
-		 * todo: We should make this behavior configurable in the future
-		 */
-		char * db = NULL, * schema = NULL, * table = NULL;
-
-		splitIdString(dbzddl->id, &db, &schema, &table);
-
-		/* database and table must be present. schema is optional */
-		if (!db || !table)
+		mappedObjName = transform_object_name(dbzddl->id, "table");
+		if (mappedObjName)
 		{
-			/* save the error */
-			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "malformed id field in dbz change event: %s",
-					dbzddl->id);
-			set_shm_connector_errmsg(myConnectorId, msg);
+			/*
+			 * we will used the transformed object name here, but first, we will check if
+			 * transformed name is valid. It should be expressed in one of the forms below:
+			 * - schema.table
+			 * - table
+			 *
+			 * then we check if schema is spplied. If yes, we need to add the CREATE SCHEMA
+			 * clause as well.
+			 */
+			splitIdString(mappedObjName, &db, &schema, &table, false);
+			if (!table)
+			{
+				/* save the error */
+				char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+				snprintf(msg, SYNCHDB_ERRMSG_SIZE, "transformed object ID is invalid: %s",
+						mappedObjName);
+				set_shm_connector_errmsg(myConnectorId, msg);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+				/* trigger pg's error shutdown routine */
+				elog(ERROR, "%s", msg);
+			}
+
+			if (schema && table)
+			{
+				/* include create schema clause */
+				appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; ", schema);
+
+				/* table stays as table under the schema */
+				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s.%s (", schema, table);
+			}
+			else if (!schema && table)
+			{
+				/* table stays as table but no schema */
+				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s (", table);
+			}
 		}
+		else
+		{
+			/*
+			 * no object name mapping found. Transform it using default methods below:
+			 *
+			 * database.table:
+			 * 	- database becomes schema in PG
+			 * 	- table name stays
+			 *
+			 * database.schema.table:
+			 * 	- database becomes schema in PG
+			 * 	- schema is ignored
+			 * 	- table name stays
+			 */
+			char * idcopy = pstrdup(dbzddl->id);
+			splitIdString(idcopy, &db, &schema, &table, true);
 
-		/* database mapped to schema */
-		appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; ", db);
+			/* database and table must be present. schema is optional */
+			if (!db || !table)
+			{
+				/* save the error */
+				char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+				snprintf(msg, SYNCHDB_ERRMSG_SIZE, "malformed id field in dbz change event: %s",
+						dbzddl->id);
+				set_shm_connector_errmsg(myConnectorId, msg);
 
-		/* table stays as table, schema ignored */
-		appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s.%s (", db, table);
+				/* trigger pg's error shutdown routine */
+				elog(ERROR, "%s", msg);
+			}
+
+			/* database mapped to schema */
+			appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; ", db);
+
+			/* table stays as table, schema ignored */
+			appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s.%s (", db, table);
+
+			pfree(idcopy);
+		}
 
 		foreach(cell, dbzddl->columns)
 		{
 			DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
 
-			transformDDLColumns(col, type, &strinfo);
+			transformDDLColumns(dbzddl->id, col, type, false, &strinfo);
 
 			/* if both length and scale are specified, add them. For example DECIMAL(10,2) */
 			if (col->length > 0 && col->scale > 0)
@@ -1140,52 +1620,134 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		 * finally, declare primary keys if any. iterate dbzddl->primaryKeyColumnNames
 		 * and build into primary key(x, y, z) clauses. todo
 		 */
-		populate_primary_keys(&strinfo, dbzddl->primaryKeyColumnNames, false);
+		populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, false);
 
 		appendStringInfo(&strinfo, ");");
 	}
 	else if (!strcmp(dbzddl->type, "DROP"))
 	{
-		appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s;", dbzddl->id);
+		mappedObjName = transform_object_name(dbzddl->id, "table");
+		if (mappedObjName)
+		{
+			/*
+			 * we will used the transformed object name here, but first, we will check if
+			 * transformed name is valid. It should be expressed in one of the forms below:
+			 * - schema.table
+			 * - table
+			 */
+			splitIdString(mappedObjName, &db, &schema, &table, false);
+			if (!table)
+			{
+				/* save the error */
+				char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+				snprintf(msg, SYNCHDB_ERRMSG_SIZE, "transformed object ID is invalid: %s",
+						mappedObjName);
+				set_shm_connector_errmsg(myConnectorId, msg);
+
+				/* trigger pg's error shutdown routine */
+				elog(ERROR, "%s", msg);
+			}
+
+			if (schema && table)
+			{
+				/* table stays as table under the schema */
+				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s.%s;", schema, table);
+			}
+			else if (!schema && table)
+			{
+				/* table stays as table but no schema */
+				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s;", table);
+			}
+		}
+		else
+		{
+			splitIdString(dbzddl->id, &db, &schema, &table, true);
+
+			/* database and table must be present. schema is optional */
+			if (!db || !table)
+			{
+				/* save the error */
+				char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+				snprintf(msg, SYNCHDB_ERRMSG_SIZE, "malformed id field in dbz change event: %s",
+						dbzddl->id);
+				set_shm_connector_errmsg(myConnectorId, msg);
+
+				/* trigger pg's error shutdown routine */
+				elog(ERROR, "%s", msg);
+			}
+			appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s.%s;", db, table);
+		}
 	}
 	else if (!strcmp(dbzddl->type, "ALTER"))
 	{
-		/* todo: dbzddl->id is can be exprssed in either database.table or
-		 * database.schema.table formats. Right now we will transform like this:
-		 *
-		 * database.table:
-		 * 	- database becomes schema in PG
-		 * 	- table name stays
-		 *
-		 * database.schema.table:
-		 * 	- database becomes schema in PG
-		 * 	- schema is ignored
-		 * 	- table name stays
-		 *
-		 * todo: We should make this behavior configurable in the future
-		 */
-		char * db = NULL, * schema = NULL, * table = NULL;
 		int i = 0, attnum;
 		Oid schemaoid = -1;
 		Oid tableoid = -1;
 		bool found = false, altered = false;
-
 		Relation rel;
 		TupleDesc tupdesc;
 
-		splitIdString(dbzddl->id, &db, &schema, &table);
-
-		/* database and table must be present. schema is optional */
-		if (!db || !table)
+		mappedObjName = transform_object_name(dbzddl->id, "table");
+		if (mappedObjName)
 		{
-			/* save the error */
-			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "malformed id field in dbz change event: %s",
-					dbzddl->id);
-			set_shm_connector_errmsg(myConnectorId, msg);
+			/*
+			 * we will used the transformed object name here, but first, we will check if
+			 * transformed name is valid. It should be expressed in one of the forms below:
+			 * - schema.table
+			 * - table
+			 */
+			splitIdString(mappedObjName, &db, &schema, &table, false);
+			if (!table)
+			{
+				/* save the error */
+				char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+				snprintf(msg, SYNCHDB_ERRMSG_SIZE, "transformed object ID is invalid: %s",
+						mappedObjName);
+				set_shm_connector_errmsg(myConnectorId, msg);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+				/* trigger pg's error shutdown routine */
+				elog(ERROR, "%s", msg);
+			}
+
+			if (schema && table)
+			{
+				/* table stays as table under the schema */
+				appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", schema, table);
+			}
+			else if (!schema && table)
+			{
+				/* table stays as table but no schema */
+				schema = pstrdup("public");
+				appendStringInfo(&strinfo, "ALTER TABLE %s ", table);
+			}
+		}
+		else
+		{
+			/* by default, remote's db is mapped to schema in pg */
+			splitIdString(dbzddl->id, &db, &schema, &table, true);
+
+			/* database and table must be present. schema is optional */
+			if (!db || !table)
+			{
+				/* save the error */
+				char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+				snprintf(msg, SYNCHDB_ERRMSG_SIZE, "malformed id field in dbz change event: %s",
+						dbzddl->id);
+				set_shm_connector_errmsg(myConnectorId, msg);
+
+				/* trigger pg's error shutdown routine */
+				elog(ERROR, "%s", msg);
+			}
+
+			for (i = 0; i < strlen(db); i++)
+				db[i] = (char) pg_tolower((unsigned char) db[i]);
+
+			for (i = 0; i < strlen(table); i++)
+				table[i] = (char) pg_tolower((unsigned char) table[i]);
+
+			/* make schema points to db */
+			schema = db;
+			appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", schema, table);
 		}
 
 		/*
@@ -1194,20 +1756,14 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		 * and then add its column to a temporary hash table that we can compare
 		 * with the new column list.
 		 */
-		for (i = 0; i < strlen(db); i++)
-			db[i] = (char) pg_tolower((unsigned char) db[i]);
-
-		for (i = 0; i < strlen(table); i++)
-			table[i] = (char) pg_tolower((unsigned char) table[i]);
-
 		StartTransactionCommand();
 		PushActiveSnapshot(GetTransactionSnapshot());
 
-		schemaoid = get_namespace_oid(db, false);
+		schemaoid = get_namespace_oid(schema, false);
 		if (!OidIsValid(schemaoid))
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", db);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", schema);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
 			/* trigger pg's error shutdown routine */
@@ -1225,9 +1781,8 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			elog(ERROR, "%s", msg);
 		}
 
-		elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", db, table, tableoid);
+		elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", schema, table, tableoid);
 
-		/* put PostgreSQL table column names into pgsqlColNameList */
 		rel = table_open(tableoid, NoLock);
 		tupdesc = RelationGetDescr(rel);
 		table_close(rel, NoLock);
@@ -1235,9 +1790,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		PopActiveSnapshot();
 		CommitTransactionCommand();
 
-		appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", db, table);
-
-		if (list_length(dbzddl->columns) > tupdesc->natts)
+		if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
 		{
 			elog(WARNING, "adding new column");
 			altered = false;
@@ -1259,7 +1812,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					altered = true;
 					appendStringInfo(&strinfo, "ADD COLUMN");
 
-					transformDDLColumns(col, type, &strinfo);
+					transformDDLColumns(dbzddl->id, col, type, false, &strinfo);
 
 					/* if both length and scale are specified, add them. For example DECIMAL(10,2) */
 					if (col->length > 0 && col->scale > 0)
@@ -1310,7 +1863,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				 * finally, declare primary keys if any. iterate dbzddl->primaryKeyColumnNames
 				 * and build into primary key(x, y, z) clauses. todo
 				 */
-				populate_primary_keys(&strinfo, dbzddl->primaryKeyColumnNames, true);
+				populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
 			}
 			else
 			{
@@ -1319,7 +1872,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				return NULL;
 			}
 		}
-		else
+		else if (list_length(dbzddl->columns) < count_active_columns(tupdesc))
 		{
 			elog(WARNING, "dropping old column");
 			altered = false;
@@ -1361,6 +1914,23 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				return NULL;
 			}
 		}
+		else
+		{
+			char * alterclause = NULL;
+			alterclause = composeAlterColumnClauses(dbzddl->id, type, dbzddl->columns, tupdesc);
+			if (alterclause)
+			{
+				appendStringInfo(&strinfo, "%s", alterclause);
+				elog(WARNING, "alter clause: %s", strinfo.data);
+				pfree(alterclause);
+			}
+			else
+			{
+				elog(WARNING, "no column altered");
+				pfree(pgddl);
+				return NULL;
+			}
+		}
 	}
 
 	pgddl->ddlquery = pstrdup(strinfo.data);
@@ -1377,10 +1947,11 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
  * as string and output a processed string based on type
  */
 static char *
-processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType conntype)
+processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObjectId)
 {
 	char * out = NULL;
 	char * in = colval->value;
+	char * transformExpression = NULL;
 
 	if (!in || strlen(in) == 0)
 		return NULL;
@@ -1516,40 +2087,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 		{
 			if (addquote)
 			{
-				size_t i = 0, j = 0;
-				size_t outlen = 0;
-
-				/* escape possible single quotes */
-				for (i = 0; i < strlen(in); i++)
-				{
-					if (in[i] == '\'')
-					{
-						/* single quote will be escaped so +2 in size */
-						outlen += 2;
-					}
-					else
-					{
-						outlen++;
-					}
-				}
-
-				/* 2 more to account for open and closing quotes */
-				out = (char *) palloc0(outlen + 2 + 1);
-
-				out[j++] = '\'';
-				for (i = 0; i < strlen(in); i++)
-				{
-					if (in[i] == '\'')
-					{
-						out[j++] = '\'';
-						out[j++] = '\'';
-					}
-					else
-					{
-						out[j++] = in[i];
-					}
-				}
-				out[j++] = '\'';
+				escapeSingleQuote(in, addquote);
 			}
 			else
 			{
@@ -1697,40 +2235,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 					 */
 					if (addquote)
 					{
-						size_t i = 0, j = 0;
-						size_t outlen = 0;
-
-						/* escape possible single quotes */
-						for (i = 0; i < strlen(in); i++)
-						{
-							if (in[i] == '\'')
-							{
-								/* single quote will be escaped so +2 in size */
-								outlen += 2;
-							}
-							else
-							{
-								outlen++;
-							}
-						}
-
-						/* 2 more to account for open and closing quotes */
-						out = (char *) palloc0(outlen + 2 + 1);
-
-						out[j++] = '\'';
-						for (i = 0; i < strlen(in); i++)
-						{
-							if (in[i] == '\'')
-							{
-								out[j++] = '\'';
-								out[j++] = '\'';
-							}
-							else
-							{
-								out[j++] = in[i];
-							}
-						}
-						out[j++] = '\'';
+						escapeSingleQuote(in, addquote);
 					}
 					else
 					{
@@ -1875,13 +2380,112 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, ConnectorType co
 			break;
 		}
 		case TIMETZOID:
+		/* todo: support more data types as needed */
 		default:
 		{
-			/* todo: support more */
-			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "unsupported data type %d", colval->datatype);
-			set_shm_connector_errmsg(myConnectorId, msg);
-			elog(ERROR, "%s", msg);
+			/*
+			 * control will come in here if a data type does not have any special
+			 * processing, such as geometry data type added by postgis extension.
+			 * We will treat them as text in their original form. todo: if data type
+			 * is number-oriented, and with addquote=true, it will produce the number
+			 * in quotes which may not be desirable.
+			 */
+			elog(DEBUG1,"no special handling for data type %d, treat it as text",
+					colval->datatype);
+
+			if (addquote)
+			{
+				escapeSingleQuote(in, addquote);
+			}
+			else
+			{
+				out = (char *) palloc0(strlen(in) + 1);
+				strlcpy(out, in, strlen(in) + 1);
+			}
+			break;
+		}
+	}
+
+	/*
+	 * after the data is prepared, we need to check if we need to transform the data
+	 * with a user-defined expression by looking up against transformExpressionHash.
+	 * Note, we have to use colval->remoteColumnName to look up because colval->name
+	 * may have been transformed to something else.
+	 */
+	transformExpression = transform_data_expression(remoteObjectId, colval->remoteColumnName);
+	if (transformExpression)
+	{
+		StringInfoData strinfo;
+		Datum jsonb_datum;
+		Jsonb *jb;
+		char * wkb = NULL, * srid = NULL;
+		char * transData = NULL;
+		char * escapedData = NULL;
+
+		elog(DEBUG1, "transforming remote column %s.%s's data '%s' with expression '%s'",
+				remoteObjectId, colval->remoteColumnName, out, transformExpression);
+
+		/*
+		 * data could be expressed in JSON to represent a geometry with
+		 * wkb and srid fields, so let's check if this is the case
+		 */
+		initStringInfo(&strinfo);
+
+		/*
+		 * assume json if it contains "wkb" todo: need a better way to check if data
+		 * is in JSON format without erroring out in the case it is not
+		 */
+		if (strstr(out, "\"wkb\""))
+		{
+			jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(out));
+			jb = DatumGetJsonbP(jsonb_datum);
+
+			getPathElementString(jb, "wkb", &strinfo, true);
+			if (!strcasecmp(strinfo.data, "null"))
+				wkb = pstrdup("0");
+			else
+				wkb = pstrdup(strinfo.data);
+
+			getPathElementString(jb, "srid", &strinfo, true);
+			if (!strcasecmp(strinfo.data, "null"))
+				srid = pstrdup("0");
+			else
+				srid = pstrdup(strinfo.data);
+
+			elog(DEBUG1,"wkb = %s, srid = %s", wkb, srid);
+
+			escapedData = escapeSingleQuote(out, false);
+			transData = ra_transformDataExpression(escapedData, wkb, srid, transformExpression);
+			if (transData)
+			{
+				elog(DEBUG1, "transformed remote column %s.%s's data '%s' to '%s' with expression '%s'",
+						remoteObjectId, colval->remoteColumnName, out, transData, transformExpression);
+
+				/* replace return value with transData */
+				pfree(out);
+				out = pstrdup(transData);
+				pfree(transData);
+				pfree(escapedData);
+			}
+			pfree(wkb);
+			pfree(srid);
+		}
+		else
+		{
+			/* regular data - no handling needed */
+			escapedData = escapeSingleQuote(out, false);
+			transData = ra_transformDataExpression(escapedData, NULL, NULL, transformExpression);
+			if (transData)
+			{
+				elog(DEBUG1, "transformed remote column %s.%s's data '%s' to '%s' with expression '%s'",
+						remoteObjectId, colval->remoteColumnName, out, transData, transformExpression);
+
+				/* replace return value with transData */
+				pfree(out);
+				out = pstrdup(transData);
+				pfree(transData);
+				pfree(escapedData);
+			}
 		}
 	}
 	return out;
@@ -1900,12 +2504,6 @@ list_sort_cmp(const ListCell *a, const ListCell *b)
 	return 0;
 }
 
-/*
- * todo: currently, this function converts DBZ DML to a DML query to be sent to
- * PostgreSQL's SPI for fast implementation. In the future, we can convert into
- * a string of tuples following PostgreSQL replication wire protocol and send this
- * stream directly to PostgreSQL's logical replication APIs to handle.
- */
 static PG_DML *
 convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 {
@@ -1928,7 +2526,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 			if (synchdb_dml_use_spi)
 			{
 				/* --- Convert to use SPI to handler DML --- */
-				appendStringInfo(&strinfo, "INSERT INTO %s.%s(", dbzdml->db, dbzdml->table);
+				appendStringInfo(&strinfo, "INSERT INTO %s(", dbzdml->mappedObjectId);
 				foreach(cell, dbzdml->columnValuesAfter)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
@@ -1941,7 +2539,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 				foreach(cell, dbzdml->columnValuesAfter)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
-					char * data = processDataByType(colval, true, type);
+					char * data = processDataByType(colval, true, dbzdml->remoteObjectId);
 
 					if (data != NULL)
 					{
@@ -1967,7 +2565,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval, false, type);
+					char * data = processDataByType(colval, false, dbzdml->remoteObjectId);
 
 					if (data != NULL)
 					{
@@ -1991,14 +2589,14 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 			if (synchdb_dml_use_spi)
 			{
 				/* --- Convert to use SPI to handler DML --- */
-				appendStringInfo(&strinfo, "DELETE FROM %s.%s WHERE ", dbzdml->db, dbzdml->table);
+				appendStringInfo(&strinfo, "DELETE FROM %s WHERE ", dbzdml->mappedObjectId);
 				foreach(cell, dbzdml->columnValuesBefore)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval, true, type);
+					data = processDataByType(colval, true, dbzdml->remoteObjectId);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s", data);
@@ -2024,7 +2622,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval, false, type);
+					char * data = processDataByType(colval, false, dbzdml->remoteObjectId);
 
 					if (data != NULL)
 					{
@@ -2048,14 +2646,14 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 			if (synchdb_dml_use_spi)
 			{
 				/* --- Convert to use SPI to handler DML --- */
-				appendStringInfo(&strinfo, "UPDATE %s.%s SET ", dbzdml->db, dbzdml->table);
+				appendStringInfo(&strinfo, "UPDATE %s SET ", dbzdml->mappedObjectId);
 				foreach(cell, dbzdml->columnValuesAfter)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval, true, type);
+					data = processDataByType(colval, true, dbzdml->remoteObjectId);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s,", data);
@@ -2077,7 +2675,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval, true, type);
+					data = processDataByType(colval, true, dbzdml->remoteObjectId);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s", data);
@@ -2106,7 +2704,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 					PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval_after, false, type);
+					char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId);
 
 					if (data != NULL)
 					{
@@ -2120,7 +2718,6 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					pgcolval_after->position = colval_after->position;
 					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
 
-					data = processDataByType(colval_before, false, type);
 
 					if (data != NULL)
 					{
@@ -2229,7 +2826,7 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 static DBZ_DML *
 parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 {
-	StringInfoData strinfo;
+	StringInfoData strinfo, objid;
 	Jsonb * dmlpayload = NULL;
 	JsonbIterator *it;
 	JsonbValue v;
@@ -2248,25 +2845,114 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	NameOidEntry * entry;
 	bool found;
 
+	/* these are the components that compose of an object ID before transformation */
+	char * db = NULL, * schema = NULL, * table = NULL;
+
 	initStringInfo(&strinfo);
+	initStringInfo(&objid);
 
 	dbzdml = (DBZ_DML *) palloc0(sizeof(DBZ_DML));
 
+	/* fetch database - required */
 	getPathElementString(jb, "payload.source.db", &strinfo, true);
-	dbzdml->db = pstrdup(strinfo.data);
-
-	getPathElementString(jb, "payload.source.table", &strinfo, true);
-	dbzdml->table = pstrdup(strinfo.data);
-
-	if (!dbzdml->db || !dbzdml->table)
+	if (!strcasecmp(strinfo.data, "NULL"))
 	{
-		elog(WARNING, "no db or table specified in DML response");
+		elog(WARNING, "malformed DML change request - no database attribute specified");
 		destroyDBZDML(dbzdml);
 
 		if(strinfo.data)
 			pfree(strinfo.data);
 
 		return NULL;
+	}
+	db = pstrdup(strinfo.data);
+	appendStringInfo(&objid, "%s.", db);
+
+	/* fetch schema - optional */
+	getPathElementString(jb, "payload.source.schema", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+	{
+		/* append schema to objid if present */
+		schema = pstrdup(strinfo.data);
+		appendStringInfo(&objid, "%s.", schema);
+	}
+
+	/* fetch table - required */
+	getPathElementString(jb, "payload.source.table", &strinfo, true);
+	if (!strcasecmp(strinfo.data, "NULL"))
+	{
+		elog(WARNING, "malformed DML change request - no table attribute specified");
+		destroyDBZDML(dbzdml);
+
+		if(strinfo.data)
+			pfree(strinfo.data);
+
+		return NULL;
+	}
+	table = pstrdup(strinfo.data);
+	appendStringInfo(&objid, "%s", table);
+
+	dbzdml->remoteObjectId = pstrdup(objid.data);
+
+	dbzdml->mappedObjectId = transform_object_name(objid.data, "table");
+	if (dbzdml->mappedObjectId)
+	{
+		char * objectIdCopy = pstrdup(dbzdml->mappedObjectId);
+		char * db2 = NULL, * table2 = NULL, * schema2 = NULL;
+
+		splitIdString(objectIdCopy, &db2, &schema2, &table2, false);
+		if (!table)
+		{
+			/* save the error */
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "transformed object ID is invalid: %s",
+					dbzdml->mappedObjectId);
+			set_shm_connector_errmsg(myConnectorId, msg);
+
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
+		}
+		elog(DEBUG1, "transformed table object ID '%s' to '%s'",
+				objid.data, dbzdml->mappedObjectId);
+
+		/* save the individual components for sanity check below */
+		if (schema2)
+			dbzdml->schema = pstrdup(schema2);
+		else
+			dbzdml->schema = pstrdup("public");
+
+		if (table2)
+			dbzdml->table = pstrdup(table2);
+	}
+	else
+	{
+		/* by default, remote's db is mapped to schema in pg */
+		dbzdml->schema = pstrdup(db);
+		dbzdml->table = pstrdup(table);
+
+		resetStringInfo(&strinfo);
+		appendStringInfo(&strinfo, "%s.%s", dbzdml->schema, dbzdml->table);
+		dbzdml->mappedObjectId = pstrdup(strinfo.data);
+
+		/* use the untransformed object id and components */
+		elog(DEBUG1, "no object ID transformation done for '%s'",
+				dbzdml->mappedObjectId);
+	}
+	/* free the temporary pointers */
+	if (db)
+	{
+		pfree(db);
+		db = NULL;
+	}
+	if (schema)
+	{
+		pfree(schema);
+		db = NULL;
+	}
+	if (table)
+	{
+		pfree(table);
+		db = NULL;
 	}
 
 	dbzdml->op = op;
@@ -2277,8 +2963,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	 * created. However, catalog lookups are case sensitive so here we must
 	 * convert db and table to all lower case letters.
 	 */
-	for (j = 0; j < strlen(dbzdml->db); j++)
-		dbzdml->db[j] = (char) pg_tolower((unsigned char) dbzdml->db[j]);
+	for (j = 0; j < strlen(dbzdml->schema); j++)
+		dbzdml->schema[j] = (char) pg_tolower((unsigned char) dbzdml->schema[j]);
 
 	for (j = 0; j < strlen(dbzdml->table); j++)
 		dbzdml->table[j] = (char) pg_tolower((unsigned char) dbzdml->table[j]);
@@ -2286,11 +2972,11 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	StartTransactionCommand();
 	PushActiveSnapshot(GetTransactionSnapshot());
 
-	schemaoid = get_namespace_oid(dbzdml->db, false);
+	schemaoid = get_namespace_oid(dbzdml->schema, false);
 	if (!OidIsValid(schemaoid))
 	{
 		char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-		snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->db);
+		snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->schema);
 		set_shm_connector_errmsg(myConnectorId, msg);
 
 		/* trigger pg's error shutdown routine */
@@ -2308,7 +2994,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		elog(ERROR, "%s", msg);
 	}
 
-	elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", dbzdml->db, dbzdml->table, dbzdml->tableoid);
+	elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", dbzdml->schema, dbzdml->table, dbzdml->tableoid);
 
 	/* prepare a temporary hash table for datatype look up with column name */
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
@@ -2491,9 +3177,29 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 					/* check if we have a key - value pair */
 					if (key != NULL && value != NULL)
 					{
+						char * mappedColumnName = NULL;
+						StringInfoData colNameObjId;
+
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 						colval->value = pstrdup(value);
+						/* a copy of original column name for expression rule lookup at later stage */
+						colval->remoteColumnName = pstrdup(colval->name);
+
+						/* transform the column name if needed */
+						initStringInfo(&colNameObjId);
+						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+						mappedColumnName = transform_object_name(colNameObjId.data, "column");
+						if (mappedColumnName)
+						{
+							elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+									colNameObjId.data, mappedColumnName);
+							/* replace the column name with looked up value here */
+							pfree(colval->name);
+							colval->name = pstrdup(mappedColumnName);
+						}
+						if (colNameObjId.data)
+							pfree(colNameObjId.data);
 
 						/* look up its data type */
 						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
@@ -2643,9 +3349,31 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 					/* check if we have a key - value pair */
 					if (key != NULL && value != NULL)
 					{
+						char * mappedColumnName = NULL;
+						StringInfoData colNameObjId;
+
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 						colval->value = pstrdup(value);
+						/* a copy of original column name for expression rule lookup at later stage */
+						colval->remoteColumnName = pstrdup(colval->name);
+
+						/* transform the column name if needed */
+						initStringInfo(&colNameObjId);
+						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+						mappedColumnName = transform_object_name(colNameObjId.data, "column");
+
+						if (mappedColumnName)
+						{
+							elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+									colNameObjId.data, mappedColumnName);
+							/* replace the column name with looked up value here */
+							pfree(colval->name);
+							colval->name = pstrdup(mappedColumnName);
+						}
+						if (colNameObjId.data)
+							pfree(colNameObjId.data);
+
 						/* look up its data type */
 						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
 						if (found)
@@ -2805,9 +3533,30 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						/* check if we have a key - value pair */
 						if (key != NULL && value != NULL)
 						{
+							char * mappedColumnName = NULL;
+							StringInfoData colNameObjId;
+
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 							colval->name = pstrdup(key);
 							colval->value = pstrdup(value);
+							/* a copy of original column name for expression rule lookup at later stage */
+							colval->remoteColumnName = pstrdup(colval->name);
+
+							/* transform the column name if needed */
+							initStringInfo(&colNameObjId);
+							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+							mappedColumnName = transform_object_name(colNameObjId.data, "column");
+							if (mappedColumnName)
+							{
+								elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+										colNameObjId.data, mappedColumnName);
+								/* replace the column name with looked up value here */
+								pfree(colval->name);
+								colval->name = pstrdup(mappedColumnName);
+							}
+							if (colNameObjId.data)
+								pfree(colNameObjId.data);
+
 							/* look up its data type */
 							entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
 							if (found)
@@ -2863,6 +3612,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 	if (strinfo.data)
 		pfree(strinfo.data);
+
+	if (objid.data)
+		pfree(objid.data);
 
 	return dbzdml;
 }
@@ -3051,6 +3803,24 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 	DatatypeHashEntry hashentry;
 	DatatypeHashEntry * entrylookup;
 
+	HASHCTL	info;
+	int current_section = 0;
+	ObjMapHashEntry objmapentry;
+	ObjMapHashEntry * objmaplookup;
+
+	TransformExpressionHashEntry expressentry;
+	TransformExpressionHashEntry * expressentrylookup;
+
+	if (!file)
+	{
+		set_shm_connector_errmsg(myConnectorId, "cannot open rule file");
+		elog(ERROR, "Cannot open rule file: %s", rulefile);
+	}
+
+	/*
+	 * the rule hash should have already been initialized with default values. We
+	 * just need to point to the right one based on connector type
+	 */
 	switch (connectorType)
 	{
 		case TYPE_MYSQL:
@@ -3075,11 +3845,29 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 		elog(ERROR, "data type hash not initialized");
 	}
 
-	if (!file)
-	{
-		set_shm_connector_errmsg(myConnectorId, "cannot open rule file");
-		elog(ERROR, "Cannot open rule file: %s", rulefile);
-	}
+	/*
+	 * now, initialize a object mapping hash used to hold rules to map remote objects
+	 * to postgresql
+	 */
+	info.keysize = sizeof(ObjMapHashKey);
+	info.entrysize = sizeof(ObjMapHashEntry);
+	info.hcxt = CurrentMemoryContext;
+
+	/* initialize object mapping hash common to all connector types */
+	objectMappingHash = hash_create("object mapping hash",
+									 256,
+									 &info,
+									 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	info.keysize = sizeof(TransformExpressionHashKey);
+	info.entrysize = sizeof(TransformExpressionHashEntry);
+	info.hcxt = CurrentMemoryContext;
+
+	/* initialize transform expression hash common to all connector types */
+	transformExpressionHash = hash_create("transform expression hash",
+									 256,
+									 &info,
+									 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
 	/* Get the file size */
 	fseek(file, 0, SEEK_END);
@@ -3102,16 +3890,37 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
      *   "translation_rules":
      *   [
      *       {
-     *           "translate_from": "LINESTRING",
+     *           "translate_from": "GEOMETRY",
      *           "translate_from_autoinc": false,
-     *           "translate_to": "LINESTRING",
+     *           "translate_to": "TEXT",
      *           "translate_to_size": -1
      *       },
      *       {
-     *           "translate_from": "LINESTRING",
+     *           "translate_from": "inventory.geom.g.GEOMETRY",
      *           "translate_from_autoinc": false,
-     *           "translate_to": "POINT",
-     *           "translate_to_size": -1
+     *           "translate_to": "VARCHAR",
+     *           "translate_to_size": 300000
+     *       }
+     *       ...
+     *       ...
+     *       ...
+     *   ],
+     *   "object_mapping_rules":
+     *   [
+     *       {
+     *           "object_type": "table",
+     *           "source_object": "inventory.orders",
+     *           "destination_object": "inventory.orders"
+     *       },
+     *       {
+     *           "object_type": "table",
+     *           "source_object": "inventory.products",
+     *           "destination_object": "products"
+     *       }
+     *       {
+     *           "object_type": "column",
+     *           "source_object": "inventory.orders.order_number",
+     *           "destination_object": "ididid"
      *       }
      *       ...
      *       ...
@@ -3127,25 +3936,42 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 		{
 			case WJB_BEGIN_ARRAY:
 			{
+				/* this part of logic only parses the array named "translation_rules" */
 				elog(DEBUG1, "begin array %s", array ? array : "NULL");
-				inarray = true;
-				if (strcasecmp(array, "translation_rules"))
+				if (!strcasecmp(array, "transform_datatype_rules"))
 				{
-					set_shm_connector_errmsg(myConnectorId, "unexpected array token name found");
-					elog(ERROR,"unexpected array token name: %s. Parser expects "
-							"\"translation_rules\"", array);
+					current_section = RULEFILE_DATATYPE_TRANSFORM;
+					inarray = true;
+				}
+				else if(!strcasecmp(array, "transform_objectname_rules"))
+				{
+					current_section = RULEFILE_OBJECTNAME_TRANSFORM;
+					inarray = true;
+				}
+				else if(!strcasecmp(array, "transform_expression_rules"))
+				{
+					current_section = RULEFILE_EXPRESSION_TRANSFORM;
+					inarray = true;
+				}
+				else
+				{
+					elog(DEBUG1,"skipped parsing array %s", array);
 				}
 				break;
 			}
 			case WJB_END_ARRAY:
 			{
 				elog(DEBUG1, "end array %s", array ? array : "NULL");
-				inarray = false;
+				if (inarray)
+					inarray = false;
 				break;
 			}
 			case WJB_VALUE:
 			case WJB_ELEM:
 			{
+				if (!inarray)
+					continue;
+
 				switch(v.type)
 				{
 					case jbvString:
@@ -3200,26 +4026,34 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 			}
 			case WJB_BEGIN_OBJECT:
 			{
+				if (!inarray)
+					continue;
+
 				/* beginning of a json array element. Initialize hashkey */
-				elog(DEBUG1, "begin object");
-				memset(&hashentry, 0, sizeof(hashentry));
+				elog(DEBUG1, "begin object - %d", current_section);
+				if (current_section == RULEFILE_DATATYPE_TRANSFORM)
+					memset(&hashentry, 0, sizeof(hashentry));
+				else if (current_section == RULEFILE_OBJECTNAME_TRANSFORM)
+					memset(&objmapentry, 0, sizeof(objmapentry));
+				else	/* RULEFILE_EXPRESSION_TRANSFORM */
+					memset(&expressentry, 0, sizeof(expressentry));
 				break;
 			}
 			case WJB_END_OBJECT:
 			{
-				elog(DEBUG1, "end object");
+				elog(DEBUG1, "end object - %d", current_section);
 				if (inarray)
 				{
-					elog(DEBUG1," data type mapping: from %s(%d) to %s(%d)",
-							hashentry.key.extTypeName, hashentry.key.autoIncremented,
-							hashentry.pgsqlTypeName, hashentry.pgsqlTypeLength);
-
-					entrylookup = (DatatypeHashEntry *) hash_search(rulehash,
-							&(hashentry.key), HASH_ENTER, &found);
-
-					/* found or not, just update or insert it */
-					if (!found)
+					if (current_section == RULEFILE_DATATYPE_TRANSFORM)
 					{
+						elog(DEBUG1,"data type mapping: from %s(%d) to %s(%d)",
+								hashentry.key.extTypeName, hashentry.key.autoIncremented,
+								hashentry.pgsqlTypeName, hashentry.pgsqlTypeLength);
+
+						entrylookup = (DatatypeHashEntry *) hash_search(rulehash,
+								&(hashentry.key), HASH_ENTER, &found);
+
+						/* found or not, just update or insert it */
 						entrylookup->key.autoIncremented = hashentry.key.autoIncremented;
 						memset(entrylookup->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
 						strncpy(entrylookup->key.extTypeName,
@@ -3232,25 +4066,58 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 								hashentry.pgsqlTypeName,
 								strlen(hashentry.pgsqlTypeName));
 
-						elog(WARNING, "Inserted mapping '%s' <-> '%s'", entrylookup->key.extTypeName, entrylookup->pgsqlTypeName);
+						elog(DEBUG1, "Inserted / updated data type mapping '%s' <-> '%s'", entrylookup->key.extTypeName,
+								entrylookup->pgsqlTypeName);
+
 					}
-					else
+					else if (current_section == RULEFILE_OBJECTNAME_TRANSFORM)
 					{
-						entrylookup->key.autoIncremented = hashentry.key.autoIncremented;
-						memset(entrylookup->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
-						strncpy(entrylookup->key.extTypeName,
-								hashentry.key.extTypeName,
-								strlen(hashentry.key.extTypeName));
+						elog(DEBUG1,"object mapping: from %s(%s)to %s",
+								objmapentry.key.extObjName, objmapentry.key.extObjType,
+								objmapentry.pgsqlObjName);
 
-						entrylookup->pgsqlTypeLength = hashentry.pgsqlTypeLength;
-						memset(entrylookup->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
-						strncpy(entrylookup->pgsqlTypeName,
-								hashentry.pgsqlTypeName,
-								strlen(hashentry.pgsqlTypeName));
+						objmaplookup = (ObjMapHashEntry *) hash_search(objectMappingHash,
+								&(objmapentry.key), HASH_ENTER, &found);
 
-						elog(WARNING, "Updated mapping '%s' <-> '%s'", entrylookup->key.extTypeName, entrylookup->pgsqlTypeName);
+						/* found or not, just update or insert it */
+						memset(objmaplookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+						strncpy(objmaplookup->key.extObjName,
+								objmapentry.key.extObjName,
+								strlen(objmapentry.key.extObjName));
+
+						memset(objmaplookup->pgsqlObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+						strncpy(objmaplookup->pgsqlObjName,
+								objmapentry.pgsqlObjName,
+								strlen(objmapentry.pgsqlObjName));
+
+						elog(DEBUG1, "Inserted / updated object mapping '%s(%s)' <-> '%s'", objmaplookup->key.extObjName,
+								objmapentry.key.extObjType, objmaplookup->pgsqlObjName);
+
 					}
+					else	/* RULEFILE_EXPRESSION_TRANSFORM */
+					{
+						elog(DEBUG1,"transform source object '%s' with expression '%s'",
+								expressentry.key.extObjName,
+								expressentry.pgsqlTransExpress);
 
+						expressentrylookup = (TransformExpressionHashEntry *) hash_search(transformExpressionHash,
+								&(expressentry.key), HASH_ENTER, &found);
+
+						/* found or not, just update or insert it */
+						memset(expressentrylookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+						strncpy(expressentrylookup->key.extObjName,
+								expressentry.key.extObjName,
+								strlen(expressentry.key.extObjName));
+
+						memset(expressentrylookup->pgsqlTransExpress, 0, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+						strncpy(expressentrylookup->pgsqlTransExpress,
+								expressentry.pgsqlTransExpress,
+								strlen(expressentry.pgsqlTransExpress));
+
+						elog(DEBUG1, "Inserted / updated transform expression mapping '%s' <-> '%s'",
+								expressentrylookup->key.extObjName,
+								expressentrylookup->pgsqlTransExpress);
+					}
 				}
 				break;
 			}
@@ -3266,31 +4133,65 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 		/* check if we have a key - value pair */
 		if (key != NULL && value != NULL)
 		{
-			if (!strcmp(key, "translate_from"))
+			if (current_section == RULEFILE_DATATYPE_TRANSFORM)
 			{
-				elog(DEBUG1, "consuming %s = %s", key, value);
-				strncpy(hashentry.key.extTypeName, value, strlen(value));
-			}
+				if (!strcmp(key, "translate_from"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					strncpy(hashentry.key.extTypeName, value, strlen(value));
+				}
 
-			if (!strcmp(key, "translate_from_autoinc"))
-			{
-				elog(DEBUG1, "consuming %s = %s", key, value);
-				if (!strcasecmp(value, "true"))
-					hashentry.key.autoIncremented = true;
-				else
-					hashentry.key.autoIncremented = false;
-			}
+				if (!strcmp(key, "translate_from_autoinc"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					if (!strcasecmp(value, "true"))
+						hashentry.key.autoIncremented = true;
+					else
+						hashentry.key.autoIncremented = false;
+				}
 
-			if (!strcmp(key, "translate_to"))
-			{
-				elog(DEBUG1, "consuming %s = %s", key, value);
-				strncpy(hashentry.pgsqlTypeName, value, strlen(value));
-			}
+				if (!strcmp(key, "translate_to"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					strncpy(hashentry.pgsqlTypeName, value, strlen(value));
+				}
 
-			if (!strcmp(key, "translate_to_size"))
+				if (!strcmp(key, "translate_to_size"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					hashentry.pgsqlTypeLength = atoi(value);
+				}
+			}
+			else if (current_section == RULEFILE_OBJECTNAME_TRANSFORM)
 			{
-				elog(DEBUG1, "consuming %s = %s", key, value);
-				hashentry.pgsqlTypeLength = atoi(value);
+				if (!strcmp(key, "object_type"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					strncpy(objmapentry.key.extObjType, value, strlen(value));
+				}
+				if (!strcmp(key, "source_object"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					strncpy(objmapentry.key.extObjName, value, strlen(value));
+				}
+				if (!strcmp(key, "destination_object"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					strncpy(objmapentry.pgsqlObjName, value, strlen(value));
+				}
+			}
+			else	/* RULEFILE_EXPRESSION_TRANSFORM */
+			{
+				if (!strcmp(key, "transform_from"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					strncpy(expressentry.key.extObjName, value, strlen(value));
+				}
+				if (!strcmp(key, "transform_expression"))
+				{
+					elog(DEBUG1, "consuming %s = %s", key, value);
+					strncpy(expressentry.pgsqlTransExpress, value, strlen(value));
+				}
 			}
 
 			pfree(key);
