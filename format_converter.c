@@ -1403,8 +1403,8 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 				if (col->length > 0 && col->scale == 0)
 				{
 					/* make sure it does not exceed postgresql allowed maximum */
-					if (col->length > 10485760)
-						col->length = 10485760;
+					if (col->length > MaxAttrSize)
+						col->length = MaxAttrSize;
 					appendStringInfo(&strinfo, "(%d) ", col->length);
 				}
 
@@ -1433,8 +1433,6 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 							mappedColumnName);
 				}
 
-				/* check column rename */
-
 				appendStringInfo(&strinfo, ", ");
 
 				/* check if nullable or not nullable */
@@ -1448,7 +1446,6 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 					appendStringInfo(&strinfo, "ALTER COLUMN %s DROP NOT NULL",
 							mappedColumnName);
 				}
-
 				appendStringInfo(&strinfo, ",");
 			}
 		}
@@ -1585,8 +1582,8 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (col->length > 0 && col->scale == 0)
 			{
 				/* make sure it does not exceed postgresql allowed maximum */
-				if (col->length > 10485760)
-					col->length = 10485760;
+				if (col->length > MaxAttrSize)
+					col->length = MaxAttrSize;
 				appendStringInfo(&strinfo, "(%d) ", col->length);
 			}
 
@@ -1824,8 +1821,8 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					if (col->length > 0 && col->scale == 0)
 					{
 						/* make sure it does not exceed postgresql allowed maximum */
-						if (col->length > 10485760)
-							col->length = 10485760;
+						if (col->length > MaxAttrSize)
+							col->length = MaxAttrSize;
 						appendStringInfo(&strinfo, "(%d) ", col->length);
 					}
 

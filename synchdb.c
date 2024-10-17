@@ -81,22 +81,22 @@ PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
 static int dbz_engine_stop(void);
 static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
 static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal, BatchInfo * batchinfo);
-static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshot_mode);
+static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode);
 static char *dbz_engine_get_offset(int connectorId);
 static int dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto);
 static TupleDesc synchdb_state_tupdesc(void);
 static void synchdb_init_shmem(void);
 static void synchdb_detach_shmem(int code, Datum arg);
-static void prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid);
+static void prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid, const char * snapshotMode);
 static const char *connectorStateAsString(ConnectorState state);
 static void reset_shm_request_state(int connectorId);
 static int dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file);
-static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId);
-static void parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo);
+static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId, const char * snapshotMode);
+static void parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo, char ** snapshotMode, const char * customArgs);
 static void setup_environment(ConnectorType connectorType, const char *dst_db);
 static void initialize_jvm(void);
-static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo);
-static void main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo);
+static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
+static void main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
 
 /*
@@ -417,7 +417,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
  * @return: 0 on success, -1 on failure
  */
 static int
-dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshot_mode)
+dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode)
 {
 	jmethodID mid;
 	jstring jHostname, jUser, jPassword, jDatabase, jTable, jName, jSnapshot;
@@ -452,7 +452,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	jDatabase = (*env)->NewStringUTF(env, connInfo->src_db);
 	jTable = (*env)->NewStringUTF(env, connInfo->table);
 	jName = (*env)->NewStringUTF(env, connInfo->name);
-	jSnapshot = (*env)->NewStringUTF(env, snapshot_mode);
+	jSnapshot = (*env)->NewStringUTF(env, snapshotMode);
 
 	/* Call the Java method */
 	(*env)->CallVoidMethod(env, obj, mid, jHostname, connInfo->port, jUser, jPassword, jDatabase, jTable, connectorType, jName, jSnapshot);
@@ -711,9 +711,10 @@ synchdb_detach_shmem(int code, Datum arg)
  * @param worker: Pointer to the BackgroundWorker structure to be prepared
  * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
  * @param connector: String representing the connector type
+ * @param snapshotMode: Snapshot mode to use to start Debezium engine
  */
 static void
-prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid)
+prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid, const char * snapshotMode)
 
 {
 	ConnectorType type = fc_get_connector_type(connector);
@@ -730,12 +731,13 @@ prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char
 	 * Format the extra args into the bgw_extra field
 	 * todo: BGW_EXTRALEN is only 128 bytes, so the formatted string will be
 	 * cut off here if exceeding this length. Maybe there is a better way to
-	 * pass these args to background worker?
+	 * pass these args to background worker? Note that if you change this, you
+	 * may need to change synchdb_restart_connector() as well.
 	 */
-	snprintf(worker->bgw_extra, BGW_EXTRALEN, "%s:%u:%s:%s:%s:%s:%s:%d:%s:%s",
+	snprintf(worker->bgw_extra, BGW_EXTRALEN, "%s:%u:%s:%s:%s:%s:%s:%d:%s:%s:%s",
 			 connInfo->hostname, connInfo->port, connInfo->user, connInfo->pwd,
 			 connInfo->src_db, connInfo->dst_db, connInfo->table, type, connInfo->name,
-			 connInfo->rulefile);
+			 connInfo->rulefile, snapshotMode);
 }
 
 /*
@@ -867,7 +869,7 @@ dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char 
  * @param type: The type of connector being processed
  */
 static void
-processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId)
+processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId, const char * snapshotMode)
 {
 	SynchdbRequest *req, *reqcopy;
 	ConnectorState *currstate, *currstatecopy;
@@ -936,7 +938,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 		/* restart dbz engine */
 		elog(DEBUG1, "restart dbz engine...");
 
-		ret = dbz_engine_start(connInfo, type, "null");
+		ret = dbz_engine_start(connInfo, type, snapshotMode);
 		if (ret < 0)
 		{
 			elog(WARNING, "Failed to restart dbz engine");
@@ -979,8 +981,14 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 	}
 	else if (reqcopy->reqstate == STATE_RESTARTING && *currstatecopy == STATE_SYNCING)
 	{
+		ConnectionInfo newConnInfo = {0};
+		char * newSnapshotMode = NULL;
+
 		elog(WARNING, "got a restart request: %s", reqcopy->reqdata);
 		set_shm_connector_state(connectorId, STATE_RESTARTING);
+
+		/* parse the request args and renew the current conninfo with the new values */
+		parse_arguments(Int32GetDatum(connectorId), &type, &newConnInfo, &newSnapshotMode, reqcopy->reqdata);
 
 		elog(WARNING, "stopping dbz engine...");
 		ret = dbz_engine_stop();
@@ -995,8 +1003,8 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 		}
 		sleep(1);
 
-		elog(WARNING, "resuimg dbz engine with snapshot_mode %s...", reqcopy->reqdata);
-		ret = dbz_engine_start(connInfo, type, reqcopy->reqdata);
+		elog(WARNING, "resuimg dbz engine with snapshot_mode %s...", newSnapshotMode);
+		ret = dbz_engine_start(&newConnInfo, type, newSnapshotMode);
 		if (ret < 0)
 		{
 			elog(WARNING, "Failed to restart dbz engine");
@@ -1034,15 +1042,22 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
  * @param connInfo: Pointer to store the parsed connection information
  */
 static void
-parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo)
+parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo,
+		char ** snapshotMode, const char * customArgs)
 {
 	char *args, *tmp;
 
 	/* Extract connector type from main argument */
 	myConnectorId = DatumGetUInt32(main_arg);
 
-	/* Copy and parse the extra arguments */
-	args = pstrdup(MyBgworkerEntry->bgw_extra);
+	/*
+	 * If customArgs is supplied, make a copy or it and parse. If not, we make a copy
+	 * of the args from MyBgworkerEntry and parse that instead
+	 */
+	if (customArgs)
+		args = pstrdup(customArgs);
+	else
+		args = pstrdup(MyBgworkerEntry->bgw_extra);
 
 	/* Parse individual fields */
 	tmp = strtok(args, ":");
@@ -1075,6 +1090,9 @@ parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *co
 	tmp = strtok(NULL, ":");
 	if (tmp)
 		connInfo->rulefile = pstrdup(tmp);
+	tmp = strtok(NULL, ":");
+	if (tmp)
+		*snapshotMode = pstrdup(tmp);
 
 	pfree(args);
 
@@ -1091,14 +1109,14 @@ parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *co
 	/* Log parsed arguments (TODO: consider removing or obfuscating sensitive data in production) */
 	elog(LOG, "SynchDB engine initialized with: myConnectorId %d, host %s, port %u, "
 			"user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s), conninfo_name %s"
-			" rulefile %s",
+			" rulefile %s snapshotmode %s",
 			myConnectorId,
 			connInfo->hostname, connInfo->port, connInfo->user,
 			connInfo->src_db ? connInfo->src_db : "N/A",
 			connInfo->dst_db,
 			connInfo->table ? connInfo->table : "N/A",
 			*connectorType, connectorTypeToString(*connectorType),
-			connInfo->name, connInfo->rulefile);
+			connInfo->name, connInfo->rulefile, *snapshotMode);
 }
 
 /**
@@ -1227,9 +1245,9 @@ initialize_jvm(void)
  * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
  */
 static void
-start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo)
+start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode)
 {
-	int ret = dbz_engine_start(connInfo, connectorType, "null");
+	int ret = dbz_engine_start(connInfo, connectorType, snapshotMode);
 	if (ret < 0)
 	{
 		set_shm_connector_errmsg(myConnectorId, "Failed to start dbz engine");
@@ -1243,7 +1261,7 @@ start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInf
 }
 
 static void
-main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo)
+main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode)
 {
 	ConnectorState currstate;
 	bool dbzExitSignal = false;
@@ -1268,7 +1286,7 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo)
 			break;
 		}
 
-		processRequestInterrupt(connInfo, connectorType, myConnectorId);
+		processRequestInterrupt(connInfo, connectorType, myConnectorId, snapshotMode);
 
 		currstate = get_shm_connector_state_enum(myConnectorId);
 		switch (currstate)
@@ -1786,9 +1804,10 @@ synchdb_engine_main(Datum main_arg)
 {
 	ConnectorType connectorType;
 	ConnectionInfo connInfo = {0};
+	char * snapshotMode = NULL;
 
 	/* Parse arguments and initialize connection info */
-	parse_arguments(main_arg, &connectorType, &connInfo);
+	parse_arguments(main_arg, &connectorType, &connInfo, &snapshotMode, NULL);
 
 	/* Set up signal handlers and initialize shared memory */
 	setup_environment(connectorType, connInfo.dst_db);
@@ -1815,11 +1834,11 @@ synchdb_engine_main(Datum main_arg)
 	set_shm_dbz_offset(myConnectorId);
 
 	/* start Debezium engine */
-	start_debezium_engine(connectorType, &connInfo);
+	start_debezium_engine(connectorType, &connInfo, snapshotMode);
 
 	elog(LOG, "Going to main loop .... ");
 	/* Main processing loop */
-	main_loop(connectorType, &connInfo);
+	main_loop(connectorType, &connInfo, snapshotMode);
 
 //	/* Cleanup */
 //	cleanup(connectorType);
@@ -1852,6 +1871,16 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	char *connector = NULL;
 	int ret = -1, connectorid = -1;
 	StringInfoData strinfo;
+
+	/*
+	 * By default, we use snapshot mode = initial when starting
+	 * a connector, which means the connector will synchronize
+	 * all selected table schemas and proceed with CDC. We currently
+	 * do not allow user to specify a different snapshot mode during
+	 * 'synchdb_start_engine_bgw'. However, a different snapshot mode
+	 * can be specified in the 'synchdb_restart_connector' routine
+	 */
+	char * snapshotMode = "initial";
 
 	/* Parse input arguments */
 	text *name_text = PG_GETARG_TEXT_PP(0);
@@ -1899,7 +1928,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	strcpy(worker.bgw_library_name, "synchdb");
 	strcpy(worker.bgw_function_name, "synchdb_engine_main");
 
-	prepare_bgw(&worker, &connInfo, connector, connectorid);
+	prepare_bgw(&worker, &connInfo, connector, connectorid, snapshotMode);
 
 	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
 		ereport(ERROR,
@@ -2331,10 +2360,11 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 {
 	text *name_text = PG_GETARG_TEXT_PP(0);
 	text *snapshot_mode_text = PG_GETARG_TEXT_PP(1);
-
-	int connectorId;
+	ConnectionInfo connInfo;
+	int ret = -1, connectorId = -1;
 	pid_t pid;
 	char * snapshot_mode;
+	char *connector = NULL;
 
 	SynchdbRequest *req;
 
@@ -2351,6 +2381,13 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 		snapshot_mode = "null";
 	else
 		snapshot_mode = text_to_cstring(snapshot_mode_text);
+
+	ret = ra_getConninfoByName(text_to_cstring(name_text), &connInfo, &connector);
+	if (ret)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("connection name does not exist"),
+				 errhint("use synchdb_add_conninfo to add one first")));
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -2386,10 +2423,18 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 						text_to_cstring(name_text)),
 				 errhint("wait for it to finish and try again later")));
 
+	/*
+	 * connector info may have been changed, so let's pass the latest conninfo
+	 * to the connector worker in the same way as synchdb_start_engine_bgw()
+	 */
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	req->reqstate = STATE_RESTARTING;
-	strncpy(req->reqdata, "", SYNCHDB_ERRMSG_SIZE);
-	snprintf(req->reqdata, SYNCHDB_ERRMSG_SIZE, "%s", snapshot_mode);
+	memset(req->reqdata, 0, SYNCHDB_ERRMSG_SIZE);
+	snprintf(req->reqdata, SYNCHDB_ERRMSG_SIZE, "%s:%u:%s:%s:%s:%s:%s:%d:%s:%s:%s",
+			 connInfo.hostname, connInfo.port, connInfo.user, connInfo.pwd,
+			 connInfo.src_db, connInfo.dst_db, connInfo.table,
+			 fc_get_connector_type(connector), connInfo.name,
+			 connInfo.rulefile, snapshot_mode);
 	LWLockRelease(&sdb_state->lock);
 
 	elog(WARNING, "sent restart request interrupt to dbz connector (%s)",

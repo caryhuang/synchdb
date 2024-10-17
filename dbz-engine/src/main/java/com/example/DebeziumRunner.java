@@ -158,6 +158,7 @@ public class DebeziumRunner {
 		props.setProperty("offset.storage", "org.apache.kafka.connect.storage.FileOffsetBackingStore");
 		props.setProperty("offset.storage.file.filename", offsetfile);
 		props.setProperty("offset.flush.interval.ms", "60000");
+		props.setProperty("schema.history.internal.store.only.captured.tables.ddl", "true");
 
 		logger.info("Hello from DebeziumRunner class!");
 
