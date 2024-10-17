@@ -43,10 +43,12 @@ jobs:
         make
         sudo make install
     
-    - name: Clone SynchDB
+   - name: Clone SynchDB Dev Branch
       run: |
         cd postgres/contrib
-        git clone https://github.com/Hornetlabs/synchdb.git -b synchdb-devel
+        git clone https://x-access-token:${GITHUB_TOKEN}@github.com/Hornetlabs/synchdb.git -b synchdb-devel
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     
     - name: Build and install Debezium Runner Engine
       run: |
