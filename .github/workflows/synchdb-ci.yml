@@ -74,13 +74,13 @@ jobs:
     - name: Set up test environment
       run: |
         sudo apt-get install -y docker-compose
-        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml up -d
-        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml up -d
+        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml up -d --remove-orphans
+        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml up -d --remove-orphans
 
     - name: Prepare MySQL test database
       run: |
         sudo apt-get install -y mysql-client
-        mysql -h 127.0.0.1 -u root -ppassword << EOF
+        mysql -h 127.0.0.1 -u root -p mysqlpwdroot << EOF
         GRANT replication client on *.* to mysqluser;
         GRANT replication slave  on *.* to mysqluser;
         GRANT RELOAD ON *.* TO 'mysqluser'@'%';
