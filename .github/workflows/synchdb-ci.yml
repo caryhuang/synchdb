@@ -32,6 +32,7 @@ jobs:
         sudo apt-get install -y build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libxslt-dev libssl-dev libxml2-utils xsltproc ccache
     
     - name: Clone and build PostgreSQL
+      timeout-minutes: 30
       run: |
         git clone https://github.com/postgres/postgres.git
         cd postgres
@@ -59,8 +60,8 @@ jobs:
     - name: Build and install SynchDB PostgreSQL Extension
       run: |
         cd postgres/contrib/synchdb
-        make
-        sudo make install
+        make || exit 1
+        sudo make install || exit 1
     
     - name: Configure linker
       run: |
@@ -79,12 +80,15 @@ jobs:
 
     - name: Prepare MySQL test database
       run: |
-        sudo apt-get install -y mysql-client
-        mysql -h 127.0.0.1 -u root -p mysqlpwdroot << EOF
-        GRANT replication client on *.* to mysqluser;
-        GRANT replication slave  on *.* to mysqluser;
+        docker exec -i mysql mysql -uroot -pmysqlpwdroot << EOF
+        GRANT replication client ON *.* TO mysqluser;
+        GRANT replication slave ON *.* TO mysqluser;
         GRANT RELOAD ON *.* TO 'mysqluser'@'%';
         FLUSH PRIVILEGES;
+        EOF
+        
+        docker exec -i mysql mysql -uroot -pmysqlpwdroot << EOF
+        SHOW GRANTS FOR mysqluser;
         EOF
 
     - name: Prepare SQL Server test database
@@ -93,8 +97,7 @@ jobs:
         id=$(docker ps | grep sqlserver | awk '{print $1}')
         docker cp postgres/contrib/synchdb/inventory.sql $id:/
         docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -i /inventory.sql
-        docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
-
+        docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "SELECT COUNT(*) from orders"
     - name: Check installation
       run: |
         ldd postgres/contrib/synchdb/synchdb.so
@@ -113,14 +116,57 @@ jobs:
     - name: Create connection information and start connectors
       run: |
         psql -d test_db << EOF
-        SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql', '');
-        SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver', '');
+        SELECT synchdb_add_conninfo('mysqlconn', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql', 'myrule.json');
+        SELECT synchdb_add_conninfo('sqlserverconn', '127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver', '');
         SELECT synchdb_start_engine_bgw('mysqlconn');
         SELECT synchdb_start_engine_bgw('sqlserverconn');
         EOF
 
-    - name: View connector states
+    - name: View connector states and validate
       run: |
+        max_attempts=10
+        attempt=1
+        docker ps
+        id=$(docker ps | grep sqlserver | awk '{print $1}')
+        
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt of $max_attempts"
+          syncing_src_count=$(docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "SELECT COUNT(*) from orders" -h -1)
+          syncing_dst_count=$(psql -d test_db -t -c "SELECT COUNT(*) from inventory.orders;" | tr -d ' ')
+          
+          if [ "$syncing_src_count" = "$syncing_dst_count" ]; then
+            echo "Initial sync complete. Adding new record to source."
+            docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
+            
+            inner_max_attempts=10
+            inner_attempt=1
+            while [ $inner_attempt -le $inner_max_attempts ]; do
+              echo "Attempt $inner_attempt of $inner_max_attempts for new record sync"
+              new_syncing_src_count=$(docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "SELECT COUNT(*) from orders" -h -1)
+              new_syncing_dst_count=$(psql -d test_db -t -c "SELECT COUNT(*) from inventory.orders;" | tr -d ' ')
+              
+              if [ "$new_syncing_dst_count" = "$new_syncing_src_count" ]; then
+                echo "Both connectors are in syncing state"
+                psql -d test_db -c "SELECT * FROM synchdb_state_view;"
+                exit 0
+              else
+                echo "Waiting for last record to sync (current count: $new_syncing_dst_count vs $new_syncing_src_count)"
+                sleep 10
+              fi
+              inner_attempt=$((inner_attempt+1))
+            done
+            
+            echo "Timeout: Last record did not sync"
+            exit 1
+          else
+            echo "Waiting for initial sync (current count: $syncing_dst_count vs $syncing_src_count)"
+            sleep 10
+          fi
+          attempt=$((attempt+1))
+        done
+        
+        echo "Timeout: Initial sync did not complete"
         psql -d test_db -c "SELECT * FROM synchdb_state_view;"
+        exit 1
 
     # Add any additional tests or checks here
