@@ -92,8 +92,8 @@ static const char *connectorStateAsString(ConnectorState state);
 static void reset_shm_request_state(int connectorId);
 static int dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file);
 static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId, const char * snapshotMode);
-static void parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo, char ** snapshotMode, const char * customArgs);
-static void setup_environment(ConnectorType connectorType, const char *dst_db);
+//static void parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo, char ** snapshotMode, const char * customArgs);
+static void setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode);
 static void initialize_jvm(void);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
 static void main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
@@ -449,7 +449,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	jHostname = (*env)->NewStringUTF(env, connInfo->hostname);
 	jUser = (*env)->NewStringUTF(env, connInfo->user);
 	jPassword = (*env)->NewStringUTF(env, connInfo->pwd);
-	jDatabase = (*env)->NewStringUTF(env, connInfo->src_db);
+	jDatabase = (*env)->NewStringUTF(env, connInfo->srcdb);
 	jTable = (*env)->NewStringUTF(env, connInfo->table);
 	jName = (*env)->NewStringUTF(env, connInfo->name);
 	jSnapshot = (*env)->NewStringUTF(env, snapshotMode);
@@ -522,7 +522,7 @@ dbz_engine_get_offset(int connectorId)
 	}
 
 	/* Get the source database name based on connector type */
-	db = sdb_state->connectors[connectorId].srcdb;
+	db = sdb_state->connectors[connectorId].conninfo.srcdb;
 	if (!db)
 	{
 		elog(WARNING, "Source database name not set for connector type: %d",
@@ -531,7 +531,7 @@ dbz_engine_get_offset(int connectorId)
 	}
 
 	/* Get the unique name */
-	name = sdb_state->connectors[connectorId].name;
+	name = sdb_state->connectors[connectorId].conninfo.name;
 	if (!name)
 	{
 		elog(WARNING, "Unique name not set for connector type: %d",
@@ -725,19 +725,21 @@ prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char
 
 	/* append destination database to worker->bgw_name for clarity */
 	strcat(worker->bgw_name, " -> ");
-	strcat(worker->bgw_name, connInfo->dst_db);
+	strcat(worker->bgw_name, connInfo->dstdb);
 
 	/*
-	 * Format the extra args into the bgw_extra field
-	 * todo: BGW_EXTRALEN is only 128 bytes, so the formatted string will be
-	 * cut off here if exceeding this length. Maybe there is a better way to
-	 * pass these args to background worker? Note that if you change this, you
-	 * may need to change synchdb_restart_connector() as well.
+	 * save connInfo to synchdb shared memory at index[connectorid]. When the connector
+	 * worker starts, it will obtain the same connInfo from shared memory from the same
+	 * index location
 	 */
-	snprintf(worker->bgw_extra, BGW_EXTRALEN, "%s:%u:%s:%s:%s:%s:%s:%d:%s:%s:%s",
-			 connInfo->hostname, connInfo->port, connInfo->user, connInfo->pwd,
-			 connInfo->src_db, connInfo->dst_db, connInfo->table, type, connInfo->name,
-			 connInfo->rulefile, snapshotMode);
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	sdb_state->connectors[connectorid].type = type;
+	memset(sdb_state->connectors[connectorid].snapshotMode, 0, SYNCHDB_SNAPSHOT_MODE_SIZE);
+	strcpy(sdb_state->connectors[connectorid].snapshotMode, snapshotMode);
+
+	memset(&(sdb_state->connectors[connectorid].conninfo), 0, sizeof(ConnectionInfo));
+	memcpy(&(sdb_state->connectors[connectorid].conninfo), connInfo, sizeof(ConnectionInfo));
+	LWLockRelease(&sdb_state->lock);
 }
 
 /*
@@ -882,7 +884,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 
 	req = &(sdb_state->connectors[connectorId].req);
 	currstate = &(sdb_state->connectors[connectorId].state);
-	srcdb = sdb_state->connectors[connectorId].srcdb;
+	srcdb = sdb_state->connectors[connectorId].conninfo.srcdb;
 
 	/*
 	 * make a copy of requested state, its data and curr state to avoid holding locks
@@ -982,13 +984,12 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 	else if (reqcopy->reqstate == STATE_RESTARTING && *currstatecopy == STATE_SYNCING)
 	{
 		ConnectionInfo newConnInfo = {0};
-		char * newSnapshotMode = NULL;
 
 		elog(WARNING, "got a restart request: %s", reqcopy->reqdata);
 		set_shm_connector_state(connectorId, STATE_RESTARTING);
 
-		/* parse the request args and renew the current conninfo with the new values */
-		parse_arguments(Int32GetDatum(connectorId), &type, &newConnInfo, &newSnapshotMode, reqcopy->reqdata);
+		/* get a copy of more recent conninfo from reqdata */
+		memcpy(&newConnInfo, &(reqcopy->reqconninfo), sizeof(ConnectionInfo));
 
 		elog(WARNING, "stopping dbz engine...");
 		ret = dbz_engine_stop();
@@ -1003,8 +1004,16 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 		}
 		sleep(1);
 
-		elog(WARNING, "resuimg dbz engine with snapshot_mode %s...", newSnapshotMode);
-		ret = dbz_engine_start(&newConnInfo, type, newSnapshotMode);
+		elog(LOG, "resuimg dbz engine with host %s, port %u, user %s, src_db %s, "
+				"dst_db %s, table %s, rulefile %s snapshotMode %s",
+				newConnInfo.hostname, newConnInfo.port, newConnInfo.user,
+				newConnInfo.srcdb ? newConnInfo.srcdb : "N/A",
+				newConnInfo.dstdb,
+				newConnInfo.table ? newConnInfo.table : "N/A",
+				newConnInfo.rulefile, reqcopy->reqdata);
+
+		elog(WARNING, "resuimg dbz engine with snapshot_mode %s...", reqcopy->reqdata);
+		ret = dbz_engine_start(&newConnInfo, type, reqcopy->reqdata);
 		if (ret < 0)
 		{
 			elog(WARNING, "Failed to restart dbz engine");
@@ -1041,83 +1050,83 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
  * @param connectorType: Pointer to store the parsed connector type
  * @param connInfo: Pointer to store the parsed connection information
  */
-static void
-parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo,
-		char ** snapshotMode, const char * customArgs)
-{
-	char *args, *tmp;
-
-	/* Extract connector type from main argument */
-	myConnectorId = DatumGetUInt32(main_arg);
-
-	/*
-	 * If customArgs is supplied, make a copy or it and parse. If not, we make a copy
-	 * of the args from MyBgworkerEntry and parse that instead
-	 */
-	if (customArgs)
-		args = pstrdup(customArgs);
-	else
-		args = pstrdup(MyBgworkerEntry->bgw_extra);
-
-	/* Parse individual fields */
-	tmp = strtok(args, ":");
-	if (tmp)
-		connInfo->hostname = pstrdup(tmp);
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		connInfo->port = atoi(tmp);
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		connInfo->user = pstrdup(tmp);
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		connInfo->pwd = pstrdup(tmp);
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		connInfo->src_db = pstrdup(tmp);
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		connInfo->dst_db = pstrdup(tmp);
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		connInfo->table = pstrdup(tmp);
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		*connectorType = atoi(tmp);
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		connInfo->name = pstrdup(tmp);
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		connInfo->rulefile = pstrdup(tmp);
-	tmp = strtok(NULL, ":");
-	if (tmp)
-		*snapshotMode = pstrdup(tmp);
-
-	pfree(args);
-
-	/* Validate required fields */
-	if (!connInfo->hostname || !connInfo->user || !connInfo->pwd || !connInfo->dst_db)
-	{
-		set_shm_connector_errmsg(myConnectorId, "Missing required arguments for SynchDB engine initialization");
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("missing required arguments for SynchDB engine initialization"),
-				 errhint("hostname, user, password and destination database are required")));
-	}
-
-	/* Log parsed arguments (TODO: consider removing or obfuscating sensitive data in production) */
-	elog(LOG, "SynchDB engine initialized with: myConnectorId %d, host %s, port %u, "
-			"user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s), conninfo_name %s"
-			" rulefile %s snapshotmode %s",
-			myConnectorId,
-			connInfo->hostname, connInfo->port, connInfo->user,
-			connInfo->src_db ? connInfo->src_db : "N/A",
-			connInfo->dst_db,
-			connInfo->table ? connInfo->table : "N/A",
-			*connectorType, connectorTypeToString(*connectorType),
-			connInfo->name, connInfo->rulefile, *snapshotMode);
-}
+//static void
+//parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo,
+//		char ** snapshotMode, const char * customArgs)
+//{
+//	char *args, *tmp;
+//
+//	/* Extract connector type from main argument */
+//	myConnectorId = DatumGetUInt32(main_arg);
+//
+//	/*
+//	 * If customArgs is supplied, make a copy or it and parse. If not, we make a copy
+//	 * of the args from MyBgworkerEntry and parse that instead
+//	 */
+//	if (customArgs)
+//		args = pstrdup(customArgs);
+//	else
+//		args = pstrdup(MyBgworkerEntry->bgw_extra);
+//
+//	/* Parse individual fields */
+//	tmp = strtok(args, ":");
+//	if (tmp)
+//		connInfo->hostname = pstrdup(tmp);
+//	tmp = strtok(NULL, ":");
+//	if (tmp)
+//		connInfo->port = atoi(tmp);
+//	tmp = strtok(NULL, ":");
+//	if (tmp)
+//		connInfo->user = pstrdup(tmp);
+//	tmp = strtok(NULL, ":");
+//	if (tmp)
+//		connInfo->pwd = pstrdup(tmp);
+//	tmp = strtok(NULL, ":");
+//	if (tmp)
+//		connInfo->src_db = pstrdup(tmp);
+//	tmp = strtok(NULL, ":");
+//	if (tmp)
+//		connInfo->dst_db = pstrdup(tmp);
+//	tmp = strtok(NULL, ":");
+//	if (tmp)
+//		connInfo->table = pstrdup(tmp);
+//	tmp = strtok(NULL, ":");
+//	if (tmp)
+//		*connectorType = atoi(tmp);
+//	tmp = strtok(NULL, ":");
+//	if (tmp)
+//		connInfo->name = pstrdup(tmp);
+//	tmp = strtok(NULL, ":");
+//	if (tmp)
+//		connInfo->rulefile = pstrdup(tmp);
+//	tmp = strtok(NULL, ":");
+//	if (tmp)
+//		*snapshotMode = pstrdup(tmp);
+//
+//	pfree(args);
+//
+//	/* Validate required fields */
+//	if (!connInfo->hostname || !connInfo->user || !connInfo->pwd || !connInfo->dst_db)
+//	{
+//		set_shm_connector_errmsg(myConnectorId, "Missing required arguments for SynchDB engine initialization");
+//		ereport(ERROR,
+//				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+//				 errmsg("missing required arguments for SynchDB engine initialization"),
+//				 errhint("hostname, user, password and destination database are required")));
+//	}
+//
+//	/* Log parsed arguments (TODO: consider removing or obfuscating sensitive data in production) */
+//	elog(LOG, "SynchDB engine initialized with: myConnectorId %d, host %s, port %u, "
+//			"user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s), conninfo_name %s"
+//			" rulefile %s snapshotmode %s",
+//			myConnectorId,
+//			connInfo->hostname, connInfo->port, connInfo->user,
+//			connInfo->src_db ? connInfo->src_db : "N/A",
+//			connInfo->dst_db,
+//			connInfo->table ? connInfo->table : "N/A",
+//			*connectorType, connectorTypeToString(*connectorType),
+//			connInfo->name, connInfo->rulefile, *snapshotMode);
+//}
 
 /**
  * setup_environment - Prepares the environment for the SynchDB background worker
@@ -1129,7 +1138,7 @@ parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *co
  * @param dst_db: The name of the destination database to connect to
  */
 static void
-setup_environment(ConnectorType connectorType, const char *dst_db)
+setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode)
 {
 	pid_t enginepid;
 
@@ -1141,30 +1150,41 @@ setup_environment(ConnectorType connectorType, const char *dst_db)
 	/* Unblock signals to allow handling */
 	BackgroundWorkerUnblockSignals();
 
-	/* Connect to current database: NULL user - bootstrap superuser is used */
-	BackgroundWorkerInitializeConnection(dst_db, NULL, 0);
-
-	/* Initialize or attach to SynchDB shared memory */
+	/* Initialize or attach to SynchDB shared memory and set cleanup handler */
 	synchdb_init_shmem();
-
-	/* Set up cleanup handler for shared memory */
 	on_shmem_exit(synchdb_detach_shmem, UInt32GetDatum(myConnectorId));
 
 	/* Check if the worker is already running */
 	enginepid = get_shm_connector_pid(myConnectorId);
 	if (enginepid != InvalidPid)
 		ereport(ERROR,
-				(errmsg("synchdb %s worker (%u) is already running under PID %d",
-						connectorTypeToString(connectorType),
-						connectorType,
+				(errmsg("synchdb worker is already running under PID %d",
 						(int)enginepid)));
+
+	/* read the connector type, conninfo and snapshot mode from synchdb shared memory */
+	*connectorType = sdb_state->connectors[myConnectorId].type;
+	*snapshotMode = pstrdup(sdb_state->connectors[myConnectorId].snapshotMode);
+	memcpy(conninfo, &(sdb_state->connectors[myConnectorId].conninfo), sizeof(ConnectionInfo));
 
 	/* Register this process as the worker for this connector type */
 	set_shm_connector_pid(myConnectorId, MyProcPid);
-	sdb_state->connectors[myConnectorId].type = connectorType;
+
+	/* Connect to current database: NULL user - bootstrap superuser is used */
+	BackgroundWorkerInitializeConnection(conninfo->dstdb, NULL, 0);
+
+	elog(LOG, "obtained conninfo from shm: myConnectorId %d, name %s, host %s, port %u, "
+			"user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s), conninfo_name %s"
+			" rulefile %s snapshotMode %s",
+			myConnectorId, conninfo->name,
+			conninfo->hostname, conninfo->port, conninfo->user,
+			conninfo->srcdb ? conninfo->srcdb : "N/A",
+			conninfo->dstdb,
+			conninfo->table ? conninfo->table : "N/A",
+			*connectorType, connectorTypeToString(*connectorType),
+			conninfo->name, conninfo->rulefile, *snapshotMode);
 
 	elog(LOG, "Environment setup completed for SynchDB %s worker (type %u)",
-		 connectorTypeToString(connectorType), connectorType);
+		 connectorTypeToString(*connectorType), *connectorType);
 }
 
 /**
@@ -1266,11 +1286,6 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 	ConnectorState currstate;
 	bool dbzExitSignal = false;
 
-	/* initialize batchinfo */
-	myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
-	myBatchInfo.batchSize = 0;
-	myBatchInfo.currRecordIndex = -1;
-
 	elog(LOG, "Main LOOP ENTER ");
 	while (!ShutdownRequestPending)
 	{
@@ -1357,7 +1372,7 @@ assign_connector_id(char * name)
 	 */
 	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
 	{
-		if (!strcasecmp(sdb_state->connectors[i].name, name))
+		if (!strcasecmp(sdb_state->connectors[i].conninfo.name, name))
 		{
 			return i;
 		}
@@ -1367,7 +1382,7 @@ assign_connector_id(char * name)
 	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
 	{
 		if (sdb_state->connectors[i].state == STATE_UNDEF &&
-				strlen(sdb_state->connectors[i].name) == 0)
+				strlen(sdb_state->connectors[i].conninfo.name) == 0)
 		{
 			return i;
 		}
@@ -1394,7 +1409,7 @@ get_shm_connector_id_by_name(const char * name)
 
 	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
 	{
-		if (!strcmp(sdb_state->connectors[i].name, name))
+		if (!strcmp(sdb_state->connectors[i].conninfo.name, name))
 		{
 			return i;
 		}
@@ -1569,8 +1584,8 @@ set_shm_connector_dbs(int connectorId, char *srcdb, char *dstdb)
 		return;
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	strlcpy(sdb_state->connectors[connectorId].srcdb, srcdb, SYNCHDB_MAX_DB_NAME_SIZE);
-	strlcpy(sdb_state->connectors[connectorId].dstdb, dstdb, SYNCHDB_MAX_DB_NAME_SIZE);
+	strlcpy(sdb_state->connectors[connectorId].conninfo.srcdb, srcdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+	strlcpy(sdb_state->connectors[connectorId].conninfo.dstdb, dstdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
 	LWLockRelease(&sdb_state->lock);
 }
 
@@ -1806,18 +1821,20 @@ synchdb_engine_main(Datum main_arg)
 	ConnectionInfo connInfo = {0};
 	char * snapshotMode = NULL;
 
-	/* Parse arguments and initialize connection info */
-	parse_arguments(main_arg, &connectorType, &connInfo, &snapshotMode, NULL);
+	/* extract connectorId from main_arg */
+	myConnectorId = DatumGetUInt32(main_arg);
 
-	/* Set up signal handlers and initialize shared memory */
-	setup_environment(connectorType, connInfo.dst_db);
+	/* initialize batchinfo */
+	myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
+	myBatchInfo.batchSize = 0;
+	myBatchInfo.currRecordIndex = -1;
+
+	/* Set up signal handlers, initialize shared memory and obtain connInfo*/
+	setup_environment(&connectorType, &connInfo, &snapshotMode);
 
 	/* Initialize the connector state */
 	set_shm_connector_state(myConnectorId, STATE_INITIALIZING);
 	set_shm_connector_errmsg(myConnectorId, NULL);
-	set_shm_connector_dbs(myConnectorId, connInfo.src_db, connInfo.dst_db);
-	memset(sdb_state->connectors[myConnectorId].name, 0, SYNCHDB_MAX_DB_NAME_SIZE);
-	strlcpy(sdb_state->connectors[myConnectorId].name, connInfo.name, SYNCHDB_MAX_DB_NAME_SIZE);
 
 	/* initialize format converter */
 	fc_initFormatConverter(connectorType);
@@ -1840,22 +1857,9 @@ synchdb_engine_main(Datum main_arg)
 	/* Main processing loop */
 	main_loop(connectorType, &connInfo, snapshotMode);
 
-//	/* Cleanup */
-//	cleanup(connectorType);
-
-	/* Free allocated memory */
-	if (connInfo.hostname)
-		pfree(connInfo.hostname);
-	if (connInfo.user)
-		pfree(connInfo.user);
-	if (connInfo.pwd)
-		pfree(connInfo.pwd);
-	if (connInfo.src_db)
-		pfree(connInfo.src_db);
-	if (connInfo.dst_db)
-		pfree(connInfo.dst_db);
-	if (connInfo.table)
-		pfree(connInfo.table);
+	elog(LOG, "synchdb worker shutting down .... ");
+	if (snapshotMode)
+		pfree(snapshotMode);
 
 	proc_exit(0);
 }
@@ -1878,7 +1882,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	 * all selected table schemas and proceed with CDC. We currently
 	 * do not allow user to specify a different snapshot mode during
 	 * 'synchdb_start_engine_bgw'. However, a different snapshot mode
-	 * can be specified in the 'synchdb_restart_connector' routine
+	 * can be specified in the 'synchdb_restart_connector' sql function
 	 */
 	char * snapshotMode = "initial";
 
@@ -1886,11 +1890,13 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	text *name_text = PG_GETARG_TEXT_PP(0);
 
 	/* Sanity check on input arguments */
-	if (VARSIZE(name_text) - VARHDRSZ == 0)
+	if (VARSIZE(name_text) - VARHDRSZ == 0 ||
+			VARSIZE(name_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("connection name cannot be empty")));
+				 errmsg("connection name cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_NAME_SIZE)));
 	}
 
 	ret = ra_getConninfoByName(text_to_cstring(name_text), &connInfo, &connector);
@@ -2055,7 +2061,7 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
 		values[0] = Int32GetDatum(*idx);
 		values[1] = CStringGetTextDatum(get_shm_connector_name(sdb_state->connectors[*idx].type));
-		values[2] = CStringGetTextDatum(sdb_state->connectors[*idx].name);
+		values[2] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
 		values[3] = Int32GetDatum((int)get_shm_connector_pid(*idx));
 		values[4] = CStringGetTextDatum(get_shm_connector_state(*idx));
 		values[5] = CStringGetTextDatum(get_shm_connector_errmsg(*idx));
@@ -2251,29 +2257,33 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	text *table_text = PG_GETARG_TEXT_PP(7);
 	text *connector_text = PG_GETARG_TEXT_PP(8);
 	text *rulefile_text = PG_GETARG_TEXT_PP(9);
-	char *connector;
+	char *connector = NULL;
 
-	ConnectionInfo connInfo;
+	ConnectionInfo connInfo = {0};
 	StringInfoData strinfo;
 	initStringInfo(&strinfo);
 
 	/* Sanity check on input arguments */
-	if (VARSIZE(name_text) - VARHDRSZ == 0)
+	if (VARSIZE(name_text) - VARHDRSZ == 0 ||
+			VARSIZE(name_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("name cannot be empty")));
+				 errmsg("name cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_NAME_SIZE)));
 	}
-	connInfo.name = text_to_cstring(name_text);
+	strlcpy(connInfo.name, text_to_cstring(name_text), SYNCHDB_CONNINFO_NAME_SIZE);
 
 	/* Sanity check on input arguments */
-	if (VARSIZE(hostname_text) - VARHDRSZ == 0)
+	if (VARSIZE(hostname_text) - VARHDRSZ == 0 ||
+			VARSIZE(hostname_text) - VARHDRSZ > SYNCHDB_CONNINFO_HOSTNAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("hostname cannot be empty")));
+				 errmsg("hostname cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_HOSTNAME_SIZE)));
 	}
-	connInfo.hostname = text_to_cstring(hostname_text);
+	strlcpy(connInfo.hostname, text_to_cstring(hostname_text), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
 
 	connInfo.port = port;
 	if (connInfo.port == 0 || connInfo.port > 65535)
@@ -2283,41 +2293,57 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 				 errmsg("invalid port number")));
 	}
 
-	if (VARSIZE(user_text) - VARHDRSZ == 0)
+	if (VARSIZE(user_text) - VARHDRSZ == 0 ||
+			VARSIZE(user_text) - VARHDRSZ > SYNCHDB_CONNINFO_USERNAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("username cannot be empty")));
+				 errmsg("username cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_USERNAME_SIZE)));
 	}
-	connInfo.user = text_to_cstring(user_text);
+	strlcpy(connInfo.user, text_to_cstring(user_text), SYNCHDB_CONNINFO_USERNAME_SIZE);
 
-	if (VARSIZE(pwd_text) - VARHDRSZ == 0)
+	if (VARSIZE(pwd_text) - VARHDRSZ == 0 ||
+			VARSIZE(pwd_text) - VARHDRSZ > SYNCHDB_CONNINFO_PASSWORD_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("password cannot be empty")));
+				 errmsg("password cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
 	}
-	connInfo.pwd = text_to_cstring(pwd_text);
+	strlcpy(connInfo.pwd, text_to_cstring(pwd_text), SYNCHDB_CONNINFO_PASSWORD_SIZE);
 
 	/* source database can be empty or NULL */
 	if (VARSIZE(src_db_text) - VARHDRSZ == 0)
-		connInfo.src_db = "null";
+		strlcpy(connInfo.srcdb, "null", SYNCHDB_CONNINFO_DB_NAME_SIZE);
+	else if (VARSIZE(src_db_text) - VARHDRSZ > SYNCHDB_CONNINFO_DB_NAME_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("source database cannot be longer than %d",
+						 SYNCHDB_CONNINFO_DB_NAME_SIZE)));
 	else
-		connInfo.src_db = text_to_cstring(src_db_text);
+		strlcpy(connInfo.srcdb, text_to_cstring(src_db_text), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 
-	if (VARSIZE(dst_db_text) - VARHDRSZ == 0)
+	if (VARSIZE(dst_db_text) - VARHDRSZ == 0 ||
+			VARSIZE(dst_db_text) - VARHDRSZ > SYNCHDB_CONNINFO_DB_NAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("destination database cannot be empty")));
+				 errmsg("destination database cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_DB_NAME_SIZE)));
 	}
-	connInfo.dst_db = text_to_cstring(dst_db_text);
+	strlcpy(connInfo.dstdb, text_to_cstring(dst_db_text), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 
 	/* table can be empty or NULL */
 	if (VARSIZE(table_text) - VARHDRSZ == 0)
-		connInfo.table = "null";
+		strlcpy(connInfo.table, "null", SYNCHDB_CONNINFO_TABLELIST_SIZE);
+	else if (VARSIZE(table_text) - VARHDRSZ > SYNCHDB_CONNINFO_TABLELIST_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("table list cannot be longer than %d",
+						 SYNCHDB_CONNINFO_TABLELIST_SIZE)));
 	else
-		connInfo.table = text_to_cstring(table_text);
+		strlcpy(connInfo.table, text_to_cstring(table_text), SYNCHDB_CONNINFO_TABLELIST_SIZE);
 
 	if (VARSIZE(connector_text) - VARHDRSZ == 0)
 	{
@@ -2327,11 +2353,22 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	}
 	connector = text_to_cstring(connector_text);
 
+	/* todo: check more */
+	if (strcasecmp(connector, "mysql") && strcasecmp(connector, "sqlserver"))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported connector")));
+
 	/* rulefile can be empty or NULL */
 	if (VARSIZE(rulefile_text) - VARHDRSZ == 0)
-		connInfo.rulefile = "null";
+		strlcpy(connInfo.rulefile, "null", SYNCHDB_CONNINFO_RULEFILENAME_SIZE);
+	else if (VARSIZE(rulefile_text) - VARHDRSZ > SYNCHDB_CONNINFO_RULEFILENAME_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("rule filename cannot be longer than %d",
+						 SYNCHDB_CONNINFO_RULEFILENAME_SIZE)));
 	else
-		connInfo.rulefile = text_to_cstring(rulefile_text);
+		strlcpy(connInfo.rulefile, text_to_cstring(rulefile_text), SYNCHDB_CONNINFO_RULEFILENAME_SIZE);
 
 	appendStringInfo(&strinfo, "INSERT INTO %s (name, isactive, data)"
 			" VALUES ('%s', %s, jsonb_build_object('hostname', '%s', "
@@ -2346,8 +2383,8 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 			connInfo.user,
 			connInfo.pwd,
 			SYNCHDB_SECRET,
-			connInfo.src_db,
-			connInfo.dst_db,
+			connInfo.srcdb,
+			connInfo.dstdb,
 			connInfo.table,
 			connector,
 			connInfo.rulefile);
@@ -2429,12 +2466,16 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 	 */
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	req->reqstate = STATE_RESTARTING;
+
+	/* reqdata contains snapshot mode */
 	memset(req->reqdata, 0, SYNCHDB_ERRMSG_SIZE);
-	snprintf(req->reqdata, SYNCHDB_ERRMSG_SIZE, "%s:%u:%s:%s:%s:%s:%s:%d:%s:%s:%s",
-			 connInfo.hostname, connInfo.port, connInfo.user, connInfo.pwd,
-			 connInfo.src_db, connInfo.dst_db, connInfo.table,
-			 fc_get_connector_type(connector), connInfo.name,
-			 connInfo.rulefile, snapshot_mode);
+	snprintf(req->reqdata, SYNCHDB_ERRMSG_SIZE,"%s", snapshot_mode);
+
+	/*
+	 * reqconninfo contains a copy of conninfo recently read in case it has been
+	 * changed since connector start
+	 */
+	memcpy(&req->reqconninfo, &connInfo, sizeof(ConnectionInfo));
 	LWLockRelease(&sdb_state->lock);
 
 	elog(WARNING, "sent restart request interrupt to dbz connector (%s)",

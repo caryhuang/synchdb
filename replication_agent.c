@@ -828,23 +828,23 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 		elog(WARNING, "connection name %s does not exist", name);
 		return -1;
 	}
-	conninfo->name = pstrdup(name);
-	conninfo->hostname = pstrdup(TextDatumGetCString(res[0]));
+	strlcpy(conninfo->name, name, SYNCHDB_CONNINFO_NAME_SIZE);
+	strlcpy(conninfo->hostname, TextDatumGetCString(res[0]), SYNCHDB_CONNINFO_HOSTNAME_SIZE) ;
 	conninfo->port = atoi(TextDatumGetCString(res[1]));
-	conninfo->user = pstrdup(TextDatumGetCString(res[2]));
-	conninfo->pwd = pstrdup(TextDatumGetCString(res[3]));
-	conninfo->src_db = pstrdup(TextDatumGetCString(res[4]));
-	conninfo->dst_db = pstrdup(TextDatumGetCString(res[5]));
-	conninfo->table = pstrdup(TextDatumGetCString(res[6]));
+	strlcpy(conninfo->user, TextDatumGetCString(res[2]), SYNCHDB_CONNINFO_USERNAME_SIZE);
+	strlcpy(conninfo->pwd, TextDatumGetCString(res[3]), SYNCHDB_CONNINFO_PASSWORD_SIZE);
+	strlcpy(conninfo->srcdb, TextDatumGetCString(res[4]), SYNCHDB_CONNINFO_DB_NAME_SIZE);
+	strlcpy(conninfo->dstdb, TextDatumGetCString(res[5]), SYNCHDB_CONNINFO_DB_NAME_SIZE);
+	strlcpy(conninfo->table, TextDatumGetCString(res[6]) ,SYNCHDB_CONNINFO_TABLELIST_SIZE);
 	*connector = pstrdup(TextDatumGetCString(res[7]));
 	conninfo->active = DatumGetBool(res[8]);
-	conninfo->rulefile =  pstrdup(TextDatumGetCString(res[9]));
+	strlcpy(conninfo->rulefile, TextDatumGetCString(res[9]), SYNCHDB_CONNINFO_RULEFILENAME_SIZE);
 
 	elog(DEBUG2, "name %s hostname %s, port %d, user %s pwd %s srcdb %s "
 			"dstdb %s table %s connector %s rulefile %s",
 			conninfo->name, conninfo->hostname, conninfo->port,
-			conninfo->user, conninfo->pwd, conninfo->src_db,
-			conninfo->dst_db, conninfo->table, *connector,
+			conninfo->user, conninfo->pwd, conninfo->srcdb,
+			conninfo->dstdb, conninfo->table, *connector,
 			conninfo->rulefile);
 	pfree(res);
 	return 0;
