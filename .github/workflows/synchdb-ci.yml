@@ -80,12 +80,14 @@ jobs:
     - name: Set up test environment
       run: |
         sudo apt-get install -y docker-compose
+        echo "Docker Compose version:"
+        docker-compose --version
         echo "Starting MySQL container..."
-        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml up -d --no-remove-orphans
+        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml up -d
         echo "Starting SQL Server container..."
-        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml up -d --no-remove-orphans
+        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml up -d
         echo "Waiting for containers to be ready..."
-        sleep 30  # Give containers time to fully start
+        sleep 10  # Give containers time to fully start
         echo "Docker container status:"
         docker ps -a
         echo "Docker logs for MySQL:"
