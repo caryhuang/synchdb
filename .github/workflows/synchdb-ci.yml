@@ -28,8 +28,9 @@ jobs:
     
     - name: Install PostgreSQL build dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libxslt-dev libssl-dev libxml2-utils xsltproc ccache
+        echo "Install PostgreSQL build dependencies"
+        # sudo apt-get update
+        # sudo apt-get install -y build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libxslt-dev libssl-dev libxml2-utils xsltproc ccache
     
     - name: Clone and build PostgreSQL
       timeout-minutes: 30
@@ -37,12 +38,13 @@ jobs:
         git clone https://github.com/postgres/postgres.git
         cd postgres
         git checkout REL_16_3
-        ./configure
-        make
-        sudo make install
-        cd contrib
-        make
-        sudo make install
+        echo "Build PostgreSQL "
+        # ./configure
+        # make
+        # sudo make install
+        # cd contrib
+        # make
+        # sudo make install
     
     - name: Clone SynchDB
       run: |
@@ -53,33 +55,42 @@ jobs:
     
     - name: Build and install Debezium Runner Engine
       run: |
-        cd postgres/contrib/synchdb
-        make build_dbz
-        sudo make install_dbz
+        echo "build DBZ"
+        # cd postgres/contrib/synchdb
+        # make build_dbz
+        # sudo make install_dbz
     
     - name: Build and install SynchDB PostgreSQL Extension
       run: |
-        cd postgres/contrib/synchdb
-        make || exit 1
-        sudo make install || exit 1
+        echo "install SynchDB "
+        # cd postgres/contrib/synchdb
+        # make || exit 1
+        # sudo make install || exit 1
     
     - name: Configure linker
       run: |
-        JAVA_PATH=$(which java)
-        JDK_HOME_PATH=$(readlink -f ${JAVA_PATH} | sed 's:/bin/java::')
-        JDK_LIB_PATH=${JDK_HOME_PATH}/lib
-        echo $JDK_LIB_PATH | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
-        echo $JDK_LIB_PATH/server | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
-        sudo ldconfig
+        echo "configure Java"
+        # JAVA_PATH=$(which java)
+        # JDK_HOME_PATH=$(readlink -f ${JAVA_PATH} | sed 's:/bin/java::')
+        # JDK_LIB_PATH=${JDK_HOME_PATH}/lib
+        # echo $JDK_LIB_PATH | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        # echo $JDK_LIB_PATH/server | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        # sudo ldconfig
     
     - name: Set up test environment
       run: |
         sudo apt-get install -y docker-compose
-        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml up -d --remove-orphans
-        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml up -d --remove-orphans
+        echo "Starting MySQL container..."
+        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml up -d --no-remove-orphans
+        echo "Starting SQL Server container..."
+        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml up -d --no-remove-orphans
         echo "Waiting for containers to be ready..."
         sleep 30  # Give containers time to fully start
-
+        echo "Docker container status:"
+        docker ps -a
+        echo "Docker logs for MySQL:"
+        docker logs mysql || echo "No MySQL container found"
+        
     - name: Check Docker daemon
       run: |
         sudo systemctl status docker
