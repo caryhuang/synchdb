@@ -77,19 +77,32 @@ jobs:
         sudo apt-get install -y docker-compose
         docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml up -d --remove-orphans
         docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml up -d --remove-orphans
+        echo "Waiting for containers to be ready..."
+        sleep 30  # Give containers time to fully start
+
+    - name: Check Docker daemon
+      run: |
+        sudo systemctl status docker
+        docker info
+        docker ps
+        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml ps
+        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml ps
 
     - name: Prepare MySQL test database
       run: |
+        echo "MySQL container status:"
+        docker ps | grep mysql
+        echo "Attempting to connect to MySQL..."
+        docker exec -i mysql mysql -uroot -pmysqlpwdroot -e "SELECT VERSION();" || { echo "Failed to connect to MySQL"; docker logs mysql; exit 1; }
         docker exec -i mysql mysql -uroot -pmysqlpwdroot << EOF
         GRANT replication client ON *.* TO mysqluser;
         GRANT replication slave ON *.* TO mysqluser;
         GRANT RELOAD ON *.* TO 'mysqluser'@'%';
         FLUSH PRIVILEGES;
         EOF
-        
-        docker exec -i mysql mysql -uroot -pmysqlpwdroot << EOF
-        SHOW GRANTS FOR mysqluser;
-        EOF
+
+        echo "Showing grants for mysqluser:"
+        docker exec -i mysql mysql -uroot -pmysqlpwdroot -e "SHOW GRANTS FOR mysqluser;"
 
     - name: Prepare SQL Server test database
       run: |
@@ -103,6 +116,7 @@ jobs:
         ldd postgres/contrib/synchdb/synchdb.so
 
     - name: Initialize and start PostgreSQL
+      timeout-minutes: 5
       run: |
         mkdir synchdbtest
         initdb -D synchdbtest
@@ -110,12 +124,13 @@ jobs:
         createdb test_db
 
     - name: Install SynchDB extension
+      timeout-minutes: 2
       run: |
         psql -d test_db -c "CREATE EXTENSION synchdb CASCADE;"
 
     - name: Create connection information and start connectors
       run: |
-        psql -d test_db << EOF
+        psql -d test_db << EOF || { echo "Failed to create connections or start connectors"; cat logfile; exit 1; }
         SELECT synchdb_add_conninfo('mysqlconn', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql', 'myrule.json');
         SELECT synchdb_add_conninfo('sqlserverconn', '127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver', '');
         SELECT synchdb_start_engine_bgw('mysqlconn');
@@ -170,3 +185,10 @@ jobs:
         exit 1
 
     # Add any additional tests or checks here
+
+    - name: Cleanup
+      if: always()
+      run: |
+        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml down
+        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml down
+        pg_ctl -D synchdbtest stop
