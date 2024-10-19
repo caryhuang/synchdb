@@ -121,6 +121,9 @@ jobs:
       run: |
         docker ps
         id=$(docker ps | grep sqlserver | awk '{print $1}')
+        echo "check sqlcmd command"
+        docker exec -i $id ls -l /opt/mssql-tools/bin/sqlcmd
+        echo "copy inventory SQL "
         docker cp postgres/contrib/synchdb/inventory.sql $id:/
         docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -i /inventory.sql
         docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "SELECT COUNT(*) from orders"
