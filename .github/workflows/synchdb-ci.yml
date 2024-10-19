@@ -182,7 +182,7 @@ jobs:
         echo "max_connections = 100" >> synchdbtest/postgresql.conf
         echo "shared_buffers = 128MB" >> synchdbtest/postgresql.conf
         echo "dynamic_shared_memory_type = posix" >> synchdbtest/postgresql.conf
-        echo "Starting PostgreSQL:"
+        echo "Starting PostgreSQL @ $PWD:"
         pg_ctl -D synchdbtest -l logfile start
         echo "Creating test database:"
         createdb test_db
@@ -282,7 +282,8 @@ jobs:
     - name: Check PostgreSQL logs
       if: failure()
       run: |
-        cat synchdbtest/logfile
+        echo "check PG log @ $PWD"
+        cat logfile
     
     - name: Cleanup
       if: always()
