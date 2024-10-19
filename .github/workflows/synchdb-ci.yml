@@ -177,6 +177,11 @@ jobs:
         mkdir synchdbtest
         echo "Initializing database:"
         initdb -D synchdbtest
+        echo "Configuring PostgreSQL:"
+        echo "shared_preload_libraries = 'pgcrypto'" >> synchdbtest/postgresql.conf
+        echo "max_connections = 100" >> synchdbtest/postgresql.conf
+        echo "shared_buffers = 128MB" >> synchdbtest/postgresql.conf
+        echo "dynamic_shared_memory_type = posix" >> synchdbtest/postgresql.conf
         echo "Starting PostgreSQL:"
         pg_ctl -D synchdbtest -l logfile start
         echo "Creating test database:"
@@ -184,11 +189,30 @@ jobs:
         echo "PostgreSQL status:"
         pg_ctl -D synchdbtest status
 
+    - name: Check system resources
+      run: |
+        echo "Available memory:"
+        free -h
+        echo "Disk space:"
+        df -h
+        echo "Current user and permissions:"
+        id
+        ls -l synchdbtest
+    
     - name: Install SynchDB extension
       timeout-minutes: 2
       run: |
-        psql -d test_db -c "CREATE EXTENSION synchdb CASCADE;"
-
+        echo "PostgreSQL version:"
+        psql --version
+        echo "OpenSSL version:"
+        openssl version
+        echo "LD_LIBRARY_PATH:"
+        echo $LD_LIBRARY_PATH
+        echo "Installing pgcrypto extension:"
+        psql -d test_db -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" || { echo "pgcrypto installation failed"; cat synchdbtest/logfile; exit 1; }
+        echo "Installing synchdb extension:"
+        psql -d test_db -c "CREATE EXTENSION synchdb;" || { echo "synchdb installation failed"; cat synchdbtest/logfile; exit 1; }
+    
     - name: Verify PostgreSQL installation
       run: |
         echo "PostgreSQL version:"
@@ -255,7 +279,11 @@ jobs:
         exit 1
 
     # Add any additional tests or checks here
-
+    - name: Check PostgreSQL logs
+      if: failure()
+      run: |
+        cat synchdbtest/logfile
+    
     - name: Cleanup
       if: always()
       run: |
