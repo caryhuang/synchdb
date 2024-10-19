@@ -21,14 +21,24 @@
 #include "storage/lwlock.h"
 
 /* Constants */
+#define SYNCHDB_CONNINFO_NAME_SIZE 64
+#define SYNCHDB_CONNINFO_HOSTNAME_SIZE 256
+#define SYNCHDB_CONNINFO_USERNAME_SIZE 64
+#define SYNCHDB_CONNINFO_PASSWORD_SIZE 128
+#define SYNCHDB_CONNINFO_TABLELIST_SIZE 256
+#define SYNCHDB_CONNINFO_RULEFILENAME_SIZE 64
+#define SYNCHDB_CONNINFO_DB_NAME_SIZE 64
+#define SYNCHDB_MAX_ACTIVE_CONNECTORS 30
+
+#define SYNCHDB_OFFSET_SIZE 256
 #define SYNCHDB_ERRMSG_SIZE 256
-#define SYNCHDB_MAX_DB_NAME_SIZE 64
+#define SYNCHDB_SNAPSHOT_MODE_SIZE 32
+
 #define SYNCHDB_DATATYPE_NAME_SIZE 64
 #define SYNCHDB_OBJ_NAME_SIZE 128
 #define SYNCHDB_OBJ_TYPE_SIZE 32
 #define SYNCHDB_TRANSFORM_EXPRESSION_SIZE 256
 #define SYNCHDB_JSON_PATH_SIZE 128
-#define SYNCHDB_MAX_ACTIVE_CONNECTORS 30
 #define SYNCHDB_INVALID_BATCH_ID -1
 
 /*
@@ -80,12 +90,30 @@ typedef struct _BatchInfo
 } BatchInfo;
 
 /**
+ * ConnectionInfo - DBZ Connection info
+ */
+typedef struct _ConnectionInfo
+{
+	char name[SYNCHDB_CONNINFO_NAME_SIZE];
+    char hostname[SYNCHDB_CONNINFO_HOSTNAME_SIZE];
+    unsigned int port;
+    char user[SYNCHDB_CONNINFO_USERNAME_SIZE];
+    char pwd[SYNCHDB_CONNINFO_PASSWORD_SIZE];
+	char srcdb[SYNCHDB_CONNINFO_DB_NAME_SIZE];
+	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE];
+    char table[SYNCHDB_CONNINFO_TABLELIST_SIZE];
+    bool active;
+    char rulefile[SYNCHDB_CONNINFO_RULEFILENAME_SIZE];
+} ConnectionInfo;
+
+/**
  * SynchdbRequest - Structure representing a request to change connector state
  */
 typedef struct _SynchdbRequest
 {
 	ConnectorState reqstate;
 	char reqdata[SYNCHDB_ERRMSG_SIZE];
+	ConnectionInfo reqconninfo;
 } SynchdbRequest;
 
 /**
@@ -97,11 +125,10 @@ typedef struct _ActiveConnectors
 	ConnectorState state;
 	ConnectorType type;
 	SynchdbRequest req;
-	char name[SYNCHDB_MAX_DB_NAME_SIZE];
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
-	char dbzoffset[SYNCHDB_ERRMSG_SIZE];
-	char srcdb[SYNCHDB_MAX_DB_NAME_SIZE];
-	char dstdb[SYNCHDB_MAX_DB_NAME_SIZE];
+	char dbzoffset[SYNCHDB_OFFSET_SIZE];
+	char snapshotMode[SYNCHDB_SNAPSHOT_MODE_SIZE];
+	ConnectionInfo conninfo;
 } ActiveConnectors;
 
 /**
@@ -113,25 +140,7 @@ typedef struct _SynchdbSharedState
 	ActiveConnectors connectors[SYNCHDB_MAX_ACTIVE_CONNECTORS];
 } SynchdbSharedState;
 
-/**
- * ConnectionInfo - DBZ Connection info
- */
-typedef struct _ConnectionInfo
-{
-	char *name;
-    char *hostname;
-    unsigned int port;
-    char *user;
-    char *pwd;
-    char *src_db;
-    char *dst_db;
-    char *table;
-    bool active;
-    char * rulefile;
-} ConnectionInfo;
-
 /* Function prototypes */
-
 const char * get_shm_connector_name(ConnectorType type);
 pid_t get_shm_connector_pid(int connectorId);
 void set_shm_connector_pid(int connectorId, pid_t pid);
