@@ -93,8 +93,10 @@ jobs:
         echo "Docker logs for MySQL:"
         docker logs mysql || echo "No MySQL container found"
         id=$(docker ps | grep sqlserver | awk '{print $1}')
+        echo "check docker $id opt folder"
+        docker exec -i $id ls -l /opt/ 
         echo "check docker $id sqlcmd command"
-        docker exec -i $id ls -l /opt/mssql-tools/bin/sqlcmd || echo "sqlcmd not found on the sqlserver docker"
+        docker exec -i $id ls -l /opt/mssql-tools/bin/sqlcmd || { echo "sqlcmd not found on the sqlserver docker"; exit 1; }
         
     - name: Check Docker daemon
       run: |
