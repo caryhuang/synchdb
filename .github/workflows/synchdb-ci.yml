@@ -129,11 +129,11 @@ jobs:
         echo "SQL Server logs:"
         docker logs $id
         echo "Attempting to connect to SQL Server without SSL verification:"
-        docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION"
+        docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION"
         echo "Executing inventory.sql:"
-        docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql
+        docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql
         echo "Checking orders table:"
-        docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -C -d testDB -Q "SELECT COUNT(*) from orders"
+        docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -d testDB -Q "SELECT COUNT(*) from orders"
         
     - name: Check installation
       run: |
