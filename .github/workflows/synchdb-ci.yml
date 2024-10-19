@@ -126,8 +126,15 @@ jobs:
         id=$(docker ps | grep sqlserver | awk '{print $1}')
         echo "copy inventory SQL "
         docker cp postgres/contrib/synchdb/inventory.sql $id:/
-        docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -i /inventory.sql
-        docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "SELECT COUNT(*) from orders"
+        echo "SQL Server logs:"
+        docker logs $id
+        echo "Attempting to connect to SQL Server without SSL verification:"
+        docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION"
+        echo "Executing inventory.sql:"
+        docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql
+        echo "Checking orders table:"
+        docker exec -i $id /opt/mssql-tools/bin/sqlcmd -U sa -P 'Password!' -C -d testDB -Q "SELECT COUNT(*) from orders"
+        
     - name: Check installation
       run: |
         ldd postgres/contrib/synchdb/synchdb.so
@@ -163,18 +170,18 @@ jobs:
         
         while [ $attempt -le $max_attempts ]; do
           echo "Attempt $attempt of $max_attempts"
-          syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "SELECT COUNT(*) from orders" -h -1)
+          syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1)
           syncing_dst_count=$(psql -d test_db -t -c "SELECT COUNT(*) from inventory.orders;" | tr -d ' ')
           
           if [ "$syncing_src_count" = "$syncing_dst_count" ]; then
             echo "Initial sync complete. Adding new record to source."
-            docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
+            docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
             
             inner_max_attempts=10
             inner_attempt=1
             while [ $inner_attempt -le $inner_max_attempts ]; do
               echo "Attempt $inner_attempt of $inner_max_attempts for new record sync"
-              new_syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -Q "SELECT COUNT(*) from orders" -h -1)
+              new_syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1)
               new_syncing_dst_count=$(psql -d test_db -t -c "SELECT COUNT(*) from inventory.orders;" | tr -d ' ')
               
               if [ "$new_syncing_dst_count" = "$new_syncing_src_count" ]; then
