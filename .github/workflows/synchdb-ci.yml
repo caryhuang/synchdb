@@ -87,11 +87,14 @@ jobs:
         echo "Starting SQL Server container..."
         docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml up -d
         echo "Waiting for containers to be ready..."
-        sleep 10  # Give containers time to fully start
+        sleep 30  # Give containers time to fully start
         echo "Docker container status:"
         docker ps -a
         echo "Docker logs for MySQL:"
         docker logs mysql || echo "No MySQL container found"
+        id=$(docker ps | grep sqlserver | awk '{print $1}')
+        echo "check docker $id sqlcmd command"
+        docker exec -i $id ls -l /opt/mssql-tools/bin/sqlcmd || echo "sqlcmd not found on the sqlserver docker"
         
     - name: Check Docker daemon
       run: |
