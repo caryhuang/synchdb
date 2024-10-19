@@ -39,12 +39,16 @@ jobs:
         cd postgres
         git checkout REL_16_3
         echo "Build PostgreSQL "
-        ./configure
+        ./configure --prefix=/usr/local/pgsql
         make
         sudo make install
         cd contrib
         make
         sudo make install
+        echo "Adding PostgreSQL binaries to PATH"
+        echo "/usr/local/pgsql/bin" >> $GITHUB_PATH
+        echo "export PATH=/usr/local/pgsql/bin:$PATH" >> ~/.bashrc
+        source ~/.bashrc
     
     - name: Clone SynchDB
       run: |
@@ -142,16 +146,35 @@ jobs:
     - name: Initialize and start PostgreSQL
       timeout-minutes: 5
       run: |
+        echo "PostgreSQL binaries location:"
+        which psql
+        which initdb
+        which pg_ctl
+        echo "Creating database directory:"
         mkdir synchdbtest
+        echo "Initializing database:"
         initdb -D synchdbtest
+        echo "Starting PostgreSQL:"
         pg_ctl -D synchdbtest -l logfile start
+        echo "Creating test database:"
         createdb test_db
+        echo "PostgreSQL status:"
+        pg_ctl -D synchdbtest status
 
     - name: Install SynchDB extension
       timeout-minutes: 2
       run: |
         psql -d test_db -c "CREATE EXTENSION synchdb CASCADE;"
 
+    - name: Verify PostgreSQL installation
+      run: |
+        echo "PostgreSQL version:"
+        psql --version
+        echo "List of databases:"
+        psql -l
+        echo "PostgreSQL server version:"
+        psql -c "SELECT version();"
+    
     - name: Create connection information and start connectors
       run: |
         psql -d test_db << EOF || { echo "Failed to create connections or start connectors"; cat logfile; exit 1; }
