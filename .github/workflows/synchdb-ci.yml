@@ -70,6 +70,13 @@ jobs:
         cd postgres/contrib/synchdb
         make || exit 1
         sudo make install || exit 1
+        
+    - name: Build and install PostgreSQL pgcrypto Extension
+      run: |
+        echo "install PostgreSQL Extension pgcrypto "
+        cd postgres/contrib/pgcrypto
+        make || exit 1
+        sudo make install || exit 1  
     
     - name: Configure linker
       run: |
