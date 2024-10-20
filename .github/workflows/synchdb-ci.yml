@@ -209,9 +209,9 @@ jobs:
         echo "LD_LIBRARY_PATH:"
         echo $LD_LIBRARY_PATH
         echo "Installing pgcrypto extension:"
-        psql -d test_db -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" || { echo "pgcrypto installation failed"; cat synchdbtest/logfile; exit 1; }
+        psql -d test_db -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" || { echo "pgcrypto installation failed"; cat logfile; exit 1; }
         echo "Installing synchdb extension:"
-        psql -d test_db -c "CREATE EXTENSION synchdb;" || { echo "synchdb installation failed"; cat synchdbtest/logfile; exit 1; }
+        psql -d test_db -c "CREATE EXTENSION synchdb;" || { echo "synchdb installation failed"; cat logfile; exit 1; }
     
     - name: Verify PostgreSQL installation
       run: |
