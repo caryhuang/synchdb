@@ -208,19 +208,21 @@ jobs:
         openssl version
         echo "LD_LIBRARY_PATH:"
         echo $LD_LIBRARY_PATH
-        echo "Installing pgcrypto extension:"
+        echo "Installing pgcrypto extension on test_db:"
         psql -d test_db -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" || { echo "pgcrypto installation failed"; cat logfile; exit 1; }
-        echo "Installing synchdb extension:"
+        echo "Installing synchdb extension on test_db:"
         psql -d test_db -c "CREATE EXTENSION synchdb;" || { echo "synchdb installation failed"; cat logfile; exit 1; }
     
     - name: Verify PostgreSQL installation
       run: |
         echo "PostgreSQL version:"
         psql --version
+        echo "=================="
         echo "List of databases:"
         psql -l
+        echo "=================="
         echo "PostgreSQL server version:"
-        psql -c "SELECT version();"
+        psql -d postgres -c "SELECT version();"
     
     - name: Create connection information and start connectors
       run: |
@@ -231,6 +233,11 @@ jobs:
         SELECT synchdb_start_engine_bgw('sqlserverconn');
         EOF
 
+    - name: Check PostgreSQL logs
+      run: |
+        echo "Recent PostgreSQL logs:"
+        tail -n 100 logfile
+        
     - name: View connector states and validate
       run: |
         max_attempts=10
