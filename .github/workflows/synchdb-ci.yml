@@ -178,7 +178,7 @@ jobs:
         echo "Initializing database:"
         initdb -D synchdbtest
         echo "Configuring PostgreSQL:"
-        echo "shared_preload_libraries = 'pgcrypto'" >> synchdbtest/postgresql.conf
+        echo "shared_preload_libraries = 'synchdb'" >> synchdbtest/postgresql.conf
         echo "max_connections = 100" >> synchdbtest/postgresql.conf
         echo "shared_buffers = 128MB" >> synchdbtest/postgresql.conf
         echo "dynamic_shared_memory_type = posix" >> synchdbtest/postgresql.conf
