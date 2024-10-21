@@ -186,6 +186,7 @@ jobs:
         pg_ctl -D synchdbtest -l logfile start
         echo "Creating test database:"
         createdb test_db
+        createdb sqlserverdb
         echo "PostgreSQL status:"
         pg_ctl -D synchdbtest status
 
@@ -248,7 +249,7 @@ jobs:
         while [ $attempt -le $max_attempts ]; do
           echo "Attempt $attempt of $max_attempts"
           syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1)
-          syncing_dst_count=$(psql -d test_db -t -c "SELECT COUNT(*) from inventory.orders;" | tr -d ' ')
+          syncing_dst_count=$(psql -d sqlserverdb -t -c "SELECT COUNT(*) from inventory.orders;" | tr -d ' ')
           
           if [ "$syncing_src_count" = "$syncing_dst_count" ]; then
             echo "Initial sync complete. Adding new record to source."
@@ -259,7 +260,7 @@ jobs:
             while [ $inner_attempt -le $inner_max_attempts ]; do
               echo "Attempt $inner_attempt of $inner_max_attempts for new record sync"
               new_syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1)
-              new_syncing_dst_count=$(psql -d test_db -t -c "SELECT COUNT(*) from inventory.orders;" | tr -d ' ')
+              new_syncing_dst_count=$(psql -d sqlserverdb -t -c "SELECT COUNT(*) from inventory.orders;" | tr -d ' ')
               
               if [ "$new_syncing_dst_count" = "$new_syncing_src_count" ]; then
                 echo "Both connectors are in syncing state"
