@@ -251,8 +251,16 @@ jobs:
         
         while [ $attempt -le $max_attempts ]; do
           echo "Attempt $attempt of $max_attempts"
-          syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1)
-          syncing_dst_count=$(psql -d sqlserverdb -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' ')
+          # Debug: Print raw output
+          echo "Raw SQL Server output:"
+          docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1
+          
+          echo "Raw PostgreSQL output:"
+          psql -d sqlserverdb -t -c "SELECT COUNT(*) from testDB.orders;"
+          
+          # Capture and clean the outputs
+          syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
+          syncing_dst_count=$(psql -d sqlserverdb -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
 
           # Debug: Print cleaned variables
           echo "Cleaned src_count: ['$syncing_src_count']"
@@ -266,8 +274,11 @@ jobs:
             inner_attempt=1
             while [ $inner_attempt -le $inner_max_attempts ]; do
               echo "Attempt $inner_attempt of $inner_max_attempts for new record sync"
-              new_syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1)
-              new_syncing_dst_count=$(psql -d sqlserverdb -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' ')
+              new_syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
+              new_syncing_dst_count=$(psql -d sqlserverdb -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
+              
+              echo "New src_count: ['$new_syncing_src_count']"
+              echo "New dst_count: ['$new_syncing_dst_count']"
               
               if [ "$new_syncing_dst_count" -eq "$new_syncing_src_count" ]; then
                 echo "Both connectors are in syncing state"
