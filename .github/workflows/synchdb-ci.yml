@@ -254,7 +254,20 @@ jobs:
           # Debug: Print raw output
           echo "Raw SQL Server output:"
           docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1
+
+          # Check if the table exists in PostgreSQL
+          table_exists=$(psql -d sqlserverdb -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'testdb' AND table_name = 'orders';" | tr -d ' \n')
           
+          echo "SQL Server count: ['$syncing_src_count']"
+          echo "Table exists in PostgreSQL: $table_exists"
+          
+          if [ "$table_exists" -eq "0" ]; then
+            echo "The 'orders' table doesn't exist in PostgreSQL yet. Waiting for replication..."
+            sleep 10  # Increased wait time
+            attempt=$((attempt+1))
+            continue
+          fi
+      
           echo "Raw PostgreSQL output:"
           psql -d sqlserverdb -t -c "SELECT COUNT(*) from testDB.orders;"
           
