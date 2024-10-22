@@ -92,7 +92,6 @@ static const char *connectorStateAsString(ConnectorState state);
 static void reset_shm_request_state(int connectorId);
 static int dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file);
 static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId, const char * snapshotMode);
-//static void parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo, char ** snapshotMode, const char * customArgs);
 static void setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode);
 static void initialize_jvm(void);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
@@ -1041,94 +1040,6 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 }
 
 /**
- * parse_arguments - Parses and validates arguments for the SynchDB engine
- *
- * This function extracts connection information from the background worker's
- * extra data and validates the required fields.
- *
- * @param main_arg: The main argument containing the connector type
- * @param connectorType: Pointer to store the parsed connector type
- * @param connInfo: Pointer to store the parsed connection information
- */
-//static void
-//parse_arguments(Datum main_arg, ConnectorType *connectorType, ConnectionInfo *connInfo,
-//		char ** snapshotMode, const char * customArgs)
-//{
-//	char *args, *tmp;
-//
-//	/* Extract connector type from main argument */
-//	myConnectorId = DatumGetUInt32(main_arg);
-//
-//	/*
-//	 * If customArgs is supplied, make a copy or it and parse. If not, we make a copy
-//	 * of the args from MyBgworkerEntry and parse that instead
-//	 */
-//	if (customArgs)
-//		args = pstrdup(customArgs);
-//	else
-//		args = pstrdup(MyBgworkerEntry->bgw_extra);
-//
-//	/* Parse individual fields */
-//	tmp = strtok(args, ":");
-//	if (tmp)
-//		connInfo->hostname = pstrdup(tmp);
-//	tmp = strtok(NULL, ":");
-//	if (tmp)
-//		connInfo->port = atoi(tmp);
-//	tmp = strtok(NULL, ":");
-//	if (tmp)
-//		connInfo->user = pstrdup(tmp);
-//	tmp = strtok(NULL, ":");
-//	if (tmp)
-//		connInfo->pwd = pstrdup(tmp);
-//	tmp = strtok(NULL, ":");
-//	if (tmp)
-//		connInfo->src_db = pstrdup(tmp);
-//	tmp = strtok(NULL, ":");
-//	if (tmp)
-//		connInfo->dst_db = pstrdup(tmp);
-//	tmp = strtok(NULL, ":");
-//	if (tmp)
-//		connInfo->table = pstrdup(tmp);
-//	tmp = strtok(NULL, ":");
-//	if (tmp)
-//		*connectorType = atoi(tmp);
-//	tmp = strtok(NULL, ":");
-//	if (tmp)
-//		connInfo->name = pstrdup(tmp);
-//	tmp = strtok(NULL, ":");
-//	if (tmp)
-//		connInfo->rulefile = pstrdup(tmp);
-//	tmp = strtok(NULL, ":");
-//	if (tmp)
-//		*snapshotMode = pstrdup(tmp);
-//
-//	pfree(args);
-//
-//	/* Validate required fields */
-//	if (!connInfo->hostname || !connInfo->user || !connInfo->pwd || !connInfo->dst_db)
-//	{
-//		set_shm_connector_errmsg(myConnectorId, "Missing required arguments for SynchDB engine initialization");
-//		ereport(ERROR,
-//				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-//				 errmsg("missing required arguments for SynchDB engine initialization"),
-//				 errhint("hostname, user, password and destination database are required")));
-//	}
-//
-//	/* Log parsed arguments (TODO: consider removing or obfuscating sensitive data in production) */
-//	elog(LOG, "SynchDB engine initialized with: myConnectorId %d, host %s, port %u, "
-//			"user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s), conninfo_name %s"
-//			" rulefile %s snapshotmode %s",
-//			myConnectorId,
-//			connInfo->hostname, connInfo->port, connInfo->user,
-//			connInfo->src_db ? connInfo->src_db : "N/A",
-//			connInfo->dst_db,
-//			connInfo->table ? connInfo->table : "N/A",
-//			*connectorType, connectorTypeToString(*connectorType),
-//			connInfo->name, connInfo->rulefile, *snapshotMode);
-//}
-
-/**
  * setup_environment - Prepares the environment for the SynchDB background worker
  *
  * This function sets up signal handlers, initializes the database connection,
@@ -1767,17 +1678,23 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
-	DefineCustomBoolVariable("synchdb.synchdb_auto_launcher",
-							 "option to automatic launch connector workers at server restarts. This option "
-							 "only works when synchdb is included in shared_preload_library option. Default true",
-							 NULL,
-							 &synchdb_auto_launcher,
-							 true,
-							 PGC_POSTMASTER,
-							 0,
-							 NULL,
-							 NULL,
-							 NULL);
+	if (process_shared_preload_libraries_in_progress)
+	{
+		/* can't define PGC_POSTMASTER variable after startup */
+		DefineCustomBoolVariable("synchdb.synchdb_auto_launcher",
+								 "option to automatic launch connector workers at server restarts. This option "
+								 "only works when synchdb is included in shared_preload_library option. Default true",
+								 NULL,
+								 &synchdb_auto_launcher,
+								 true,
+								 PGC_POSTMASTER,
+								 0,
+								 NULL,
+								 NULL,
+								 NULL);
+	}
+
+	MarkGUCPrefixReserved("synchdb");
 
 	/* create a pg_synchdb directory under $PGDATA to store connector meta data */
 	if (MakePGDirectory(SYNCHDB_METADATA_DIR) < 0)
