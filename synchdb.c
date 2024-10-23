@@ -1140,7 +1140,7 @@ initialize_jvm(void)
 	/* Configure JVM options */
 	options[0].optionString = javaopt;
 	options[1].optionString = "-Xrs"; // Reduce use of OS signals by JVM
-	vm_args.version = JNI_VERSION_21;
+	vm_args.version = JNI_VERSION_10;
 	vm_args.nOptions = 2;
 	vm_args.options = options;
 	vm_args.ignoreUnrecognized = JNI_FALSE;
