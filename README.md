@@ -1,459 +1,6 @@
-
 ## Introduction
 
 SynchDB is a PostgreSQL extension designed to replicate data from one or more heterogeneous databases (such as MySQL, MS SQLServer, Oracle, etc.) directly to PostgreSQL in a fast and reliable way. PostgreSQL serves as the destination from multiple heterogeneous database sources. No middleware or third-party software is required to orchestrate the data synchronization between heterogeneous databases and PostgreSQL. SynchDB extension itself is capable of handling all the data synchronization needs.
-
-It provides two key work modes that can be invoked using the built-in SQL functions:
-* Sync mode (for initial data synchronization)
-* Follow mode (for replicate incremental changes after initial sync)
-
-**Sync mode** copies tables from heterogeneous database into PostgreSQL, including its schema, indexes, triggers, other table properties as well as current data it holds.
-**Follow mode** subscribes to tables in a heterogeneous database to obtain incremental changes and apply them to the same tables in PostgreSQL, similar to PostgreSQL logical replication
-
-## Requirement
-The following software is required to build and run SynchDB. The versions listed are the versions tested during development. Older versions may still work.
-* Java Development Kit 22. Download [here](https://www.oracle.com/ca-en/java/technologies/downloads/)
-* Apache Maven 3.9.8. Download [here](https://maven.apache.org/download.cgi)
-* PostgreSQL 16.3 Source. Git clone [here](https://github.com/postgres/postgres). Refer to this [wiki](https://wiki.postgresql.org/wiki/Compile_and_Install_from_source_code) for PostgreSQL build requirements
-* Docker compose 2.28.1 (for testing). Refer to [here](https://docs.docker.com/compose/install/linux/)
-* Unix based operating system like Ubuntu 22.04 or MacOS
-
-## Build Procedure
-### Prepare Source
-
-Clone the PostgreSQL source and switch to 16.3 release tag
-```
-git clone https://github.com/postgres/postgres.git
-cd postgres
-git checkout REL_16_3
-```
-
-Clone the SynchDB source from within the extension folder
-Note: Branch *(synchdb-devel)[https://github.com/Hornetlabs/synchdb/tree/synchdb-devel]* is used for development so far.
-```
-cd contrib/
-git clone https://github.com/Hornetlabs/synchdb.git
-```
-
-### Prepare Tools
-#### Maven
-If you are working on Ubuntu 22.04.4 LTS, install the Maven as below:
-```
-sudo apt install maven
-```
-
-if you are using MacOS, you can use the brew command to install maven (refer (here)[https://brew.sh/] for how to install Homebrew) without any other settings:
-```
-brew install maven
-```
-
-#### Install Java SDK (OpenJDK)
-If you are working on Ubuntu 22.04.4 LTS, install the OpenJDK  as below:
-```
-sudo apt install openjdk-21-jdk
-```
-
-If you are working on MacOS, please install the JDK with brew command:
-```
-brew install openjdk@22
-```
-
-### Build and Install PostgreSQL
-This can be done by following the standard build and install procedure as described [here](https://www.postgresql.org/docs/current/install-make.html). Generally, it consists of:
-
-```
-cd /home/$USER/postgres
-./configure
-make
-sudo make install
-```
-
-You should build and install the default extensions as well:
-```
-cd /home/$USER/postgres/contrib
-make
-sudo make install
-```
-
-### Build Debezium Runner Engine
-With Java and Maven setup, we are ready to build Debezium Runner Engine. This installs the Debezium Runner Engine jar file to your PostgreSQL's lib folder.
-
-```
-cd /home/$USER/postgres/contrib/synchdb
-make build_dbz
-sudo make install_dbz
-```
-
-### Build SynchDB PostgreSQL Extension
-With the Java `lib` and `include` installed in your system, SynchDB can be built by:
-
-```
-cd /home/$USER/postgres/contrib/synchdb
-make
-sudo make install
-```
-
-### Configure your Linker (Ubuntu)
-Lastly, we also need to tell your system's linker where the newly added Java library is located in your system.
-
-```
-# Dynamically set JDK paths
-JAVA_PATH=$(which java)
-JDK_HOME_PATH=$(readlink -f ${JAVA_PATH} | sed 's:/bin/java::')
-JDK_LIB_PATH=${JDK_HOME_PATH}/lib
-
-echo $JDK_LIB_PATH
-echo $JDK_LIB_PATH/server
-
-sudo echo "$JDK_LIB_PATH" ｜ sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
-sudo echo "$JDK_LIB_PATH/server" | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
-```
-Note, for mac with M1/M2 chips, you need to the two lines into /etc/ld.so.conf.d/aarch64-linux-gnu.conf
-
-Run ldconfig to reload:
-```
-sudo ldconfig
-```
-
-Ensure synchdo.so extension can link to libjvm Java library on your system:
-```
-ldd synchdb.so
-        linux-vdso.so.1 (0x00007ffeae35a000)
-        libjvm.so => /usr/lib/jdk-22.0.1/lib/server/libjvm.so (0x00007fc1276c1000)
-        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fc127498000)
-        libdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x00007fc127493000)
-        libpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x00007fc12748e000)
-        librt.so.1 => /lib/x86_64-linux-gnu/librt.so.1 (0x00007fc127489000)
-        libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fc1273a0000)
-        /lib64/ld-linux-x86-64.so.2 (0x00007fc128b81000)
-
-```
-
-## Run SynchDB Test
-### Prepare a sample MySQL Database
-We can start a sample MySQL database for testing using docker compose. The user credentials are described in the `synchdb-mysql-test.yaml` file
-```
-docker compose -f synchdb-mysql-test.yaml up -d
-```
-
-Login to MySQL as `root` and grant permissions to user `mysqluser` to perform real-time CDC
-```
-mysql -h 127.0.0.1 -u root -p
-
-GRANT replication client on *.* to mysqluser;
-GRANT replication slave  on *.* to mysqluser;
-GRANT RELOAD ON *.* TO 'mysqluser'@'%';
-FLUSH PRIVILEGES;
-```
-
-Exit mysql client tool:
-```
-\q
-```
-### Prepare a sample SQL Server Database
-We can start a sample SQL Server database for testing using docker compose. The user credentials are described in the `synchdb-sqlserver-test.yaml` file
-```
-docker compose -f synchdb-sqlserver-test.yaml up -d
-```
-use synchdb-sqlserver-withssl-test.yaml file for the SQL Server with SSL certificate enabled.
-
-You may not have SQL Server client tool installed, you could login to SQL Server container to access its client tool.
-
-Find out the container ID for SQL server:
-```
-id=$(docker ps | grep sqlserver | awk '{print $1}')
-```
-
-Copy the database schema into SQL Server container:
-```
-docker cp inventory.sql $id:/
-```
-
-Log in to SQL Server container:
-```
-docker exec -it $id bash
-```
-
-Build the database according to the schema:
-```
-/opt/mssql-tools/bin/sqlcmd -U sa -P $SA_PASSWORD -i /inventory.sql
-```
-
-Run some simple queries (add -N -C if you are using SSL enabled SQL Server):
-```
-/opt/mssql-tools/bin/sqlcmd -U sa -P $SA_PASSWORD -d testDB -Q "insert into orders(order_date, purchaser, quantity, product_id) values( '2024-01-01', 1003, 2, 107)"
-
-/opt/mssql-tools/bin/sqlcmd -U sa -P $SA_PASSWORD -d testDB -Q "select * from orders"
-```
-
-### Prepare a sample PostgreSQL database
-Initialize and start a new PostgreSQL database:
-```
-initdb -D synchdbtest
-pg_ctl -D synchdbtest -l logfile start
-```
-
-SynchDB extension requires pgcrypto to encrypt certain sensitive credential data. Please make sure it is installed prior to installing SynchDB. Alternatively, you can include `CASCADE` clause in `CREATE EXTENSION` to automatically install dependencies:
-
-```
-CREATE EXTENSION synchdb CASCADE;
-```
-
-### Create a Connection Information
-After SynchDB is installed, we can create a connection information entries that represents how to connect to a remote heterogeneous database and what to replicate. This can be done with `synchdb_add_conninfo()` function.
-
-### Usage of `synchdb_add_conninfo`
-`synchdb_add_conninfo()` takes these arguments:
-* `name` - a unique identifier that represents this connection info
-* `hostname` - the IP address of heterogeneous database.
-* `port` - the port number to connect to.
-* `username` - user name to use to connect.
-* `password` - password to authenticate the username.
-* `source database` (optional) - the database name to replicate changes from. For example, the database that exists in MySQL. If empty, all databases from MySQL are replicated.
-* `destination` database - the database to apply changes to - For example, the database that exists in PostgreSQL. Must be a valid database that exists.
-* `table` (optional) - expressed in the form of `[database].[table]` that must exists in MySQL so the engine will only replicate the specified tables. If empty, all tables are replicated.
-* `connector` - the connector to use (MySQL, Oracle, or SQLServer). Currently only MySQL and SQLServer are supported.
-* `rule file` - a JSON-formatted rule file placed under $PGDATA that this connector shall apply to its default data type translation rules. See below for more detail.
-
-For example:
-```
-# create a mysql conninfo called 'mysqlconn' to replicate from source database 'inventory' to destination database 'postgres', using rule file `myrule.json`
-SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql', 'myrule.json');
-
-# create a second mysql conninfo called 'mysqlconn2' to replicate from source database 'inventory' to destination database 'mysqldb2'
-SELECT synchdb_add_conninfo('mysqlconn2','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'mysqldb2', '', 'mysql', '');
-
-# create a sqlserver conninfo called 'sqlserverconn' to replicate from source database 'testDB' to destination database 'sqlserverdb'
-SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver', '');
-
-# create a second sqlserver conninfo called 'sqlserverconn2' to replicate from source database 'testDB' to destination database 'sqlserverdb2'
-SELECT synchdb_add_conninfo('sqlserverconn2','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb2', '', 'sqlserver', '');
-
-```
-
-Other Examples:
-
-To create a connection information to replicate only specific tables (`orders` and `customers`) from MySQL:
-```
-# create another mysql conninfo called 'mysqlconn3' to replicate from source database 'inventory''s orders and customers tabls to destination database 'mysqldb3'
-SELECT synchdb_add_conninfo('mysqlconn3', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'mysqldb3', 'inventory.orders,inventory.customers', 'mysql', '');
-```
-
-Name Mappings:
-
-Synchdb currently uses these strict name mappings to map foreign objects to PostgreSQL. These will be made to configurable in near future, but for now, here's the mapping rules:
-
-* Foreign [database] mapped to PostgreSQL [schema]
-* Foreign [schema] is ignored in PostgreSQL
-* Foreign [table] mapped to PostgreSQL [table]
-
-For example:
-A table named `orders` from database `inventory` in MySQL will be replicated to a table named `orders` under schema `inventory`.
-
-### Review all Connection Information Created
-All connection information are created in the table `synchdb_conninfo`. We are free to view its content and make modification as required. Please note that the password of a user credential is encrypted by pgcrypto using a key only known to synchdb. So please do not modify the password field or it may be decrypted incorrectly if tempered. See below for an example output: 
-
-```
-postgres=# \x
-Expanded display is on.
-
-postgres=# select * from synchdb_conninfo;
--[ RECORD 1 ]-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-name | mysqlconn
-data | {"pwd": "\\xc30d040703024828cc4d982e47b07bd23901d03e40da5995d2a631fb89d49f748b87247aee94070f71ecacc4990c3e71cad9f68d57c440de42e35bcc78fd145feab03452e454284289db", "port": 3306, "user": "mysqluser", "dstdb": "postgres", "srcdb": "inventory", "table": "null", "hostname": "192.168.1.86", "connector": "mysql"i, "myrule.json"}
--[ RECORD 2 ]-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-name | sqlserverconn
-data | {"pwd": "\\xc30d0407030231678e1bb0f8d3156ad23a010ca3a4b0ad35ed148f8181224885464cdcfcec42de9834878e2311b343cd184fde65e0051f75d6a12d5c91d0a0403549fe00e4219215eafe1b", "port": 1433, "user": "sa", "dstdb": "sqlserverdb", "srcdb": "testDB", "table": "null", "hostname": "192.168.1.86", "connector": "sqlserver", "null"}
-```
-
-### Start a Connector Worker
-Use `synchdb_start_engine_bgw()` function to start a connector worker. It takes one argument which is the connection information name created above. Based on the connection information, the command will spawn a worker with the specified replication configuration. For example:
-
-```
-select synchdb_start_engine_bgw('mysqlconn');
-select synchdb_start_engine_bgw('sqlserverconn');
-```
-
-`synchdb_start_engine_bgw()` function also marks a connection info as `active`, which is eligible for automatic-relaunch at server restarts. See below for more details.
-
-### View the Connector States
-Use `synchdb_state_view()` view to examine all the running connectors and their states. Currently, synchdb can support up to 30 running workers.
-
-See below for an example output:
-```
-postgres=# select * from synchdb_state_view;
- id | connector | conninfo_name  |  pid   |  state  |   err    |                                          last_dbz_offset
-----+-----------+----------------+--------+---------+----------+---------------------------------------------------------------------------------------------------
-  0 | mysql     | mysqlconn      | 461696 | syncing | no error | {"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}
-  1 | sqlserver | sqlserverconn  | 461739 | syncing | no error | {"event_serial_no":1,"commit_lsn":"00000100:00000c00:0003","change_lsn":"00000100:00000c00:0002"}
-  3 | null      |                |     -1 | stopped | no error | no offset
-  4 | null      |                |     -1 | stopped | no error | no offset
-  4 | null      |                |     -1 | stopped | no error | no offset
-  5 | null      |                |     -1 | stopped | no error | no offset
-  6 | null      |                |     -1 | stopped | no error | no offset
-  7 | null      |                |     -1 | stopped | no error | no offset
-  8 | null      |                |     -1 | stopped | no error | no offset
-  9 | null      |                |     -1 | stopped | no error | no offset
- 10 | null      |                |     -1 | stopped | no error | no offset
- 11 | null      |                |     -1 | stopped | no error | no offset
- 12 | null      |                |     -1 | stopped | no error | no offset
- 13 | null      |                |     -1 | stopped | no error | no offset
- 14 | null      |                |     -1 | stopped | no error | no offset
- 15 | null      |                |     -1 | stopped | no error | no offset
- 16 | null      |                |     -1 | stopped | no error | no offset
- 17 | null      |                |     -1 | stopped | no error | no offset
- 18 | null      |                |     -1 | stopped | no error | no offset
- 19 | null      |                |     -1 | stopped | no error | no offset
- 20 | null      |                |     -1 | stopped | no error | no offset
- 21 | null      |                |     -1 | stopped | no error | no offset
- 22 | null      |                |     -1 | stopped | no error | no offset
- 23 | null      |                |     -1 | stopped | no error | no offset
- 24 | null      |                |     -1 | stopped | no error | no offset
- 25 | null      |                |     -1 | stopped | no error | no offset
- 26 | null      |                |     -1 | stopped | no error | no offset
- 27 | null      |                |     -1 | stopped | no error | no offset
- 28 | null      |                |     -1 | stopped | no error | no offset
- 29 | null      |                |     -1 | stopped | no error | no offset
-```
-
-Column Details:
-* id: unique identifier of a connector slot
-* connector: the type of connector (mysql, oracle, sqlserver...etc)
-* conninfo_name: the associated connection info name created by `synchdb_add_conninfo()`
-* pid: the PID of the connector worker process
-* state: the state of the connector. Possible states are:
-	* stopped
-	* initializing
-	* paused
-	* syncing
-	* parsing
-	* converting
-	* executing
-	* updating offset
-	* unknown
-* err: the last error message encountered by the worker which would have caused it to exit. This error could originated from PostgreSQL while processing a change, or originated from Debezium running engine while accessing data from heterogeneous database.
-* last_dbz_offset: the last Debezium offset captured by synchdb. Note that this may not reflect the current and real-time offset value of the connector engine. Rather, this is shown as a checkpoint that we could restart from this offeet point if needed.
-
-### Pause a Connector Worker
-Use `synchdb_pause_engine()` SQL function to pause a runnng connector. This will halt the Debezium runner engine from replicating from the heterogeneous database. When paused, it is possible to alter the Debezium connector's offset value to replicate from a specific point in the past using `synchdb_set_offset()` SQL routine. It takes `conninfo_name` as its argument which can be found from the output of `synchdb_get_state()` view.
-
-For example:
-```
-SELECT synchdb_pause_engine('mysqlconn');
-```
-
-### Update Connector Offset
-Use `synchdb_set_offset()` SQL function to change a connector worker's starting offset. This can only be done when the connector is put into `paused` state. The function takes 2 parameters, `conninfo_name` and `a valid offset string`, both of which can be found from the output of `synchdb_get_state()` view.
-
-For example:
-```
-SELECT synchdb_set_offset('mysqlconn', '{"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}'); 
-```
-
-### Resume Connector Offset
-Use `synchdb_resume_engine()` SQL function to resume Debezium operation from a paused state. This function takes `conninfo_name` as its only parameter, which can be found from the output of `synchdb_get_state()` view.
-
-For example:
-```
-SELECT synchdb_resume_engine('mysqlconn');
-```
-
-### Stopping a Worker
-Use `synchdb_stop_engine_bgw()` SQL function to stop a running or paused connector worker. This function takes `conninfo_name` as its only parameter, which can be found from the output of `synchdb_get_state()` view.
-
-For example:
-```
-select synchdb_stop_engine_bgw('mysqlconn');
-```
-
-`synchdb_stop_engine_bgw()` function also marks a connection info as `inactive`, which prevents the this worker from automatic-relaunch at server restarts. See below for more details.
-
-### Metadata Files
-During the synchdb operations, metadata files (offsets and schemahistory files) are generated by Debezium runner engine and they are by default located in `$PGDATA/pg_synchdb` directory:
-
-```
-ls $PGDATA/pg_synchdb
-```
-
-Sample output:
-```
-mysql_mysqlconn_offsets.dat        sqlserver_sqlserverconn_offsets.dat
-mysql_mysqlconn_schemahistory.dat  sqlserver_sqlserverconn_schemahistory.dat
-```
-
-Each DBZ engine worker has its own pair of metadata files. These store the schema information to build the source tables and the offsets to resume upon restarting.
-
-### Restarting Replication from the Beginning
-To restart replication from the beginning, we shall follow the procedure below. In the future, we will add a new SQL function that takes care of this process. In the meantime, we will stick with the procedure below:
-
-1. Stop the Debezium engine:
-```
-select synchdb_stop_engine_bgw('mysqlconn');
-```
-2. Remove the metadata files:
-```
-rm $PGDATA/pg_synchdb/mysql_mysqlconn_offsets.dat
-rm $PGDATA/pg_synchdb/mysql_mysqlconn_schemahistory.dat
-```
-3. Restart the Debezium engine:
-```
-select synchdb_start_engine_bgw('mysqlconn');
-```
-
-### Automatic Worker Launch at Server Restarts
-A connection worker becomes eligible for automatic Launch when `synchdb_start_engine_bgw()` is issued on a particular `conninfo_name`. Likewise, it becomes ineligible when `synchdb_stop_engine_bgw()` is issued on a particular `conninfo_name`. Enable automatic worker launcher by following the procedure below:
-
-* add `synchdb` to `shared_preload_libraries` GUC option in postgresql.conf
-* set new GUC option `synchdb.synchdb_auto_launcher` to true in postgresql.conf
-* restart the PostgreSQL server for the changes to take effect
-
-For example:
-```
-shared_preload_libraries = 'synchdb'
-synchdb.synchdb_auto_launcher = true
-```
-
-At startup, PostgreSQL will launch a `synchdb_auto_launcher` background worker that will retrieve all the conninfos in `synchdb_conninfo` table that is marked as `active` ( has `isactive` flag set to `true`). Then, it will start them automatically. `synchdb_auto_launcher` will exit after.
-
-### Custom Data Type Mapping Rule File
-For each supported connector type, SynchDB has a default, built-in data type translation rule that maps heterogeneous data types to those compatible in PostgreSQL. This default rule can be partially overwritten with a custom JSON formatted rule file that is specified during `synchdb_add_conninfo()`. Synchdb seraches for specified rule file under $PGDATA directory where PostgreSQL server runs on. Here's an example of rule file:
-
-myrule.json
-```
-{
-    "translation_rules":
-    [
-        {
-            "translate_from": "LINESTRING",
-            "translate_from_autoinc": false,
-            "translate_to": "TEXT",
-            "translate_to_size": 0
-        },
-        {
-            "translate_from": "BIGINT UNSIGNED",
-            "translate_from_autoinc": false,
-            "translate_to": "NUMERIC",
-            "translate_to_size": -1
-        }
-    ]
-}
-```
-
-The rule file must contain a JSON array with name `"translation_rules"` that contains multiple objects:
-* "translate_from": the data type name from heterogeneous database to translate from. 
-* "translate_from_autoinc": indicate if the data type specified in `"translate_from"` is marked as auto increment.
-* "translate_to": the PostgreSQL data type to translate to.
-* "translate_to_size": indicate if we should transform the size of the data type specifed in `"translate_to"`. For example:
-	* 0: Remove any length specifier because the PostgreSQL data type translated to does not need length specifier. For example: TEXT
-	* -1: Use whatever length specifier from the source heterogeneous database (if available) and map it directly to the translated datatype. For example: VARCHAR.
-	* others: put any other values to force the size of translated data type. Use it with caution.
-
-## Synchdb GUC Variables
-These are the current GUC variables specifically reserved for synchdb. More is expected to be added:
-
-* synchdb.naptime - the frequency of a synchdb connector worker (in milliseconds) to fetch new batch of changes from Debezium runner engine (default: 500)
-* synchdb.dml_use_spi - option to use SPI to handle DML operations. True = use SPI, false = use heap access method (default: false)
-* synchdb.synchdb_auto_launcher - option to automatically launch active connector workers at server restarts. This option works when synchdb is included in shared_preload_library option (default: true)
 
 ## Architecture
 SynchDB extension consists of six major components:
@@ -464,7 +11,6 @@ SynchDB extension consists of six major components:
 * Replication Agent
 * Table Synch Agent (TBD)
 
-Refer to the architecture diagram for a visual representation of the components and their interactions.
 ![img](https://www.highgo.ca/wp-content/uploads/2024/07/synchdb.drawio.png)
 
 ### Debezium Runner Engine (Java)
@@ -495,3 +41,188 @@ Refer to the architecture diagram for a visual representation of the components 
 ### Table Sync Agent
 * Design details and implementation are not available yet. TBD
 * Intended to provide a more efficient alternative to perform initial table synchronization.
+
+## Build Requirement
+The following software is required to build and run SynchDB. The versions listed are the versions tested during development. Older versions may still work.
+* Java Development Kit 17 or later. Download [here](https://www.oracle.com/ca-en/java/technologies/downloads/)
+* Apache Maven 3.6.3 or later. Download [here](https://maven.apache.org/download.cgi)
+* PostgreSQL 16.3 Source. Git clone [here](https://github.com/postgres/postgres). Refer to this [wiki](https://wiki.postgresql.org/wiki/Compile_and_Install_from_source_code) for PostgreSQL build requirements
+* Docker compose 2.28.1 (for testing). Refer to [here](https://docs.docker.com/compose/install/linux/)
+* Unix based operating system like Ubuntu 22.04 or MacOS
+
+## Build Procedure
+### Prepare Source
+
+Clone the PostgreSQL source and switch to 16.3 release tag
+``` BASH
+git clone https://github.com/postgres/postgres.git --branch REL_16_3
+cd postgres
+```
+
+Clone the SynchDB source from within the extension folder
+``` BASH
+cd contrib/
+git clone https://github.com/Hornetlabs/synchdb.git
+```
+
+### Prepare Tools
+#### Maven
+If you are working on Ubuntu 22.04.4 LTS, install the Maven as below:
+``` BASH
+sudo apt install maven
+```
+
+if you are using MacOS, you can use the brew command to install maven (refer (here)[https://brew.sh/] for how to install Homebrew) without any other settings:
+``` BASH
+brew install maven
+```
+
+#### Install Java (OpenJDK)
+If you are working on Ubuntu 22.04.4 LTS, install the OpenJDK  as below:
+``` BASH
+sudo apt install openjdk-21-jdk
+```
+
+If you are working on MacOS, please install the JDK with brew command:
+``` BASH
+brew install openjdk@22
+```
+
+### Build and Install PostgreSQL
+This can be done by following the standard build and install procedure as described [here](https://www.postgresql.org/docs/current/install-make.html). Generally, it consists of:
+
+``` BASH
+cd /home/$USER/postgres
+./configure
+make
+sudo make install
+```
+
+You should build and install the default extensions as well:
+``` BASH
+cd /home/$USER/postgres/contrib
+make
+sudo make install
+```
+
+### Build Debezium Runner Engine
+The commands below build and install the Debezium Runner Engine jar file to your PostgreSQL's lib folder.
+
+``` BASH
+cd /home/$USER/postgres/contrib/synchdb
+make build_dbz
+sudo make install_dbz
+```
+
+### Build SynchDB PostgreSQL Extension
+The commands below build and install SynchDB extension to your PostgreSQL's lib and share folder.
+
+``` BASH
+cd /home/$USER/postgres/contrib/synchdb
+make
+sudo make install
+```
+
+### Configure your Linker (Ubuntu)
+Lastly, we also need to tell your system's linker where the newly added Java library (libjvm.so) is located in your system.
+
+``` BASH
+# Dynamically set JDK paths
+JAVA_PATH=$(which java)
+JDK_HOME_PATH=$(readlink -f ${JAVA_PATH} | sed 's:/bin/java::')
+JDK_LIB_PATH=${JDK_HOME_PATH}/lib
+
+echo $JDK_LIB_PATH
+echo $JDK_LIB_PATH/server
+
+sudo echo "$JDK_LIB_PATH" ｜ sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+sudo echo "$JDK_LIB_PATH/server" | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+```
+Note, for mac with M1/M2 chips, you need to the two lines into /etc/ld.so.conf.d/aarch64-linux-gnu.conf
+
+Run ldconfig to reload:
+``` BASH
+sudo ldconfig
+```
+
+Ensure synchdo.so extension can link to libjvm Java library on your system:
+``` BASH
+ldd synchdb.so
+        linux-vdso.so.1 (0x00007ffeae35a000)
+        libjvm.so => /usr/lib/jdk-22.0.1/lib/server/libjvm.so (0x00007fc1276c1000)
+        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fc127498000)
+        libdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x00007fc127493000)
+        libpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x00007fc12748e000)
+        librt.so.1 => /lib/x86_64-linux-gnu/librt.so.1 (0x00007fc127489000)
+        libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fc1273a0000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007fc128b81000)
+
+```
+
+## Run SynchDB Test
+Refer to `testenv/README.md` or visit our documentation page [here](https://docs.synchdb.com/user-guide/prepare_tests_env/) to prepare a sample MySQL and SQLServer database instances for testing.
+
+SynchDB extension requires pgcrypto to encrypt certain sensitive credential data. Please make sure it is installed prior to installing SynchDB. Alternatively, you can include `CASCADE` clause in `CREATE EXTENSION` to automatically install dependencies:
+
+``` SQL
+CREATE EXTENSION synchdb CASCADE;
+```
+
+### Create a Connection Information
+With SynchDB installed, we can create one or more connector information entries that represent the details to connect to a remote heterogeneous database and what to replicate. This can be done with `synchdb_add_conninfo()` function.
+
+For example:
+``` SQL
+# create a mysql conninfo called 'mysqlconn' to replicate inventory.orders and inventory.customers tables from source database 'inventory' to destination database 'postgres' using default transform rules
+SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'mysql', '');
+
+# create a sqlserver conninfo called 'sqlserverconn' to replicate all tables from source database 'testDB' to destination database 'sqlserverdb' using default transform rules
+SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver', '');
+```
+
+### Review all Connection Information Created
+All connection information are created in the table `synchdb_conninfo`. We are free to view its content and make modification as required. Please note that the password of a user credential is encrypted by pgcrypto using a key only known to synchdb. So please do not modify the password field or it may be decrypted incorrectly if tempered. See below for an example output: 
+
+``` SQL
+postgres=# \x
+Expanded display is on.
+
+postgres=# select * from synchdb_conninfo;
+-[ RECORD 1 ]-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+name | mysqlconn
+data | {"pwd": "\\xc30d040703024828cc4d982e47b07bd23901d03e40da5995d2a631fb89d49f748b87247aee94070f71ecacc4990c3e71cad9f68d57c440de42e35bcc78fd145feab03452e454284289db", "port": 3306, "user": "mysqluser", "dstdb": "postgres", "srcdb": "inventory", "table": "inventory.orders,inventory.customers", "hostname": "192.168.1.86", "connector": "mysql", "null"}
+-[ RECORD 2 ]-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+name | sqlserverconn
+data | {"pwd": "\\xc30d0407030231678e1bb0f8d3156ad23a010ca3a4b0ad35ed148f8181224885464cdcfcec42de9834878e2311b343cd184fde65e0051f75d6a12d5c91d0a0403549fe00e4219215eafe1b", "port": 1433, "user": "sa", "dstdb": "sqlserverdb", "srcdb": "testDB", "table": "null", "hostname": "192.168.1.86", "connector": "sqlserver", "null"}
+```
+
+### Start a Connector Worker
+Use `synchdb_start_engine_bgw()` function to start a connector worker. It takes one argument which is the connection information name created above. the commands below will spawn a worker for each conenctor with the specified replication configuration.
+
+``` SQL
+select synchdb_start_engine_bgw('mysqlconn');
+select synchdb_start_engine_bgw('sqlserverconn');
+```
+
+### View the Connector States
+Use `synchdb_state_view()` to examine all the running connectors and their states. Currently, synchdb can support up to 30 running workers.
+
+``` SQL
+postgres=# select * from synchdb_state_view;
+ id | connector | conninfo_name  |  pid   |  state  |   err    |                                          last_dbz_offset
+----+-----------+----------------+--------+---------+----------+---------------------------------------------------------------------------------------------------
+  0 | mysql     | mysqlconn      | 461696 | syncing | no error | {"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}
+  1 | sqlserver | sqlserverconn  | 461739 | syncing | no error | {"event_serial_no":1,"commit_lsn":"00000100:00000c00:0003","change_lsn":"00000100:00000c00:0002"}
+  3 | null      |                |     -1 | stopped | no error | no offset
+  4 | null      |                |     -1 | stopped | no error | no offset
+  5 | null      |                |     -1 | stopped | no error | no offset
+  ...
+  ...
+```
+
+### Stop a Connector Worker
+Use `synchdb_stop_engine_bgw()` SQL function to stop a running or paused connector worker. This function takes `conninfo_name` as its only parameter, which can be found from the output of `synchdb_get_state()` view.
+
+``` SQL
+select synchdb_stop_engine_bgw('mysqlconn');
+```
