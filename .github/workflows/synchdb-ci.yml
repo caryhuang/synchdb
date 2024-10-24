@@ -110,9 +110,9 @@ jobs:
         echo "Docker Compose version:"
         docker-compose --version
         echo "Starting MySQL container..."
-        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml up -d
+        docker-compose -f postgres/contrib/synchdb/testenv/mysql/synchdb-mysql-test.yaml up -d
         echo "Starting SQL Server container..."
-        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml up -d
+        docker-compose -f postgres/contrib/synchdb/testenv/sqlserver/synchdb-sqlserver-test.yaml up -d
         echo "Waiting for containers to be ready..."
         sleep 30  # Give containers time to fully start
         echo "Docker container status:"
@@ -128,8 +128,8 @@ jobs:
         sudo systemctl status docker
         docker info
         docker ps
-        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml ps
-        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml ps
+        docker-compose -f postgres/contrib/synchdb/testenv/mysql/synchdb-mysql-test.yaml ps
+        docker-compose -f postgres/contrib/synchdb/testenv/sqlserver/synchdb-sqlserver-test.yaml ps
 
     - name: Prepare MySQL test database
       run: |
@@ -328,10 +328,10 @@ jobs:
       if: always()
       run: |
         echo "Stopping and removing MySQL container"
-        docker-compose -f postgres/contrib/synchdb/synchdb-mysql-test.yaml down --remove-orphans || true
+        docker-compose -f postgres/contrib/synchdb/testenv/mysql/synchdb-mysql-test.yaml down --remove-orphans || true
         
         echo "Stopping and removing SQL Server container"
-        docker-compose -f postgres/contrib/synchdb/synchdb-sqlserver-test.yaml down --remove-orphans || true
+        docker-compose -f postgres/contrib/synchdb/testenv/sqlserver/synchdb-sqlserver-test.yaml down --remove-orphans || true
         
         echo "Removing any leftover containers"
         docker rm -f $(docker ps -aq) || true
