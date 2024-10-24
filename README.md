@@ -2,6 +2,8 @@
 
 SynchDB is a PostgreSQL extension designed to replicate data from one or more heterogeneous databases (such as MySQL, MS SQLServer, Oracle, etc.) directly to PostgreSQL in a fast and reliable way. PostgreSQL serves as the destination from multiple heterogeneous database sources. No middleware or third-party software is required to orchestrate the data synchronization between heterogeneous databases and PostgreSQL. SynchDB extension itself is capable of handling all the data synchronization needs.
 
+Visit SynchDB documentation site [here](https://docs.synchdb.com/) for more details.
+
 ## Architecture
 SynchDB extension consists of six major components:
 * Debezium Runner Engine (Java)
