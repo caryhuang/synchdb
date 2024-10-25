@@ -499,6 +499,7 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 				switch(v.type)
 				{
 					case jbvString:
+					{
 						char * mappedColumnName = NULL;
 						StringInfoData colNameObjId;
 
@@ -549,6 +550,7 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 						}
 						pfree(value);
 						break;
+					}
 					case jbvNull:
 					case jbvNumeric:
 					case jbvBool:
