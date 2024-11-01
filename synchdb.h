@@ -80,6 +80,16 @@ typedef enum _connectorState
 } ConnectorState;
 
 /**
+ * ConnectorStage - Enum representing different stages of connector
+ */
+typedef enum _connectorStage
+{
+	STAGE_UNDEF = 0,
+	STAGE_INITIAL_SNAPSHOT,
+	STAGE_CHANGE_DATA_CAPTURE,
+} ConnectorStage;
+
+/**
  * BatchInfo - Structure containing the metadata of a batch change request
  */
 typedef struct _BatchInfo
@@ -123,6 +133,7 @@ typedef struct _ActiveConnectors
 {
 	pid_t pid;
 	ConnectorState state;
+	ConnectorStage stage;
 	ConnectorType type;
 	SynchdbRequest req;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
@@ -148,10 +159,11 @@ void set_shm_connector_errmsg(int connectorId, const char * err);
 const char * get_shm_connector_errmsg(int connectorId);
 void set_shm_connector_state(int connectorId, ConnectorState state);
 const char * get_shm_connector_state(int connectorId);
-void set_shm_connector_dbs(int connectorId, char * srcdb, char * dstdb);
 void set_shm_dbz_offset(int connectorId);
 const char * get_shm_dbz_offset(int connectorId);
 ConnectorState get_shm_connector_state_enum(int connectorId);
 const char* connectorTypeToString(ConnectorType type);
+void set_shm_connector_stage(int connectorId, ConnectorStage stage);
+ConnectorStage get_shm_connector_stage_enum(int connectorId);
 
 #endif /* SYNCHDB_SYNCHDB_H_ */

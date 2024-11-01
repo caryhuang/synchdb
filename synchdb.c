@@ -377,7 +377,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 				continue;
 			}
 
-			elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
+			elog(WARNING, "Processing DBZ Event: %s", eventStr);
 			/* change event message, send to format converter */
 			if (fc_processDBZChangeEvent(eventStr) != 0)
 			{
@@ -595,7 +595,7 @@ static TupleDesc
 synchdb_state_tupdesc(void)
 {
 	TupleDesc tupdesc;
-	AttrNumber attrnum = 7;
+	AttrNumber attrnum = 8;
 	AttrNumber a = 0;
 
 	tupdesc = CreateTemplateTupleDesc(attrnum);
@@ -605,6 +605,7 @@ synchdb_state_tupdesc(void)
 	TupleDescInitEntry(tupdesc, ++a, "connector", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "conninfo_name", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "pid", INT4OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "stage", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "state", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "err", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "last_dbz_offset", TEXTOID, -1, 0);
@@ -757,7 +758,7 @@ connectorStateAsString(ConnectorState state)
 	case STATE_PAUSED:
 		return "paused";
 	case STATE_SYNCING:
-		return "syncing";
+		return "polling";
 	case STATE_PARSING:
 		return "parsing";
 	case STATE_CONVERTING:
@@ -1488,18 +1489,6 @@ set_shm_connector_pid(int connectorId, pid_t pid)
 	LWLockRelease(&sdb_state->lock);
 }
 
-void
-set_shm_connector_dbs(int connectorId, char *srcdb, char *dstdb)
-{
-	if (!sdb_state)
-		return;
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	strlcpy(sdb_state->connectors[connectorId].conninfo.srcdb, srcdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
-	strlcpy(sdb_state->connectors[connectorId].conninfo.dstdb, dstdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
-	LWLockRelease(&sdb_state->lock);
-}
-
 const char *
 get_shm_connector_errmsg(int connectorId)
 {
@@ -1527,6 +1516,73 @@ set_shm_connector_errmsg(int connectorId, const char *err)
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	strlcpy(sdb_state->connectors[connectorId].errmsg, err ? err : "", SYNCHDB_ERRMSG_SIZE);
+	LWLockRelease(&sdb_state->lock);
+}
+
+static const char *
+get_shm_connector_stage(int connectorId)
+{
+	ConnectorStage stage;
+
+	if (!sdb_state)
+		return STATE_UNDEF;
+
+	/*
+	 * We're only reading, so shared lock is sufficient.
+	 * This ensures thread-safety without blocking other readers.
+	 */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	stage = sdb_state->connectors[connectorId].stage;
+	LWLockRelease(&sdb_state->lock);
+
+	switch(stage)
+	{
+		case STAGE_INITIAL_SNAPSHOT:
+		{
+			return "initial snapshot";
+			break;
+		}
+		case STAGE_CHANGE_DATA_CAPTURE:
+		{
+			return "change data capture";
+			break;
+		}
+		case STAGE_UNDEF:
+		default:
+		{
+			break;
+		}
+	}
+	return "unknown";
+}
+
+ConnectorStage
+get_shm_connector_stage_enum(int connectorId)
+{
+	ConnectorStage stage;
+
+	if (!sdb_state)
+		return STATE_UNDEF;
+
+	/*
+	 * We're only reading, so shared lock is sufficient.
+	 * This ensures thread-safety without blocking other readers.
+	 */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	stage = sdb_state->connectors[connectorId].stage;
+	LWLockRelease(&sdb_state->lock);
+
+	return stage;
+}
+
+void
+set_shm_connector_stage(int connectorId, ConnectorStage stage)
+{
+	if (!sdb_state)
+		return;
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	sdb_state->connectors[connectorId].stage = stage;
 	LWLockRelease(&sdb_state->lock);
 }
 
@@ -1751,6 +1807,12 @@ synchdb_engine_main(Datum main_arg)
 
 	/* Initialize the connector state */
 	set_shm_connector_state(myConnectorId, STATE_INITIALIZING);
+
+	/*
+	 * Initialize the stage to be CDC and it may get changed when the connector
+	 * detects that it is in initial snapshot or other stages
+	 */
+	set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 	set_shm_connector_errmsg(myConnectorId, NULL);
 
 	/* initialize format converter */
@@ -1971,8 +2033,8 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	 */
 	if (*idx < SYNCHDB_MAX_ACTIVE_CONNECTORS)
 	{
-		Datum values[7];
-		bool nulls[7] = {0};
+		Datum values[8];
+		bool nulls[8] = {0};
 		HeapTuple tuple;
 
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
@@ -1980,9 +2042,10 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 		values[1] = CStringGetTextDatum(get_shm_connector_name(sdb_state->connectors[*idx].type));
 		values[2] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
 		values[3] = Int32GetDatum((int)get_shm_connector_pid(*idx));
-		values[4] = CStringGetTextDatum(get_shm_connector_state(*idx));
-		values[5] = CStringGetTextDatum(get_shm_connector_errmsg(*idx));
-		values[6] = CStringGetTextDatum(get_shm_dbz_offset(*idx));
+		values[4] = CStringGetTextDatum(get_shm_connector_stage(*idx));
+		values[5] = CStringGetTextDatum(get_shm_connector_state(*idx));
+		values[6] = CStringGetTextDatum(get_shm_connector_errmsg(*idx));
+		values[7] = CStringGetTextDatum(get_shm_dbz_offset(*idx));
 		LWLockRelease(&sdb_state->lock);
 
 		*idx += 1;
