@@ -4224,9 +4224,19 @@ fc_processDBZChangeEvent(const char * event)
 
     /* Check if it's a DDL or DML event */
     getPathElementString(jb, "payload.ddl", &strinfo, true);
+    getPathElementString(jb, "payload.source.snapshot", &strinfo, true);
+    if (!strcmp(strinfo.data, "true") || !strcmp(strinfo.data, "last"))
+    {
+    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+    		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+    }
+    else
+    {
+    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+    		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+    }
 
     getPathElementString(jb, "payload.op", &strinfo, true);
-
     if (!strcmp(strinfo.data, "NULL"))
     {
         /* Process DDL event */
