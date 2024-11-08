@@ -194,7 +194,7 @@ spi_execute(const char * query, ConnectorType type)
 {
 	int ret = -1;
 	bool skiptx = false;
-
+	MemoryContext oldContext = CurrentMemoryContext;
 	/*
 	 * if we are already in transaction or transaction block, we can skip
 	 * the transaction and snapshot acquisition code below
@@ -243,6 +243,7 @@ spi_execute(const char * query, ConnectorType type)
 			/* Commit the transaction */
 			PopActiveSnapshot();
 			CommitTransactionCommand();
+			MemoryContextSwitchTo(oldContext);
 		}
 	}
 	PG_CATCH();
@@ -280,6 +281,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 	ResultRelInfo *resultRelInfo;
 	ListCell * cell;
 	int i = 0;
+	MemoryContext oldContext = CurrentMemoryContext;
 
 	/*
 	 * we put in TRY and CATCH block to capture potential exceptions raised
@@ -378,6 +380,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	MemoryContextSwitchTo(oldContext);
 	return 0;
 }
 
@@ -403,6 +406,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 	EPQState	epqstate;
 	bool found;
 	Oid idxoid = InvalidOid;
+	MemoryContext oldContext = CurrentMemoryContext;
 
 	/*
 	 * we put in TRY and CATCH block to capture potential exceptions raised
@@ -568,7 +572,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-
+	MemoryContextSwitchTo(oldContext);
 	return ret;
 }
 
@@ -593,6 +597,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 	EPQState	epqstate;
 	bool found;
 	Oid idxoid = InvalidOid;
+	MemoryContext oldContext = CurrentMemoryContext;
 
 	/*
 	 * we put in TRY and CATCH block to capture potential exceptions raised
@@ -727,6 +732,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	MemoryContextSwitchTo(oldContext);
 	return ret;
 }
 

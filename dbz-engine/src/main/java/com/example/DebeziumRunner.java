@@ -3,6 +3,8 @@ package com.example;
 import io.debezium.engine.DebeziumEngine;
 import io.debezium.engine.format.Json;
 import io.debezium.engine.ChangeEvent;
+import io.debezium.embedded.async.ConvertingAsyncEngineBuilderFactory;
+import io.debezium.engine.format.KeyValueHeaderChangeEventFormat;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -57,17 +59,31 @@ public class DebeziumRunner {
 			this.batchid = 0;
 		}
 
-		public void addBatch(ChangeRecordBatch batch)
+		public synchronized int getQueueSize()
 		{
+			return batchQueue.size();
+		}
+		public synchronized void addBatch(ChangeRecordBatch batch) throws InterruptedException
+		{
+			while (batchQueue.size() >= 5)
+			{
+				wait();
+			}
 			batch.batchid = this.batchid;
 			batchQueue.offer(batch);
 			this.batchid++;
 			logger.info("added a batch task: id = " + batch.batchid + " size = " + batch.records.size());
+			notifyAll();
 		}
 
-		public ChangeRecordBatch getNextBatch()
+		public synchronized ChangeRecordBatch getNextBatch()
 		{
-			return batchQueue.poll();
+			ChangeRecordBatch batch = batchQueue.poll();
+			if (batch != null)
+			{
+            	notifyAll();
+        	}
+			return batch;
 		}
 	}
 	
@@ -159,6 +175,8 @@ public class DebeziumRunner {
 		props.setProperty("offset.storage.file.filename", offsetfile);
 		props.setProperty("offset.flush.interval.ms", "60000");
 		props.setProperty("schema.history.internal.store.only.captured.tables.ddl", "true");
+		props.setProperty("max.batch.size", "2048");
+		props.setProperty("max.queue.size", "4096");
 
 		logger.info("Hello from DebeziumRunner class!");
 
@@ -170,6 +188,8 @@ public class DebeziumRunner {
 		};
 		
 		engine = DebeziumEngine.create(Json.class)
+		//engine = DebeziumEngine.create(KeyValueHeaderChangeEventFormat.of(Json.class, Json.class, Json.class),
+        //        "io.debezium.embedded.async.ConvertingAsyncEngineBuilderFactory")
                 .using(props)
 				.using(completionCallback)
 				.notifying((records, committer) -> {
@@ -183,8 +203,17 @@ public class DebeziumRunner {
 						{
 							activeBatchHash = new HashMap<>();
 						}
-						
-						batchManager.addBatch(new ChangeRecordBatch(records, committer));
+
+						/* throttle control */
+						try
+						{
+							batchManager.addBatch(new ChangeRecordBatch(records, committer));
+						}
+						catch (InterruptedException e)
+						{
+							Thread.currentThread().interrupt();
+							logger.error("Interrupted while adding batch", e);
+						}
 					}
 				})
 				.build();
@@ -235,56 +264,49 @@ public class DebeziumRunner {
 	public List<String> getChangeEvents()
 	{
 		List<String> listCopy;
-		synchronized (this)
+		if (activeBatchHash == null)
 		{
-			if (activeBatchHash == null)
+			activeBatchHash = new HashMap<>();
+		}
+		if (batchManager == null)
+		{
+			batchManager = new BatchManager();
+		}
+        if (!future.isDone())
+		{
+			int i = 0;
+			listCopy = new ArrayList<>();
+			ChangeRecordBatch myNextBatch;
+			myNextBatch = batchManager.getNextBatch();
+			if (myNextBatch != null)
 			{
-				activeBatchHash = new HashMap<>();
-			}
-			if (batchManager == null)
-			{
-				batchManager = new BatchManager();
-			}
+				logger.info("Debezium -> Synchdb: sent batchid(" + myNextBatch.batchid + ") with size(" + myNextBatch.records.size() + ")");
+				/* first element: batch id */
+				listCopy.add("B-" + String.valueOf(myNextBatch.batchid));
 
-	        if (!future.isDone())
-			{
-				int i = 0;
-				listCopy = new ArrayList<>();
-				ChangeRecordBatch myNextBatch;
-				
-				myNextBatch = batchManager.getNextBatch();
-				if (myNextBatch != null)
+				/* remaining elements: individual changes*/
+				for (i = 0; i < myNextBatch.records.size(); i++)
 				{
-					logger.info("Debezium -> Synchdb: sent batchid(" + myNextBatch.batchid + ") with size(" + myNextBatch.records.size() + ")");
-					/* first element: batch id */
-					listCopy.add("B-" + String.valueOf(myNextBatch.batchid));
-
-					/* remaining elements: individual changes*/
-					for (i = 0; i < myNextBatch.records.size(); i++)
-					{
-						listCopy.add(myNextBatch.records.get(i).value());
-					}
-
-					/* save this batch in active batch hash struct */
-					activeBatchHash.put(myNextBatch.batchid, myNextBatch);;
+					listCopy.add(myNextBatch.records.get(i).value());
 				}
-			}
-			else
-			{
-				/* conector task is not running, get exit messages */
-				logger.warn("connector is no longer running");
-				logger.info("success flag = " + lastDbzSuccess + " | message = " + lastDbzMessage +
-						" | error = " + lastDbzError);
 
-				/*
-				 * add the last captured connector exit message and send it to synchdb
-				 * the K- prefix indicated an error rather than a change event
-				 */
-				listCopy = new ArrayList<>();
-				listCopy.add("K-" + lastDbzSuccess + ";" + lastDbzMessage);
+				/* save this batch in active batch hash struct */
+				activeBatchHash.put(myNextBatch.batchid, myNextBatch);;
 			}
 		}
+		else
+		{
+			/* conector task is not running, get exit messages */
+			logger.warn("connector is no longer running");
+			logger.info("success flag = " + lastDbzSuccess + " | message = " + lastDbzMessage + " | error = " + lastDbzError);
 
+			/*
+			 * add the last captured connector exit message and send it to synchdb
+			 * the K- prefix indicated an error rather than a change event
+			 */
+			listCopy = new ArrayList<>();
+			listCopy.add("K-" + lastDbzSuccess + ";" + lastDbzMessage);
+		}
 		return listCopy;
     }
 

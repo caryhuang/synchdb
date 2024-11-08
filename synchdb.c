@@ -289,6 +289,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	if (listClass == NULL)
 	{
 		elog(WARNING, "Failed to find java list class");
+		(*env)->DeleteLocalRef(env, changeEventsList);
 		return -1;
 	}
 
@@ -296,6 +297,8 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	if (sizeMethod == NULL)
 	{
 		elog(WARNING, "Failed to find java list.size method");
+		(*env)->DeleteLocalRef(env, changeEventsList);
+		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
 	}
 
@@ -313,6 +316,8 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	if (size == 0 || size < 0)
 	{
 		/* nothing to process. Return */
+		(*env)->DeleteLocalRef(env, changeEventsList);
+		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
 	}
 	batchinfo->batchSize = size - 1;	/* minus the metadata record */
@@ -345,6 +350,10 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		 * has exited and we may need to exit later as well.
 		 */
 		processCompletionMessage(eventStr, myConnectorId, dbzExitSignal);
+        (*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
+        (*env)->DeleteLocalRef(env, event);
+        (*env)->DeleteLocalRef(env, changeEventsList);
+        (*env)->DeleteLocalRef(env, listClass);
 		return 0;
 	}
 	/* check if it is a batch change request */
@@ -377,7 +386,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 				continue;
 			}
 
-			elog(WARNING, "Processing DBZ Event: %s", eventStr);
+			elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
 			/* change event message, send to format converter */
 			if (fc_processDBZChangeEvent(eventStr) != 0)
 			{

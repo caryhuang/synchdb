@@ -34,6 +34,7 @@
 #include "catalog/namespace.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/memutils.h"
 #include "access/table.h"
 #include <time.h>
 #include "access/xact.h"
@@ -652,6 +653,9 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 		 */
 		if (removequotes)
 			remove_double_quotes(strinfoout);
+
+		if (resjb)
+			pfree(resjb);
 		elog(DEBUG1, "%s = %s", path, strinfoout->data);
     }
 
@@ -2838,6 +2842,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	Relation rel;
 	TupleDesc tupdesc;
 	int attnum, j = 0;
+	MemoryContext oldContext = CurrentMemoryContext;
 
 	HTAB * typeidhash;
 	HASHCTL hash_ctl;
@@ -2999,7 +3004,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
 	hash_ctl.entrysize = sizeof(NameOidEntry);
-	hash_ctl.hcxt = CurrentMemoryContext;
+	hash_ctl.hcxt = oldContext;
 
 	typeidhash = hash_create("Name to OID Hash Table",
 							 512, // limit to 512 columns max
@@ -3041,6 +3046,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 	PopActiveSnapshot();
 	CommitTransactionCommand();
+	MemoryContextSwitchTo(oldContext);
 
 	switch(op)
 	{
@@ -3196,6 +3202,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							/* replace the column name with looked up value here */
 							pfree(colval->name);
 							colval->name = pstrdup(mappedColumnName);
+							/* to test pfree(mappedColumnName) */
 						}
 						if (colNameObjId.data)
 							pfree(colNameObjId.data);
@@ -3369,6 +3376,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							/* replace the column name with looked up value here */
 							pfree(colval->name);
 							colval->name = pstrdup(mappedColumnName);
+							/* to test pfree(mappedColumnName) */
 						}
 						if (colNameObjId.data)
 							pfree(colNameObjId.data);
@@ -3552,6 +3560,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								/* replace the column name with looked up value here */
 								pfree(colval->name);
 								colval->name = pstrdup(mappedColumnName);
+								/* to test pfree(mappedColumnName) */
 							}
 							if (colNameObjId.data)
 								pfree(colNameObjId.data);
@@ -4210,6 +4219,13 @@ fc_processDBZChangeEvent(const char * event)
 	Jsonb *jb;
 	StringInfoData strinfo;
 	ConnectorType type;
+	MemoryContext tempContext, oldContext;
+
+	tempContext = AllocSetContextCreate(CurrentMemoryContext,
+										"FORMAT_CONVERTER",
+										ALLOCSET_DEFAULT_SIZES);
+
+	oldContext = MemoryContextSwitchTo(tempContext);
 
 	initStringInfo(&strinfo);
 
@@ -4337,5 +4353,14 @@ fc_processDBZChangeEvent(const char * event)
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);
     }
+
+	if(strinfo.data)
+		pfree(strinfo.data);
+
+	if (jb)
+		pfree(jb);
+
+	MemoryContextSwitchTo(oldContext);
+	MemoryContextDelete(tempContext);
 	return 0;
 }
