@@ -4221,7 +4221,7 @@ fc_processDBZChangeEvent(const char * event)
 	ConnectorType type;
 	MemoryContext tempContext, oldContext;
 
-	tempContext = AllocSetContextCreate(CurrentMemoryContext,
+	tempContext = AllocSetContextCreate(TopMemoryContext,
 										"FORMAT_CONVERTER",
 										ALLOCSET_DEFAULT_SIZES);
 
@@ -4267,6 +4267,8 @@ fc_processDBZChangeEvent(const char * event)
     	{
     		elog(DEBUG1, "malformed DDL event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
@@ -4279,6 +4281,8 @@ fc_processDBZChangeEvent(const char * event)
     		elog(WARNING, "failed to convert DBZ DDL to PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		destroyDBZDDL(dbzddl);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
@@ -4291,6 +4295,8 @@ fc_processDBZChangeEvent(const char * event)
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		destroyDBZDDL(dbzddl);
     		destroyPGDDL(pgddl);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
@@ -4318,6 +4324,8 @@ fc_processDBZChangeEvent(const char * event)
 		{
 			elog(WARNING, "malformed DNL event");
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
 			return -1;
 		}
 
@@ -4329,6 +4337,8 @@ fc_processDBZChangeEvent(const char * event)
     		elog(WARNING, "failed to convert DBZ DML to PG DML change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		destroyDBZDML(dbzdml);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
@@ -4341,6 +4351,8 @@ fc_processDBZChangeEvent(const char * event)
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
         	destroyDBZDML(dbzdml);
         	destroyPGDML(pgdml);
+        	MemoryContextSwitchTo(oldContext);
+        	MemoryContextDelete(tempContext);
     		return -1;
     	}
 

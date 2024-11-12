@@ -31,6 +31,10 @@ import java.io.ObjectOutputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryMXBean;
+import java.lang.management.MemoryUsage;
+
 public class DebeziumRunner {
 	private static final Logger logger = LoggerFactory.getLogger(DebeziumRunner.class);
 	private List<String> changeEvents = new ArrayList<>();
@@ -100,7 +104,22 @@ public class DebeziumRunner {
 			this.committer = committer;
 		}
 	}
-	
+
+public void checkMemoryStatus() {
+    MemoryMXBean memoryMXBean = ManagementFactory.getMemoryMXBean();
+    MemoryUsage heapUsage = memoryMXBean.getHeapMemoryUsage();
+    MemoryUsage nonHeapUsage = memoryMXBean.getNonHeapMemoryUsage();
+
+    logger.warn("Heap Memory:");
+    logger.warn("  Used: " + heapUsage.getUsed() + " bytes");
+    logger.warn("  Committed: " + heapUsage.getCommitted() + " bytes");
+    logger.warn("  Max: " + heapUsage.getMax() + " bytes");
+
+    logger.warn("Non-Heap Memory:");
+    logger.warn("  Used: " + nonHeapUsage.getUsed() + " bytes");
+    logger.warn("  Committed: " + nonHeapUsage.getCommitted() + " bytes");
+    logger.warn("  Max: " + nonHeapUsage.getMax() + " bytes");
+}
 
 	public void startEngine(String hostname, int port, String user, String password, String database, String table, int connectorType, String name, String snapshot_mode) throws Exception
 	{
@@ -177,6 +196,7 @@ public class DebeziumRunner {
 		props.setProperty("schema.history.internal.store.only.captured.tables.ddl", "true");
 		props.setProperty("max.batch.size", "2048");
 		props.setProperty("max.queue.size", "4096");
+		props.setProperty("record.processing.order", "ORDERED");
 
 		logger.info("Hello from DebeziumRunner class!");
 
@@ -272,6 +292,8 @@ public class DebeziumRunner {
 		{
 			batchManager = new BatchManager();
 		}
+
+		//checkMemoryStatus();
         if (!future.isDone())
 		{
 			int i = 0;
