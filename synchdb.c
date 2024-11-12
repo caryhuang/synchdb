@@ -368,20 +368,24 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 
 		batchinfo->currRecordIndex = -1;
 
+		/* free reference to metadata element at index 0 */
+		(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
+		(*env)->DeleteLocalRef(env, event);
+
 		/* now process the rest of the changes in the batch */
 		for (int i = 1; i < size; i++)
 		{
 			event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, i);
 			if (event == NULL)
 			{
-				elog(DEBUG1, "dbz_engine_get_change: Received NULL event at index %d", i);
+				elog(WARNING, "dbz_engine_get_change: Received NULL event at index %d", i);
 				continue;
 			}
 
 			eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
 			if (eventStr == NULL)
 			{
-				elog(DEBUG1, "dbz_engine_get_change: Failed to get string for event at index %d", i);
+				elog(WARNING, "dbz_engine_get_change: Failed to get string for event at index %d", i);
 				(*env)->DeleteLocalRef(env, event);
 				continue;
 			}
