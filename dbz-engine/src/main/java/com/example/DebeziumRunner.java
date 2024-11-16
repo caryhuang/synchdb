@@ -50,6 +50,7 @@ public class DebeziumRunner {
 	final int TYPE_MYSQL = 1;
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
+	final int BATCH_QUEUE_SIZE = 3;
 
 	/* BatchMaanger represents a Batch request queue */
 	public class BatchManager
@@ -69,7 +70,7 @@ public class DebeziumRunner {
 		}
 		public synchronized void addBatch(ChangeRecordBatch batch) throws InterruptedException
 		{
-			while (batchQueue.size() >= 5)
+			while (batchQueue.size() >= BATCH_QUEUE_SIZE)
 			{
 				wait();
 			}
@@ -194,8 +195,8 @@ public void checkMemoryStatus() {
 		props.setProperty("offset.storage.file.filename", offsetfile);
 		props.setProperty("offset.flush.interval.ms", "60000");
 		props.setProperty("schema.history.internal.store.only.captured.tables.ddl", "true");
-		props.setProperty("max.batch.size", "2048");
-		props.setProperty("max.queue.size", "4096");
+		props.setProperty("max.batch.size", "4096");
+		props.setProperty("max.queue.size", "8192");
 		props.setProperty("record.processing.order", "ORDERED");
 
 		logger.info("Hello from DebeziumRunner class!");
@@ -313,7 +314,7 @@ public void checkMemoryStatus() {
 				}
 
 				/* save this batch in active batch hash struct */
-				activeBatchHash.put(myNextBatch.batchid, myNextBatch);;
+				activeBatchHash.put(myNextBatch.batchid, myNextBatch);
 			}
 		}
 		else
@@ -400,6 +401,7 @@ public void checkMemoryStatus() {
 			myBatch.committer.markBatchFinished();
 			activeBatchHash.remove(batchid);
 		}
+		System.gc();
 	}
 	
 	public String getConnectorOffset(int connectorType, String db, String name)

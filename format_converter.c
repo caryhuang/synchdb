@@ -37,8 +37,6 @@
 #include "utils/memutils.h"
 #include "access/table.h"
 #include <time.h>
-#include "access/xact.h"
-#include "utils/snapmgr.h"
 #include "synchdb.h"
 #include "common/base64.h"
 #include "port/pg_bswap.h"
@@ -1759,9 +1757,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		 * and then add its column to a temporary hash table that we can compare
 		 * with the new column list.
 		 */
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		schemaoid = get_namespace_oid(schema, false);
 		if (!OidIsValid(schemaoid))
 		{
@@ -1789,9 +1784,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		rel = table_open(tableoid, NoLock);
 		tupdesc = RelationGetDescr(rel);
 		table_close(rel, NoLock);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 
 		if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
 		{
@@ -2973,9 +2965,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	for (j = 0; j < strlen(dbzdml->table); j++)
 		dbzdml->table[j] = (char) pg_tolower((unsigned char) dbzdml->table[j]);
 
-	StartTransactionCommand();
-	PushActiveSnapshot(GetTransactionSnapshot());
-
 	schemaoid = get_namespace_oid(dbzdml->schema, false);
 	if (!OidIsValid(schemaoid))
 	{
@@ -3043,10 +3032,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		}
 	}
 	table_close(rel, NoLock);
-
-	PopActiveSnapshot();
-	CommitTransactionCommand();
-	MemoryContextSwitchTo(oldContext);
 
 	switch(op)
 	{
@@ -4300,10 +4285,7 @@ fc_processDBZChangeEvent(const char * event)
     		return -1;
     	}
 
-    	/* (4) update offset */
-       	set_shm_dbz_offset(myConnectorId);
-
-    	/* (5) clean up */
+    	/* (4) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
     	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDDL(dbzddl);
@@ -4355,9 +4337,6 @@ fc_processDBZChangeEvent(const char * event)
         	MemoryContextDelete(tempContext);
     		return -1;
     	}
-
-    	/* (4) update offset */
-       	set_shm_dbz_offset(myConnectorId);
 
        	/* (5) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);

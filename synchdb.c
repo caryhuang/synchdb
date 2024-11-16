@@ -38,6 +38,8 @@
 #include "funcapi.h"
 #include "synchdb.h"
 #include "replication_agent.h"
+#include "access/xact.h"
+#include "utils/snapmgr.h"
 
 PG_MODULE_MAGIC;
 
@@ -83,7 +85,7 @@ static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
 static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal, BatchInfo * batchinfo);
 static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode);
 static char *dbz_engine_get_offset(int connectorId);
-static int dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto);
+static int dbz_mark_batch_complete(int batchid);
 static TupleDesc synchdb_state_tupdesc(void);
 static void synchdb_init_shmem(void);
 static void synchdb_detach_shmem(int code, Datum arg);
@@ -366,11 +368,12 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		batchinfo->batchId = atoi(&eventStr[2]);
 		elog(WARNING, "Synchdb received batchid(%d) with size(%d)", batchinfo->batchId, size-1);
 
-		batchinfo->currRecordIndex = -1;
-
 		/* free reference to metadata element at index 0 */
 		(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
 		(*env)->DeleteLocalRef(env, event);
+
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
 
 		/* now process the rest of the changes in the batch */
 		for (int i = 1; i < size; i++)
@@ -399,14 +402,13 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 
 			(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
 			(*env)->DeleteLocalRef(env, event);
-
-			/*
-			 * if we are still here (not long jump to error handler in case of elog(ERROR)),
-			 * we consider the record as processed though it may have been skipped in
-			 * fc_processDBZChangeEvent()
-			 */
-			batchinfo->currRecordIndex++;
 		}
+
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+
+		/* read offset currently flushed to file for displaying to user */
+		set_shm_dbz_offset(myConnectorId);
 	}
 	else
 	{
@@ -674,42 +676,14 @@ synchdb_detach_shmem(int code, Datum arg)
 {
 	pid_t enginepid;
 
-	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d, myBatchId %d, "
-			"currRecordId %d", DatumGetUInt32(arg), code, myBatchInfo.batchId,
-			myBatchInfo.currRecordIndex);
+	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d, myBatchId %d",
+			DatumGetUInt32(arg), code, myBatchInfo.batchId);
 
 	enginepid = get_shm_connector_pid(DatumGetUInt32(arg));
 	if (enginepid == MyProcPid)
 	{
 		set_shm_connector_pid(DatumGetUInt32(arg), InvalidPid);
 		set_shm_connector_state(DatumGetUInt32(arg), STATE_UNDEF);
-	}
-
-	/*
-	 * check if we are in the middle of processing a batch. If yes, we need to
-	 * notify dbz the records that we have processed to prevent receiving duplicate
-	 * records upon restart. myBatchInfo.currRecordIndex == -1 means we have not even
-	 * successfully processed at least 1 record in batch, so don't bother marking
-	 * completion.
-	 */
-	if (myBatchInfo.batchId  != SYNCHDB_INVALID_BATCH_ID && myBatchInfo.currRecordIndex != -1)
-	{
-		if (myBatchInfo.batchSize == myBatchInfo.currRecordIndex + 1)
-		{
-			/*
-			 * this means that the every record in current batch has already been
-			 * completed and that we could mark this entire batch as complete
-			 */
-			elog(WARNING, "batch already completed. mark it all done before shutdown...");
-			dbz_mark_batch_complete(myBatchInfo.batchId, true, 0, 0);
-		}
-		else
-		{
-			/* a partially completed batch, we report the ones already completed */
-			elog(WARNING, "partially completed batch. mark records done until record index %d, size of batch %d",
-					myBatchInfo.currRecordIndex, myBatchInfo.batchSize);
-			dbz_mark_batch_complete(myBatchInfo.batchId, false, 0, myBatchInfo.currRecordIndex);
-		}
 	}
 
 	cleanup(sdb_state->connectors[DatumGetUInt32(arg)].type);
@@ -1240,7 +1214,7 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 			 * that it's been completed.
 			 */
 			if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
-				dbz_mark_batch_complete(myBatchInfo.batchId, true, -1, -1);
+				dbz_mark_batch_complete(myBatchInfo.batchId);
 
 			/* we are done with a batch, make it invalid */
 			myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
@@ -1343,12 +1317,16 @@ get_shm_connector_id_by_name(const char * name)
 }
 
 static int
-dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
+dbz_mark_batch_complete(int batchid)
 {
 	jmethodID markBatchComplete;
 	jthrowable exception;
-	jboolean jmarkall;
+	jboolean jmarkall = JNI_TRUE;
 
+	/*
+	 * todo: markfrom and markto are no longer supported because we no longer
+	 * support partial batch completion. To be deleted later.
+	 */
 	if (!jvm)
 	{
 		elog(WARNING, "jvm not initialized");
@@ -1361,11 +1339,6 @@ dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
 		return -1;
 	}
 
-	if (markall)
-		jmarkall = JNI_TRUE;
-	else
-		jmarkall = JNI_FALSE;
-
 	/* Find the markBatchComplete method */
 	markBatchComplete = (*env)->GetMethodID(env, cls, "markBatchComplete",
 									 "(IZII)V");
@@ -1376,7 +1349,7 @@ dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
 	}
 
 	/* Call the Java method */
-	(*env)->CallVoidMethod(env, obj, markBatchComplete, batchid, jmarkall, markfrom, markto);
+	(*env)->CallVoidMethod(env, obj, markBatchComplete, batchid, jmarkall, -1, -1);
 
 	/* Check for exceptions */
 	exception = (*env)->ExceptionOccurred(env);
@@ -1813,7 +1786,6 @@ synchdb_engine_main(Datum main_arg)
 	/* initialize batchinfo */
 	myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
 	myBatchInfo.batchSize = 0;
-	myBatchInfo.currRecordIndex = -1;
 
 	/* Set up signal handlers, initialize shared memory and obtain connInfo*/
 	setup_environment(&connectorType, &connInfo, &snapshotMode);
