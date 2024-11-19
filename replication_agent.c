@@ -281,7 +281,6 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 	ResultRelInfo *resultRelInfo;
 	ListCell * cell;
 	int i = 0;
-	MemoryContext oldContext = CurrentMemoryContext;
 
 	/*
 	 * we put in TRY and CATCH block to capture potential exceptions raised
@@ -291,9 +290,6 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 	 */
 	PG_TRY();
 	{
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		rel = table_open(tableoid, NoLock);
 
 		/* initialize estate */
@@ -360,9 +356,6 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{
@@ -380,7 +373,6 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	MemoryContextSwitchTo(oldContext);
 	return 0;
 }
 
@@ -406,7 +398,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 	EPQState	epqstate;
 	bool found;
 	Oid idxoid = InvalidOid;
-	MemoryContext oldContext = CurrentMemoryContext;
 
 	/*
 	 * we put in TRY and CATCH block to capture potential exceptions raised
@@ -416,9 +407,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 	 */
 	PG_TRY();
 	{
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		rel = table_open(tableoid, NoLock);
 
 		/* initialize estate */
@@ -552,9 +540,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
 		table_close(rel, NoLock);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{
@@ -572,7 +557,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	MemoryContextSwitchTo(oldContext);
 	return ret;
 }
 
@@ -597,7 +581,6 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 	EPQState	epqstate;
 	bool found;
 	Oid idxoid = InvalidOid;
-	MemoryContext oldContext = CurrentMemoryContext;
 
 	/*
 	 * we put in TRY and CATCH block to capture potential exceptions raised
@@ -607,9 +590,6 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 	 */
 	PG_TRY();
 	{
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		rel = table_open(tableoid, NoLock);
 
 		/* initialize estate */
@@ -712,9 +692,6 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
 		table_close(rel, NoLock);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{
@@ -732,7 +709,6 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	MemoryContextSwitchTo(oldContext);
 	return ret;
 }
 

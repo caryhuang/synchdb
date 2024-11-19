@@ -96,7 +96,6 @@ typedef struct _BatchInfo
 {
 	 int batchId;
 	 int batchSize;
-	 int currRecordIndex;
 } BatchInfo;
 
 /**
