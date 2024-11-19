@@ -194,7 +194,7 @@ spi_execute(const char * query, ConnectorType type)
 {
 	int ret = -1;
 	bool skiptx = false;
-
+	MemoryContext oldContext = CurrentMemoryContext;
 	/*
 	 * if we are already in transaction or transaction block, we can skip
 	 * the transaction and snapshot acquisition code below
@@ -243,6 +243,7 @@ spi_execute(const char * query, ConnectorType type)
 			/* Commit the transaction */
 			PopActiveSnapshot();
 			CommitTransactionCommand();
+			MemoryContextSwitchTo(oldContext);
 		}
 	}
 	PG_CATCH();
@@ -289,9 +290,6 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 	 */
 	PG_TRY();
 	{
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		rel = table_open(tableoid, NoLock);
 
 		/* initialize estate */
@@ -358,9 +356,6 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{
@@ -412,9 +407,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 	 */
 	PG_TRY();
 	{
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		rel = table_open(tableoid, NoLock);
 
 		/* initialize estate */
@@ -548,9 +540,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
 		table_close(rel, NoLock);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{
@@ -568,7 +557,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-
 	return ret;
 }
 
@@ -602,9 +590,6 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 	 */
 	PG_TRY();
 	{
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		rel = table_open(tableoid, NoLock);
 
 		/* initialize estate */
@@ -707,9 +692,6 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
 		table_close(rel, NoLock);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{

@@ -38,6 +38,8 @@
 #include "funcapi.h"
 #include "synchdb.h"
 #include "replication_agent.h"
+#include "access/xact.h"
+#include "utils/snapmgr.h"
 
 PG_MODULE_MAGIC;
 
@@ -83,7 +85,7 @@ static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
 static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal, BatchInfo * batchinfo);
 static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode);
 static char *dbz_engine_get_offset(int connectorId);
-static int dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto);
+static int dbz_mark_batch_complete(int batchid);
 static TupleDesc synchdb_state_tupdesc(void);
 static void synchdb_init_shmem(void);
 static void synchdb_detach_shmem(int code, Datum arg);
@@ -289,6 +291,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	if (listClass == NULL)
 	{
 		elog(WARNING, "Failed to find java list class");
+		(*env)->DeleteLocalRef(env, changeEventsList);
 		return -1;
 	}
 
@@ -296,6 +299,8 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	if (sizeMethod == NULL)
 	{
 		elog(WARNING, "Failed to find java list.size method");
+		(*env)->DeleteLocalRef(env, changeEventsList);
+		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
 	}
 
@@ -313,6 +318,8 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	if (size == 0 || size < 0)
 	{
 		/* nothing to process. Return */
+		(*env)->DeleteLocalRef(env, changeEventsList);
+		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
 	}
 	batchinfo->batchSize = size - 1;	/* minus the metadata record */
@@ -345,6 +352,10 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		 * has exited and we may need to exit later as well.
 		 */
 		processCompletionMessage(eventStr, myConnectorId, dbzExitSignal);
+        (*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
+        (*env)->DeleteLocalRef(env, event);
+        (*env)->DeleteLocalRef(env, changeEventsList);
+        (*env)->DeleteLocalRef(env, listClass);
 		return 0;
 	}
 	/* check if it is a batch change request */
@@ -357,7 +368,12 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		batchinfo->batchId = atoi(&eventStr[2]);
 		elog(WARNING, "Synchdb received batchid(%d) with size(%d)", batchinfo->batchId, size-1);
 
-		batchinfo->currRecordIndex = -1;
+		/* free reference to metadata element at index 0 */
+		(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
+		(*env)->DeleteLocalRef(env, event);
+
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
 
 		/* now process the rest of the changes in the batch */
 		for (int i = 1; i < size; i++)
@@ -365,14 +381,14 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, i);
 			if (event == NULL)
 			{
-				elog(DEBUG1, "dbz_engine_get_change: Received NULL event at index %d", i);
+				elog(WARNING, "dbz_engine_get_change: Received NULL event at index %d", i);
 				continue;
 			}
 
 			eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
 			if (eventStr == NULL)
 			{
-				elog(DEBUG1, "dbz_engine_get_change: Failed to get string for event at index %d", i);
+				elog(WARNING, "dbz_engine_get_change: Failed to get string for event at index %d", i);
 				(*env)->DeleteLocalRef(env, event);
 				continue;
 			}
@@ -386,14 +402,13 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 
 			(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
 			(*env)->DeleteLocalRef(env, event);
-
-			/*
-			 * if we are still here (not long jump to error handler in case of elog(ERROR)),
-			 * we consider the record as processed though it may have been skipped in
-			 * fc_processDBZChangeEvent()
-			 */
-			batchinfo->currRecordIndex++;
 		}
+
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+
+		/* read offset currently flushed to file for displaying to user */
+		set_shm_dbz_offset(myConnectorId);
 	}
 	else
 	{
@@ -595,7 +610,7 @@ static TupleDesc
 synchdb_state_tupdesc(void)
 {
 	TupleDesc tupdesc;
-	AttrNumber attrnum = 7;
+	AttrNumber attrnum = 8;
 	AttrNumber a = 0;
 
 	tupdesc = CreateTemplateTupleDesc(attrnum);
@@ -605,6 +620,7 @@ synchdb_state_tupdesc(void)
 	TupleDescInitEntry(tupdesc, ++a, "connector", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "conninfo_name", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "pid", INT4OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "stage", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "state", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "err", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "last_dbz_offset", TEXTOID, -1, 0);
@@ -660,42 +676,14 @@ synchdb_detach_shmem(int code, Datum arg)
 {
 	pid_t enginepid;
 
-	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d, myBatchId %d, "
-			"currRecordId %d", DatumGetUInt32(arg), code, myBatchInfo.batchId,
-			myBatchInfo.currRecordIndex);
+	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d, myBatchId %d",
+			DatumGetUInt32(arg), code, myBatchInfo.batchId);
 
 	enginepid = get_shm_connector_pid(DatumGetUInt32(arg));
 	if (enginepid == MyProcPid)
 	{
 		set_shm_connector_pid(DatumGetUInt32(arg), InvalidPid);
 		set_shm_connector_state(DatumGetUInt32(arg), STATE_UNDEF);
-	}
-
-	/*
-	 * check if we are in the middle of processing a batch. If yes, we need to
-	 * notify dbz the records that we have processed to prevent receiving duplicate
-	 * records upon restart. myBatchInfo.currRecordIndex == -1 means we have not even
-	 * successfully processed at least 1 record in batch, so don't bother marking
-	 * completion.
-	 */
-	if (myBatchInfo.batchId  != SYNCHDB_INVALID_BATCH_ID && myBatchInfo.currRecordIndex != -1)
-	{
-		if (myBatchInfo.batchSize == myBatchInfo.currRecordIndex + 1)
-		{
-			/*
-			 * this means that the every record in current batch has already been
-			 * completed and that we could mark this entire batch as complete
-			 */
-			elog(WARNING, "batch already completed. mark it all done before shutdown...");
-			dbz_mark_batch_complete(myBatchInfo.batchId, true, 0, 0);
-		}
-		else
-		{
-			/* a partially completed batch, we report the ones already completed */
-			elog(WARNING, "partially completed batch. mark records done until record index %d, size of batch %d",
-					myBatchInfo.currRecordIndex, myBatchInfo.batchSize);
-			dbz_mark_batch_complete(myBatchInfo.batchId, false, 0, myBatchInfo.currRecordIndex);
-		}
 	}
 
 	cleanup(sdb_state->connectors[DatumGetUInt32(arg)].type);
@@ -757,7 +745,7 @@ connectorStateAsString(ConnectorState state)
 	case STATE_PAUSED:
 		return "paused";
 	case STATE_SYNCING:
-		return "syncing";
+		return "polling";
 	case STATE_PARSING:
 		return "parsing";
 	case STATE_CONVERTING:
@@ -1226,7 +1214,7 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 			 * that it's been completed.
 			 */
 			if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
-				dbz_mark_batch_complete(myBatchInfo.batchId, true, -1, -1);
+				dbz_mark_batch_complete(myBatchInfo.batchId);
 
 			/* we are done with a batch, make it invalid */
 			myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
@@ -1329,12 +1317,16 @@ get_shm_connector_id_by_name(const char * name)
 }
 
 static int
-dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
+dbz_mark_batch_complete(int batchid)
 {
 	jmethodID markBatchComplete;
 	jthrowable exception;
-	jboolean jmarkall;
+	jboolean jmarkall = JNI_TRUE;
 
+	/*
+	 * todo: markfrom and markto are no longer supported because we no longer
+	 * support partial batch completion. To be deleted later.
+	 */
 	if (!jvm)
 	{
 		elog(WARNING, "jvm not initialized");
@@ -1347,11 +1339,6 @@ dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
 		return -1;
 	}
 
-	if (markall)
-		jmarkall = JNI_TRUE;
-	else
-		jmarkall = JNI_FALSE;
-
 	/* Find the markBatchComplete method */
 	markBatchComplete = (*env)->GetMethodID(env, cls, "markBatchComplete",
 									 "(IZII)V");
@@ -1362,7 +1349,7 @@ dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
 	}
 
 	/* Call the Java method */
-	(*env)->CallVoidMethod(env, obj, markBatchComplete, batchid, jmarkall, markfrom, markto);
+	(*env)->CallVoidMethod(env, obj, markBatchComplete, batchid, jmarkall, -1, -1);
 
 	/* Check for exceptions */
 	exception = (*env)->ExceptionOccurred(env);
@@ -1488,18 +1475,6 @@ set_shm_connector_pid(int connectorId, pid_t pid)
 	LWLockRelease(&sdb_state->lock);
 }
 
-void
-set_shm_connector_dbs(int connectorId, char *srcdb, char *dstdb)
-{
-	if (!sdb_state)
-		return;
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	strlcpy(sdb_state->connectors[connectorId].conninfo.srcdb, srcdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
-	strlcpy(sdb_state->connectors[connectorId].conninfo.dstdb, dstdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
-	LWLockRelease(&sdb_state->lock);
-}
-
 const char *
 get_shm_connector_errmsg(int connectorId)
 {
@@ -1527,6 +1502,73 @@ set_shm_connector_errmsg(int connectorId, const char *err)
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	strlcpy(sdb_state->connectors[connectorId].errmsg, err ? err : "", SYNCHDB_ERRMSG_SIZE);
+	LWLockRelease(&sdb_state->lock);
+}
+
+static const char *
+get_shm_connector_stage(int connectorId)
+{
+	ConnectorStage stage;
+
+	if (!sdb_state)
+		return STATE_UNDEF;
+
+	/*
+	 * We're only reading, so shared lock is sufficient.
+	 * This ensures thread-safety without blocking other readers.
+	 */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	stage = sdb_state->connectors[connectorId].stage;
+	LWLockRelease(&sdb_state->lock);
+
+	switch(stage)
+	{
+		case STAGE_INITIAL_SNAPSHOT:
+		{
+			return "initial snapshot";
+			break;
+		}
+		case STAGE_CHANGE_DATA_CAPTURE:
+		{
+			return "change data capture";
+			break;
+		}
+		case STAGE_UNDEF:
+		default:
+		{
+			break;
+		}
+	}
+	return "unknown";
+}
+
+ConnectorStage
+get_shm_connector_stage_enum(int connectorId)
+{
+	ConnectorStage stage;
+
+	if (!sdb_state)
+		return STATE_UNDEF;
+
+	/*
+	 * We're only reading, so shared lock is sufficient.
+	 * This ensures thread-safety without blocking other readers.
+	 */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	stage = sdb_state->connectors[connectorId].stage;
+	LWLockRelease(&sdb_state->lock);
+
+	return stage;
+}
+
+void
+set_shm_connector_stage(int connectorId, ConnectorStage stage)
+{
+	if (!sdb_state)
+		return;
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	sdb_state->connectors[connectorId].stage = stage;
 	LWLockRelease(&sdb_state->lock);
 }
 
@@ -1744,13 +1786,18 @@ synchdb_engine_main(Datum main_arg)
 	/* initialize batchinfo */
 	myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
 	myBatchInfo.batchSize = 0;
-	myBatchInfo.currRecordIndex = -1;
 
 	/* Set up signal handlers, initialize shared memory and obtain connInfo*/
 	setup_environment(&connectorType, &connInfo, &snapshotMode);
 
 	/* Initialize the connector state */
 	set_shm_connector_state(myConnectorId, STATE_INITIALIZING);
+
+	/*
+	 * Initialize the stage to be CDC and it may get changed when the connector
+	 * detects that it is in initial snapshot or other stages
+	 */
+	set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 	set_shm_connector_errmsg(myConnectorId, NULL);
 
 	/* initialize format converter */
@@ -1971,8 +2018,8 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	 */
 	if (*idx < SYNCHDB_MAX_ACTIVE_CONNECTORS)
 	{
-		Datum values[7];
-		bool nulls[7] = {0};
+		Datum values[8];
+		bool nulls[8] = {0};
 		HeapTuple tuple;
 
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
@@ -1980,9 +2027,10 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 		values[1] = CStringGetTextDatum(get_shm_connector_name(sdb_state->connectors[*idx].type));
 		values[2] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
 		values[3] = Int32GetDatum((int)get_shm_connector_pid(*idx));
-		values[4] = CStringGetTextDatum(get_shm_connector_state(*idx));
-		values[5] = CStringGetTextDatum(get_shm_connector_errmsg(*idx));
-		values[6] = CStringGetTextDatum(get_shm_dbz_offset(*idx));
+		values[4] = CStringGetTextDatum(get_shm_connector_stage(*idx));
+		values[5] = CStringGetTextDatum(get_shm_connector_state(*idx));
+		values[6] = CStringGetTextDatum(get_shm_connector_errmsg(*idx));
+		values[7] = CStringGetTextDatum(get_shm_dbz_offset(*idx));
 		LWLockRelease(&sdb_state->lock);
 
 		*idx += 1;

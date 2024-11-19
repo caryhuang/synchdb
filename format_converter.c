@@ -34,10 +34,9 @@
 #include "catalog/namespace.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/memutils.h"
 #include "access/table.h"
 #include <time.h>
-#include "access/xact.h"
-#include "utils/snapmgr.h"
 #include "synchdb.h"
 #include "common/base64.h"
 #include "port/pg_bswap.h"
@@ -652,6 +651,9 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 		 */
 		if (removequotes)
 			remove_double_quotes(strinfoout);
+
+		if (resjb)
+			pfree(resjb);
 		elog(DEBUG1, "%s = %s", path, strinfoout->data);
     }
 
@@ -1755,9 +1757,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		 * and then add its column to a temporary hash table that we can compare
 		 * with the new column list.
 		 */
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		schemaoid = get_namespace_oid(schema, false);
 		if (!OidIsValid(schemaoid))
 		{
@@ -1785,9 +1784,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		rel = table_open(tableoid, NoLock);
 		tupdesc = RelationGetDescr(rel);
 		table_close(rel, NoLock);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 
 		if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
 		{
@@ -2838,6 +2834,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	Relation rel;
 	TupleDesc tupdesc;
 	int attnum, j = 0;
+	MemoryContext oldContext = CurrentMemoryContext;
 
 	HTAB * typeidhash;
 	HASHCTL hash_ctl;
@@ -2968,9 +2965,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	for (j = 0; j < strlen(dbzdml->table); j++)
 		dbzdml->table[j] = (char) pg_tolower((unsigned char) dbzdml->table[j]);
 
-	StartTransactionCommand();
-	PushActiveSnapshot(GetTransactionSnapshot());
-
 	schemaoid = get_namespace_oid(dbzdml->schema, false);
 	if (!OidIsValid(schemaoid))
 	{
@@ -2999,7 +2993,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
 	hash_ctl.entrysize = sizeof(NameOidEntry);
-	hash_ctl.hcxt = CurrentMemoryContext;
+	hash_ctl.hcxt = oldContext;
 
 	typeidhash = hash_create("Name to OID Hash Table",
 							 512, // limit to 512 columns max
@@ -3038,9 +3032,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		}
 	}
 	table_close(rel, NoLock);
-
-	PopActiveSnapshot();
-	CommitTransactionCommand();
 
 	switch(op)
 	{
@@ -3196,6 +3187,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							/* replace the column name with looked up value here */
 							pfree(colval->name);
 							colval->name = pstrdup(mappedColumnName);
+							/* to test pfree(mappedColumnName) */
 						}
 						if (colNameObjId.data)
 							pfree(colNameObjId.data);
@@ -3369,6 +3361,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							/* replace the column name with looked up value here */
 							pfree(colval->name);
 							colval->name = pstrdup(mappedColumnName);
+							/* to test pfree(mappedColumnName) */
 						}
 						if (colNameObjId.data)
 							pfree(colNameObjId.data);
@@ -3552,6 +3545,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								/* replace the column name with looked up value here */
 								pfree(colval->name);
 								colval->name = pstrdup(mappedColumnName);
+								/* to test pfree(mappedColumnName) */
 							}
 							if (colNameObjId.data)
 								pfree(colNameObjId.data);
@@ -4210,6 +4204,13 @@ fc_processDBZChangeEvent(const char * event)
 	Jsonb *jb;
 	StringInfoData strinfo;
 	ConnectorType type;
+	MemoryContext tempContext, oldContext;
+
+	tempContext = AllocSetContextCreate(TopMemoryContext,
+										"FORMAT_CONVERTER",
+										ALLOCSET_DEFAULT_SIZES);
+
+	oldContext = MemoryContextSwitchTo(tempContext);
 
 	initStringInfo(&strinfo);
 
@@ -4224,9 +4225,19 @@ fc_processDBZChangeEvent(const char * event)
 
     /* Check if it's a DDL or DML event */
     getPathElementString(jb, "payload.ddl", &strinfo, true);
+    getPathElementString(jb, "payload.source.snapshot", &strinfo, true);
+    if (!strcmp(strinfo.data, "true") || !strcmp(strinfo.data, "last"))
+    {
+    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+    		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+    }
+    else
+    {
+    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+    		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+    }
 
     getPathElementString(jb, "payload.op", &strinfo, true);
-
     if (!strcmp(strinfo.data, "NULL"))
     {
         /* Process DDL event */
@@ -4241,6 +4252,8 @@ fc_processDBZChangeEvent(const char * event)
     	{
     		elog(DEBUG1, "malformed DDL event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
@@ -4253,6 +4266,8 @@ fc_processDBZChangeEvent(const char * event)
     		elog(WARNING, "failed to convert DBZ DDL to PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		destroyDBZDDL(dbzddl);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
@@ -4265,13 +4280,12 @@ fc_processDBZChangeEvent(const char * event)
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		destroyDBZDDL(dbzddl);
     		destroyPGDDL(pgddl);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
-    	/* (4) update offset */
-       	set_shm_dbz_offset(myConnectorId);
-
-    	/* (5) clean up */
+    	/* (4) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
     	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDDL(dbzddl);
@@ -4292,6 +4306,8 @@ fc_processDBZChangeEvent(const char * event)
 		{
 			elog(WARNING, "malformed DNL event");
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
 			return -1;
 		}
 
@@ -4303,6 +4319,8 @@ fc_processDBZChangeEvent(const char * event)
     		elog(WARNING, "failed to convert DBZ DML to PG DML change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		destroyDBZDML(dbzdml);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
@@ -4315,11 +4333,10 @@ fc_processDBZChangeEvent(const char * event)
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
         	destroyDBZDML(dbzdml);
         	destroyPGDML(pgdml);
+        	MemoryContextSwitchTo(oldContext);
+        	MemoryContextDelete(tempContext);
     		return -1;
     	}
-
-    	/* (4) update offset */
-       	set_shm_dbz_offset(myConnectorId);
 
        	/* (5) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -4327,5 +4344,14 @@ fc_processDBZChangeEvent(const char * event)
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);
     }
+
+	if(strinfo.data)
+		pfree(strinfo.data);
+
+	if (jb)
+		pfree(jb);
+
+	MemoryContextSwitchTo(oldContext);
+	MemoryContextDelete(tempContext);
 	return 0;
 }
