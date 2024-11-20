@@ -2,7 +2,11 @@
 \echo Use "CREATE EXTENSION synchdb" to load this file. \quit
  
 CREATE OR REPLACE FUNCTION synchdb_start_engine_bgw(text) RETURNS int
-AS '$libdir/synchdb'
+AS '$libdir/synchdb', 'synchdb_start_engine_bgw'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_start_engine_bgw(text, text) RETURNS int
+AS '$libdir/synchdb', 'synchdb_start_engine_bgw_snapshot_mode'
 LANGUAGE C IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION synchdb_stop_engine_bgw(text) RETURNS int

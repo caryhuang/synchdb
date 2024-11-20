@@ -46,6 +46,7 @@ PG_MODULE_MAGIC;
 /* Function declarations for user-facing functions */
 PG_FUNCTION_INFO_V1(synchdb_stop_engine_bgw);
 PG_FUNCTION_INFO_V1(synchdb_start_engine_bgw);
+PG_FUNCTION_INFO_V1(synchdb_start_engine_bgw_snapshot_mode);
 PG_FUNCTION_INFO_V1(synchdb_get_state);
 PG_FUNCTION_INFO_V1(synchdb_pause_engine);
 PG_FUNCTION_INFO_V1(synchdb_resume_engine);
@@ -317,7 +318,11 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 
 	if (size == 0 || size < 0)
 	{
-		/* nothing to process. Return */
+		/* nothing to process, set current stage to CDC and return */
+		if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+		{
+			set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+		}
 		(*env)->DeleteLocalRef(env, changeEventsList);
 		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
@@ -1829,6 +1834,109 @@ synchdb_engine_main(Datum main_arg)
 }
 
 Datum
+synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
+{
+	BackgroundWorker worker;
+	BackgroundWorkerHandle *handle;
+	BgwHandleStatus status;
+	pid_t pid;
+	ConnectionInfo connInfo;
+	char *connector = NULL;
+	int ret = -1, connectorid = -1;
+	StringInfoData strinfo;
+	char * snapshotMode = "initial";
+
+	/* Parse input arguments */
+	text *name_text = PG_GETARG_TEXT_PP(0);
+	text *snapshotmode_text = PG_GETARG_TEXT_PP(1);
+
+	/* Sanity check on input arguments */
+	if (VARSIZE(name_text) - VARHDRSZ == 0 ||
+			VARSIZE(name_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("connection name cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_NAME_SIZE)));
+	}
+
+
+	if (VARSIZE(snapshotmode_text) - VARHDRSZ == 0 ||
+			VARSIZE(snapshotmode_text) - VARHDRSZ > SYNCHDB_SNAPSHOT_MODE_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("snapshot mode cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_NAME_SIZE)));
+	}
+
+	ret = ra_getConninfoByName(text_to_cstring(name_text), &connInfo, &connector);
+	if (ret)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("connection name does not exist"),
+				 errhint("use synchdb_add_conninfo to add one first")));
+
+	snapshotMode = text_to_cstring(snapshotmode_text);
+
+	/*
+	 * attach or initialize synchdb shared memory area so we can assign
+	 * a connector ID for this worker
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorid = assign_connector_id(connInfo.name);
+	if (connectorid == -1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("max number of connectors reached"),
+				 errhint("use synchdb_stop_engine_bgw to stop some active connectors")));
+
+	/* prepare background worker */
+	MemSet(&worker, 0, sizeof(BackgroundWorker));
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+					   BGWORKER_BACKEND_DATABASE_CONNECTION;
+	worker.bgw_start_time = BgWorkerStart_ConsistentState;
+	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	worker.bgw_notify_pid = MyProcPid;
+
+	strcpy(worker.bgw_library_name, "synchdb");
+	strcpy(worker.bgw_function_name, "synchdb_engine_main");
+
+	prepare_bgw(&worker, &connInfo, connector, connectorid, snapshotMode);
+
+	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+				 errmsg("could not register background process"),
+				 errhint("You may need to increase max_worker_processes.")));
+
+	status = WaitForBackgroundWorkerStartup(handle, &pid);
+	if (status != BGWH_STARTED)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+				 errmsg("could not start background process"),
+				 errhint("More details may be available in the server log.")));
+
+	/*
+	 * mark this conninfo as active so it can automatically resume running at
+	 * postgresql server restarts given that synchdb is included in
+	 * shared_preload_library GUC
+	 */
+	initStringInfo(&strinfo);
+	appendStringInfo(&strinfo, "UPDATE synchdb_conninfo set isactive = true "
+			"WHERE name = '%s'", text_to_cstring(name_text));
+
+	ra_executeCommand(strinfo.data);
+
+	PG_RETURN_INT32(0);
+}
+
+Datum
 synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 {
 	BackgroundWorker worker;
@@ -1968,8 +2076,9 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	pid = get_shm_connector_pid(connectorId);
 	if (pid != InvalidPid)
 	{
-		elog(WARNING, "terminating dbz connector (%s) with pid %d", text_to_cstring(name_text), (int)pid);
-		DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(5000));
+		elog(WARNING, "terminating dbz connector (%s) with pid %d. Shutdown timeout: %d ms",
+				text_to_cstring(name_text), (int)pid, DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC);
+		DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC));
 		set_shm_connector_pid(connectorId, InvalidPid);
 
 	}

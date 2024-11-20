@@ -4270,7 +4270,6 @@ fc_processDBZChangeEvent(const char * event)
     type = fc_get_connector_type(strinfo.data);
 
     /* Check if it's a DDL or DML event */
-//    getPathElementString(jb, "payload.ddl", &strinfo, true);
     getPathElementString(jb, "payload.source.snapshot", &strinfo, true);
     if (!strcmp(strinfo.data, "true") || !strcmp(strinfo.data, "last"))
     {
