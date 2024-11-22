@@ -30,7 +30,6 @@
 #define SYNCHDB_CONNINFO_DB_NAME_SIZE 64
 #define SYNCHDB_MAX_ACTIVE_CONNECTORS 30
 
-/* 90s is Debezium's default timeout value, 10 is SynchDB value */
 #define DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC 100000
 
 #define SYNCHDB_OFFSET_SIZE 256

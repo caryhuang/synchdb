@@ -69,6 +69,12 @@ BatchInfo myBatchInfo;
 int synchdb_worker_naptime = 500;
 bool synchdb_dml_use_spi = false;
 bool synchdb_auto_launcher = true;
+int dbz_batch_size = 2048;
+int dbz_queue_size = 8192;
+char * dbz_skipped_operations = "t";
+int dbz_connect_timeout_ms = 30000;
+int dbz_query_timeout_ms = 600000;
+
 
 /* JNI-related variables */
 static JavaVM *jvm = NULL; /* represents java vm instance */
@@ -100,7 +106,97 @@ static void initialize_jvm(void);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
 static void main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
+static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass);
 
+/*
+ * set_extra_dbz_parameters - configures extra paramters for Debezium runner
+ *
+ * This function builds myParametersObj with extra parameters to be passed
+ * to the Debezium Java side.
+ *
+ * @return: void
+ */
+static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass)
+{
+	jmethodID setBatchSize, setQueueSize, setSkippedOperations, setConnectTimeout, setQueryTimeout;
+	jstring jdbz_skipped_operations;
+
+	setBatchSize = (*env)->GetMethodID(env, myParametersClass, "setBatchSize",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setBatchSize)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setBatchSize, dbz_batch_size);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setBatchSize method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setBatchSize method");
+
+	setQueueSize = (*env)->GetMethodID(env, myParametersClass, "setQueueSize",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setQueueSize)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setQueueSize, dbz_queue_size);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setQueueSize method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setQueueSize method");
+
+	setConnectTimeout = (*env)->GetMethodID(env, myParametersClass, "setConnectTimeout",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setConnectTimeout)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setConnectTimeout, dbz_connect_timeout_ms);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setConnectTimeout method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setConnectTimeout method");
+
+	setQueryTimeout = (*env)->GetMethodID(env, myParametersClass, "setQueryTimeout",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setQueryTimeout)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setQueryTimeout, dbz_query_timeout_ms);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setQueryTimeout method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setQueryTimeout method");
+
+	jdbz_skipped_operations = (*env)->NewStringUTF(env, dbz_skipped_operations);
+
+	setSkippedOperations = (*env)->GetMethodID(env, myParametersClass, "setSkippedOperations",
+			"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setSkippedOperations)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSkippedOperations, jdbz_skipped_operations);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setSkippedOperations method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setSkippedOperations method");
+
+	if (jdbz_skipped_operations)
+			(*env)->DeleteLocalRef(env, jdbz_skipped_operations);
+
+	/*
+	 * additional parameters that we want to pass to Debezium on the java side
+	 * will be added here, Make sure to add the matching methods in the MyParameters
+	 * inner class inside DebeziumRunner class.
+	 */
+}
 /*
  * dbz_engine_stop - Stop the Debezium engine
  *
@@ -438,9 +534,11 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 static int
 dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode)
 {
-	jmethodID mid;
+	jmethodID mid, paramConstruct;
 	jstring jHostname, jUser, jPassword, jDatabase, jTable, jName, jSnapshot;
 	jthrowable exception;
+	jclass myParametersClass;
+	jobject myParametersObj;
 
 	elog(LOG, "dbz_engine_start: Starting dbz engine %s:%d ", connInfo->hostname, connInfo->port);
 	if (!jvm)
@@ -455,16 +553,23 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 		return -1;
 	}
 
-	/* Find the startEngine method */
-	mid = (*env)->GetMethodID(env, cls, "startEngine",
-							  "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
-	if (mid == NULL)
+	myParametersClass = (*env)->FindClass(env, "com/example/DebeziumRunner$MyParameters");
+	if (!myParametersClass)
 	{
-		elog(WARNING, "Failed to find startEngine method");
+		elog(WARNING, "failed to find MyParameters class");
 		return -1;
 	}
 
-	/* Create Java strings from C strings */
+	paramConstruct = (*env)->GetMethodID(env, myParametersClass, "<init>",
+			"(Lcom/example/DebeziumRunner;Ljava/lang/String;ILjava/lang/String;ILjava/lang/String;"
+			"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+	if (paramConstruct == NULL)
+	{
+		elog(WARNING, "failed to find myParameters Constructor");
+		return -1;
+	}
+
+	/* prepare required parameters */
 	jHostname = (*env)->NewStringUTF(env, connInfo->hostname);
 	jUser = (*env)->NewStringUTF(env, connInfo->user);
 	jPassword = (*env)->NewStringUTF(env, connInfo->pwd);
@@ -473,8 +578,28 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	jName = (*env)->NewStringUTF(env, connInfo->name);
 	jSnapshot = (*env)->NewStringUTF(env, snapshotMode);
 
+	myParametersObj = (*env)->NewObject(env, myParametersClass, paramConstruct, obj,
+			jName, connectorType, jHostname, connInfo->port, jUser, jPassword,
+			jDatabase, jTable, jSnapshot);
+	if (!myParametersObj)
+	{
+		elog(WARNING, "failed to create MyParameters object");
+		return -1;
+	}
+
+	/* set extra parameters */
+	set_extra_dbz_parameters(myParametersObj, myParametersClass);
+
+	/* Find the startEngine method */
+	mid = (*env)->GetMethodID(env, cls, "startEngine", "(Lcom/example/DebeziumRunner$MyParameters;)V");
+	if (mid == NULL)
+	{
+		elog(WARNING, "Failed to find startEngine method");
+		return -1;
+	}
+
 	/* Call the Java method */
-	(*env)->CallVoidMethod(env, obj, mid, jHostname, connInfo->port, jUser, jPassword, jDatabase, jTable, connectorType, jName, jSnapshot);
+	(*env)->CallVoidMethod(env, obj, mid, myParametersObj);
 
 	/* Check for exceptions */
 	exception = (*env)->ExceptionOccurred(env);
@@ -1705,14 +1830,12 @@ _PG_init(void)
 							"Duration between each data polling (in milliseconds).",
 							NULL,
 							&synchdb_worker_naptime,
-							5,
+							100,
 							1,
-							INT_MAX,
+							30000,
 							PGC_SIGHUP,
 							0,
-							NULL,
-							NULL,
-							NULL);
+							NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("synchdb.dml_use_spi",
 							 "option to use SPI to handle DML operations. Default false",
@@ -1721,9 +1844,61 @@ _PG_init(void)
 							 false,
 							 PGC_SIGHUP,
 							 0,
-							 NULL,
-							 NULL,
-							 NULL);
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_batch_size",
+							"the maximum number of change events in a batch",
+							NULL,
+							&dbz_batch_size,
+							2048,
+							1024,
+							4096,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_queue_size",
+							"the maximum size of Debezium's change event queue",
+							NULL,
+							&dbz_queue_size,
+							8192,
+							8192,
+							16384,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_connect_timeout_ms",
+							"Debezium's connection timeout value in milliseconds",
+							NULL,
+							&dbz_connect_timeout_ms,
+							30000,
+							1000,
+							3600000,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_query_timeout_ms",
+							"Debezium's query timeout value in milliseconds",
+							NULL,
+							&dbz_query_timeout_ms,
+							600000,
+							1000,
+							3600000,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomStringVariable("synchdb.dbz_skipped_oeprations",
+							   "a comma-separated list of operations Debezium shall skip: "
+							   "c for inserts, u for updates, d for deletes, t for truncates",
+							   NULL,
+							   &dbz_skipped_operations,
+							   "t",
+							   PGC_SIGHUP,
+							   0,
+							   NULL, NULL, NULL);
 
 	if (process_shared_preload_libraries_in_progress)
 	{
@@ -1947,15 +2122,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	char *connector = NULL;
 	int ret = -1, connectorid = -1;
 	StringInfoData strinfo;
-
-	/*
-	 * By default, we use snapshot mode = initial when starting
-	 * a connector, which means the connector will synchronize
-	 * all selected table schemas and proceed with CDC. We currently
-	 * do not allow user to specify a different snapshot mode during
-	 * 'synchdb_start_engine_bgw'. However, a different snapshot mode
-	 * can be specified in the 'synchdb_restart_connector' sql function
-	 */
+	/* By default, we use snapshot mode = initial */
 	char * snapshotMode = "initial";
 
 	/* Parse input arguments */
