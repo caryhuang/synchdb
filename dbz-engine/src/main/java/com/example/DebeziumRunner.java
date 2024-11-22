@@ -57,11 +57,13 @@ public class DebeziumRunner {
 	{
 		private Queue<ChangeRecordBatch> batchQueue;
 		private int batchid;
+		private boolean isShutdown;
 
 		public BatchManager()
 		{
 			this.batchQueue = new LinkedList<>();
 			this.batchid = 0;
+			this.isShutdown = false;
 		}
 
 		public synchronized int getQueueSize()
@@ -70,10 +72,17 @@ public class DebeziumRunner {
 		}
 		public synchronized void addBatch(ChangeRecordBatch batch) throws InterruptedException
 		{
-			while (batchQueue.size() >= BATCH_QUEUE_SIZE)
+			while (batchQueue.size() >= BATCH_QUEUE_SIZE && !this.isShutdown)
 			{
 				wait();
 			}
+
+			if (this.isShutdown)
+			{
+				logger.warn("BatchManager has been shutdown...");
+				return;
+			}
+
 			batch.batchid = this.batchid;
 			batchQueue.offer(batch);
 			this.batchid++;
@@ -89,6 +98,12 @@ public class DebeziumRunner {
             	notifyAll();
         	}
 			return batch;
+		}
+
+		public synchronized void shutdown()
+		{
+			this.isShutdown = true;
+			notifyAll();
 		}
 	}
 	
@@ -106,21 +121,22 @@ public class DebeziumRunner {
 		}
 	}
 
-public void checkMemoryStatus() {
-    MemoryMXBean memoryMXBean = ManagementFactory.getMemoryMXBean();
-    MemoryUsage heapUsage = memoryMXBean.getHeapMemoryUsage();
-    MemoryUsage nonHeapUsage = memoryMXBean.getNonHeapMemoryUsage();
+	public void checkMemoryStatus()
+	{
+		MemoryMXBean memoryMXBean = ManagementFactory.getMemoryMXBean();
+	    MemoryUsage heapUsage = memoryMXBean.getHeapMemoryUsage();
+	    MemoryUsage nonHeapUsage = memoryMXBean.getNonHeapMemoryUsage();
 
-    logger.warn("Heap Memory:");
-    logger.warn("  Used: " + heapUsage.getUsed() + " bytes");
-    logger.warn("  Committed: " + heapUsage.getCommitted() + " bytes");
-    logger.warn("  Max: " + heapUsage.getMax() + " bytes");
+		logger.warn("Heap Memory:");
+	    logger.warn("  Used: " + heapUsage.getUsed() + " bytes");
+	    logger.warn("  Committed: " + heapUsage.getCommitted() + " bytes");
+	    logger.warn("  Max: " + heapUsage.getMax() + " bytes");
 
-    logger.warn("Non-Heap Memory:");
-    logger.warn("  Used: " + nonHeapUsage.getUsed() + " bytes");
-    logger.warn("  Committed: " + nonHeapUsage.getCommitted() + " bytes");
-    logger.warn("  Max: " + nonHeapUsage.getMax() + " bytes");
-}
+		logger.warn("Non-Heap Memory:");
+	    logger.warn("  Used: " + nonHeapUsage.getUsed() + " bytes");
+	    logger.warn("  Committed: " + nonHeapUsage.getCommitted() + " bytes");
+	    logger.warn("  Max: " + nonHeapUsage.getMax() + " bytes");
+	}
 
 	public void startEngine(String hostname, int port, String user, String password, String database, String table, int connectorType, String name, String snapshot_mode) throws Exception
 	{
@@ -225,7 +241,6 @@ public void checkMemoryStatus() {
 							activeBatchHash = new HashMap<>();
 						}
 
-						/* throttle control */
 						try
 						{
 							batchManager.addBatch(new ChangeRecordBatch(records, committer));
@@ -258,14 +273,21 @@ public void checkMemoryStatus() {
 
 	public void stopEngine() throws Exception
 	{
+		/* wake up any waiting threads about shutdown */
+		logger.warn("stopping Debezium engine...");
+		if (batchManager != null)
+		{
+			batchManager.shutdown();
+		}
 		if (engine != null)
 		{
+			logger.warn("closing Debezium engine...");
 			engine.close();
 			engine = null; // clear the reference to ensure it's properly garbage collected
 		}
 		if (executor != null)
 		{
-			logger.info("stopping executor...");
+			logger.warn("shutting down executor...");
             executor.shutdown();
             try
 			{
@@ -279,7 +301,7 @@ public void checkMemoryStatus() {
                 executor.shutdownNow();
             }
         }
-		logger.info("done...");
+		logger.warn("done...");
 	}
 
 	public List<String> getChangeEvents()
