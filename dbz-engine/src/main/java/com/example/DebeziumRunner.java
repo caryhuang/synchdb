@@ -119,7 +119,6 @@ public class DebeziumRunner {
 			logger.warn("hostname = " + this.hostname);
 			logger.warn("port = " + this.port);
 			logger.warn("user = " + this.user);
-			logger.warn("password = " + this.password);
 			logger.warn("database = " + this.database);
 			logger.warn("table = " + this.table);
 			logger.warn("snapshotMode = " + this.snapshotMode);
