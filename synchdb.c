@@ -58,7 +58,7 @@ PG_FUNCTION_INFO_V1(synchdb_restart_connector);
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
 #define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
 #define MAX_PATH_LENGTH 1024
-#define MAX_JAVA_OPTION_LENGTH 512
+#define MAX_JAVA_OPTION_LENGTH 256
 
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
@@ -74,6 +74,7 @@ int dbz_queue_size = 8192;
 char * dbz_skipped_operations = "t";
 int dbz_connect_timeout_ms = 30000;
 int dbz_query_timeout_ms = 600000;
+int jvm_max_heap_size = 0;
 
 
 /* JNI-related variables */
@@ -1228,8 +1229,9 @@ static void
 initialize_jvm(void)
 {
 	JavaVMInitArgs vm_args;
-	JavaVMOption options[2];
+	JavaVMOption options[3];
 	char javaopt[MAX_JAVA_OPTION_LENGTH] = {0};
+	char jvmheapmax[MAX_JAVA_OPTION_LENGTH] = {0};
 	char jar_path[MAX_PATH_LENGTH] = {0};
 	const char *dbzpath = getenv("DBZ_ENGINE_DIR");
 	int ret;
@@ -1251,15 +1253,21 @@ initialize_jvm(void)
 		elog(ERROR, "Cannot find DBZ engine jar file at %s", jar_path);
 	}
 
-	/* Set up Java classpath */
+	/* Set up Java classpath and heap size */
 	snprintf(javaopt, sizeof(javaopt), "-Djava.class.path=%s", jar_path);
-	elog(INFO, "Initializing DBZ engine with JAR file: %s", jar_path);
+	if (jvm_max_heap_size == 0)
+		snprintf(jvmheapmax, sizeof(javaopt), "-Xmx0");
+	else
+		snprintf(jvmheapmax, sizeof(javaopt), "-Xmx%dm", jvm_max_heap_size);
+
+	elog(WARNING, "Initializing JVM with options: -Xrs %s %s", javaopt, jvmheapmax);
 
 	/* Configure JVM options */
 	options[0].optionString = javaopt;
 	options[1].optionString = "-Xrs"; // Reduce use of OS signals by JVM
+	options[2].optionString = jvmheapmax;
 	vm_args.version = JNI_VERSION_10;
-	vm_args.nOptions = 2;
+	vm_args.nOptions = 3;
 	vm_args.options = options;
 	vm_args.ignoreUnrecognized = JNI_FALSE;
 
@@ -1851,7 +1859,7 @@ _PG_init(void)
 							NULL,
 							&dbz_batch_size,
 							2048,
-							1024,
+							1,
 							4096,
 							PGC_SIGHUP,
 							0,
@@ -1862,7 +1870,7 @@ _PG_init(void)
 							NULL,
 							&dbz_queue_size,
 							8192,
-							8192,
+							64,
 							16384,
 							PGC_SIGHUP,
 							0,
@@ -1899,6 +1907,17 @@ _PG_init(void)
 							   PGC_SIGHUP,
 							   0,
 							   NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.jvm_max_heap_size",
+							"max heap size allocated to JVM",
+							NULL,
+							&jvm_max_heap_size,
+							1024,
+							0,
+							65536,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
 
 	if (process_shared_preload_libraries_in_progress)
 	{

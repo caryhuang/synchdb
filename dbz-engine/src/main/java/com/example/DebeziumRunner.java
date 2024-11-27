@@ -191,8 +191,8 @@ public class DebeziumRunner {
 	public class ChangeRecordBatch
 	{
 		public int batchid;
-		public final List<ChangeEvent<String, String>> records;
-		public final DebeziumEngine.RecordCommitter committer;
+		public List<ChangeEvent<String, String>> records;
+		public DebeziumEngine.RecordCommitter committer;
 
 		public ChangeRecordBatch(List<ChangeEvent<String, String>> records, DebeziumEngine.RecordCommitter committer) 
 		{
@@ -298,6 +298,7 @@ public class DebeziumRunner {
 		props.setProperty("skipped.operations", myParameters.skippedOperations);
 		props.setProperty("connect.timeout", String.valueOf(myParameters.connectTimeout));
 		props.setProperty("database.query.timeout", String.valueOf(myParameters.queryTimeout));
+		props.setProperty("snapshot.max.threads", "1");
 
 		logger.info("Hello from DebeziumRunner class!");
 
@@ -479,6 +480,12 @@ public class DebeziumRunner {
 			
 			/* remove hash entry at batch completion */
 			activeBatchHash.remove(batchid);
+
+			/* nullify the allocated objects for garbage collection */
+			myBatch.records.clear();
+			myBatch.records = null;
+			myBatch.committer = null;
+			myBatch = null;
 		}
 		else
 		{
