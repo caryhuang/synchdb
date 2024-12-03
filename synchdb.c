@@ -75,6 +75,12 @@ char * dbz_skipped_operations = "t";
 int dbz_connect_timeout_ms = 30000;
 int dbz_query_timeout_ms = 600000;
 int jvm_max_heap_size = 0;
+int dbz_snapshot_thread_num = 2;
+int dbz_snapshot_fetch_size = 0; /* 0: auto */
+int dbz_snapshot_min_row_to_stream_results = 0; /* 0: always stream */
+int dbz_incremental_snapshot_chunk_size = 2048;
+char * dbz_incremental_snapshot_watermarking_strategy = "insert_insert";
+
 
 
 /* JNI-related variables */
@@ -120,7 +126,9 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass)
 {
 	jmethodID setBatchSize, setQueueSize, setSkippedOperations, setConnectTimeout, setQueryTimeout;
-	jstring jdbz_skipped_operations;
+	jmethodID setSnapshotThreadNum, setSnapshotFetchSize, setSnapshotMinRowToStreamResults;
+	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
+	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
 
 	setBatchSize = (*env)->GetMethodID(env, myParametersClass, "setBatchSize",
 			"(I)Lcom/example/DebeziumRunner$MyParameters;");
@@ -192,6 +200,75 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 	if (jdbz_skipped_operations)
 			(*env)->DeleteLocalRef(env, jdbz_skipped_operations);
 
+	setSnapshotThreadNum = (*env)->GetMethodID(env, myParametersClass, "setSnapshotThreadNum",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setSnapshotThreadNum)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSnapshotThreadNum, dbz_snapshot_thread_num);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setSnapshotThreadNum method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setSnapshotThreadNum method");
+
+	setSnapshotFetchSize = (*env)->GetMethodID(env, myParametersClass, "setSnapshotFetchSize",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setSnapshotFetchSize)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSnapshotFetchSize, dbz_snapshot_fetch_size);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setSnapshotFetchSize method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setSnapshotFetchSize method");
+
+	setSnapshotMinRowToStreamResults = (*env)->GetMethodID(env, myParametersClass, "setSnapshotMinRowToStreamResults",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setSnapshotMinRowToStreamResults)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSnapshotMinRowToStreamResults, dbz_snapshot_min_row_to_stream_results);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setSnapshotMinRowToStreamResults method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setSnapshotMinRowToStreamResults method");
+
+	setIncrementalSnapshotChunkSize = (*env)->GetMethodID(env, myParametersClass, "setIncrementalSnapshotChunkSize",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setIncrementalSnapshotChunkSize)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIncrementalSnapshotChunkSize, dbz_incremental_snapshot_chunk_size);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setIncrementalSnapshotChunkSize method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setIncrementalSnapshotChunkSize method");
+
+	jdbz_watermarking_strategy = (*env)->NewStringUTF(env, dbz_incremental_snapshot_watermarking_strategy);
+
+	setIncrementalSnapshotWatermarkingStrategy = (*env)->GetMethodID(env, myParametersClass, "setIncrementalSnapshotWatermarkingStrategy",
+			"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setIncrementalSnapshotWatermarkingStrategy)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIncrementalSnapshotWatermarkingStrategy, jdbz_watermarking_strategy);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setIncrementalSnapshotWatermarkingStrategy method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setIncrementalSnapshotWatermarkingStrategy method");
+
+	if (jdbz_watermarking_strategy)
+			(*env)->DeleteLocalRef(env, jdbz_watermarking_strategy);
 	/*
 	 * additional parameters that we want to pass to Debezium on the java side
 	 * will be added here, Make sure to add the matching methods in the MyParameters
@@ -1860,7 +1937,7 @@ _PG_init(void)
 							&dbz_batch_size,
 							2048,
 							1,
-							4096,
+							65535,
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
@@ -1871,7 +1948,7 @@ _PG_init(void)
 							&dbz_queue_size,
 							8192,
 							64,
-							16384,
+							65535,
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
@@ -1918,6 +1995,59 @@ _PG_init(void)
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_snapshot_thread_num",
+							"number of threads to perform Debezium initial snapshot",
+							NULL,
+							&dbz_snapshot_thread_num,
+							2,
+							1,
+							16,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_snapshot_fetch_size",
+							"number of rows Debezium fetches at a time during a snapshot",
+							NULL,
+							&dbz_snapshot_fetch_size,
+							0,
+							0,
+							65535,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_snapshot_min_row_to_stream_results",
+							"minimum row in a remote table before switching to streaming mode",
+							NULL,
+							&dbz_snapshot_min_row_to_stream_results,
+							0,
+							0,
+							65535,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_incremental_snapshot_chunk_size",
+							"batch size of incremental snapshot process",
+							NULL,
+							&dbz_incremental_snapshot_chunk_size,
+							2048,
+							1,
+							65535,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomStringVariable("synchdb.dbz_incremental_snapshot_watermarking_strategy",
+							   "watermarking strategy of incremental snapshot",
+							   NULL,
+							   &dbz_incremental_snapshot_watermarking_strategy,
+							   "insert_insert",
+							   PGC_SIGHUP,
+							   0,
+							   NULL, NULL, NULL);
 
 	if (process_shared_preload_libraries_in_progress)
 	{

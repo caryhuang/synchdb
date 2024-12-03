@@ -72,6 +72,11 @@ public class DebeziumRunner {
 		private String skippedOperations;
 		private int connectTimeout;
 		private int queryTimeout;
+		private int snapshotThreadNum;
+		private int snapshotFetchSize;
+		private int snapshotMinRowToStreamResults;
+		private int incrementalSnapshotChunkSize;
+		private String incrementalSnapshotWatermarkingStrategy;
 
 		/* constructor requires all required parameters for a connector to work */
 		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshotMode)
@@ -111,6 +116,32 @@ public class DebeziumRunner {
 			this.queryTimeout = queryTimeout;
 			return this;
 		}
+		public MyParameters setSnapshotThreadNum(int snapshotThreadNum)
+		{
+			this.snapshotThreadNum = snapshotThreadNum;
+			return this;
+		}
+		public MyParameters setSnapshotFetchSize(int snapshotFetchSize)
+		{
+			this.snapshotFetchSize = snapshotFetchSize;
+			return this;
+		}
+		public MyParameters setSnapshotMinRowToStreamResults(int snapshotMinRowToStreamResults)
+		{
+			this.snapshotMinRowToStreamResults = snapshotMinRowToStreamResults;
+			return this;
+		}
+		public MyParameters setIncrementalSnapshotChunkSize(int incrementalSnapshotChunkSize)
+		{
+			this.incrementalSnapshotChunkSize = incrementalSnapshotChunkSize;
+			return this;
+		}
+		public MyParameters setIncrementalSnapshotWatermarkingStrategy(String incrementalSnapshotWatermarkingStrategy)
+		{
+			this.incrementalSnapshotWatermarkingStrategy = incrementalSnapshotWatermarkingStrategy;
+			return this;
+		}
+
 		/* add more setters here to incrementally set parameters */
 		public void print()
 		{
@@ -128,6 +159,11 @@ public class DebeziumRunner {
 			logger.warn("skippedOperations = " + this.skippedOperations);
 			logger.warn("connectTimeout = " + this.connectTimeout);
 			logger.warn("queryTimeout = " + this.queryTimeout);
+			logger.warn("snapshotThreadNum = " + this.snapshotThreadNum);
+			logger.warn("snapshotFetchSize = " + this.snapshotFetchSize);
+			logger.warn("snapshotMinRowToStreamResults= " + this.snapshotMinRowToStreamResults);
+			logger.warn("incrementalSnapshotChunkSize = " + this.incrementalSnapshotChunkSize);
+			logger.warn("incrementalSnapshotWatermarkingStrategy = " + this.incrementalSnapshotWatermarkingStrategy);
 		}
 
 	}
@@ -221,7 +257,7 @@ public class DebeziumRunner {
 	{
 		String offsetfile = "/dev/shm/offsets.dat";
 		String schemahistoryfile = "/dev/shm/schemahistory.dat";
-
+		String signalfile= "/dev/shm/signalfile.dat";
 		Properties props = new Properties();
 		myParameters.print();
 
@@ -241,6 +277,7 @@ public class DebeziumRunner {
 
 				offsetfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_offsets.dat";
 				schemahistoryfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_schemahistory.dat";
+				signalfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_signal.dat";
 
 				break;
 			}
@@ -249,6 +286,7 @@ public class DebeziumRunner {
 		        props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
 				offsetfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_offsets.dat";
 				schemahistoryfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_schemahistory.dat";
+				signalfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_signal.dat";
 				break;
 			}
 			case TYPE_SQLSERVER:
@@ -257,6 +295,7 @@ public class DebeziumRunner {
 				props.setProperty("database.encrypt", "false");	/* todo: enable tls */
 				offsetfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_offsets.dat";
 				schemahistoryfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_schemahistory.dat";
+				signalfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_signal.dat";
 				break;
 			}
 		}
@@ -280,6 +319,11 @@ public class DebeziumRunner {
 		else
 			props.setProperty("snapshot.mode", myParameters.snapshotMode);
 
+		if (myParameters.snapshotFetchSize == 0)
+			logger.warn("snapshotFetchSize is 0 - skip setting snapshot.fetch.size property");
+		else
+			props.setProperty("snapshot.fetch.size", String.valueOf(myParameters.snapshotFetchSize));
+
 		props.setProperty("database.hostname", myParameters.hostname);
 		props.setProperty("database.port", String.valueOf(myParameters.port));
 		props.setProperty("database.user", myParameters.user);
@@ -297,7 +341,16 @@ public class DebeziumRunner {
 		props.setProperty("skipped.operations", myParameters.skippedOperations);
 		props.setProperty("connect.timeout", String.valueOf(myParameters.connectTimeout));
 		props.setProperty("database.query.timeout", String.valueOf(myParameters.queryTimeout));
-		props.setProperty("snapshot.max.threads", "1");
+		props.setProperty("snapshot.max.threads", String.valueOf(myParameters.snapshotThreadNum));
+		props.setProperty("signal.enabled.channels", "file");
+		props.setProperty("signal.file", signalfile);
+		props.setProperty("signal.data.collection", "synchdb.dbzsignal");	/* todo: make it configurable */
+		props.setProperty("incremental.snapshot.chunk.size", String.valueOf(myParameters.incrementalSnapshotChunkSize));
+		props.setProperty("incremental.snapshot.watermarking.strategy", myParameters.incrementalSnapshotWatermarkingStrategy);
+		props.setProperty("incremental.snapshot.allow.schema.changes", "false");
+		props.setProperty("min.row.count.to.stream.results", String.valueOf(myParameters.snapshotMinRowToStreamResults));
+
+		//props.setProperty("read.only", "true");
 
 		logger.info("Hello from DebeziumRunner class!");
 
@@ -338,7 +391,10 @@ public class DebeziumRunner {
 				})
 				.build();
 
-		executor = Executors.newSingleThreadExecutor();
+		if (myParameters.snapshotThreadNum > 1)
+			executor = Executors.newFixedThreadPool(myParameters.snapshotThreadNum);
+		else
+			executor = Executors.newSingleThreadExecutor();
 
 		logger.info("submit future to executor");
 		future = executor.submit(() ->
