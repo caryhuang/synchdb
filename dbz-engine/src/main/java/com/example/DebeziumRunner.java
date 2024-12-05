@@ -17,7 +17,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ExecutionException;
 import java.util.LinkedList;
 import java.util.Queue;
-
+import java.io.IOException;
 import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -34,6 +34,9 @@ import org.slf4j.LoggerFactory;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class DebeziumRunner {
 	private static final Logger logger = LoggerFactory.getLogger(DebeziumRunner.class);
@@ -77,6 +80,13 @@ public class DebeziumRunner {
 		private int snapshotMinRowToStreamResults;
 		private int incrementalSnapshotChunkSize;
 		private String incrementalSnapshotWatermarkingStrategy;
+		private int offsetFlushIntervalMs;
+		private boolean captureOnlySelectedTableDDL;
+		private String sslmode;
+		private String sslKeystore;
+		private String sslKeystorePass;
+		private String sslTruststore;
+		private String sslTruststorePass;
 
 		/* constructor requires all required parameters for a connector to work */
 		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshotMode)
@@ -141,6 +151,41 @@ public class DebeziumRunner {
 			this.incrementalSnapshotWatermarkingStrategy = incrementalSnapshotWatermarkingStrategy;
 			return this;
 		}
+		public MyParameters setOffsetFlushIntervalMs(int offsetFlushIntervalMs)
+		{
+			this.offsetFlushIntervalMs = offsetFlushIntervalMs;
+			return this;
+		}
+		public MyParameters setCaptureOnlySelectedTableDDL(boolean captureOnlySelectedTableDDL)
+		{
+			this.captureOnlySelectedTableDDL = captureOnlySelectedTableDDL;
+			return this;
+		}
+		public MyParameters setSslmode(String sslmode)
+		{
+			this.sslmode = sslmode;
+			return this;
+		}
+		public MyParameters setSslKeystore(String sslKeystore)
+		{
+			this.sslKeystore = sslKeystore;
+			return this;
+		}
+		public MyParameters setSslKeystorePass(String sslKeystorePass)
+		{
+			this.sslKeystorePass = sslKeystorePass;
+			return this;
+		}
+		public MyParameters setSslTruststore(String sslTruststore)
+		{
+			this.sslTruststore = sslTruststore;
+			return this;
+		}
+		public MyParameters setSslTruststorePass(String sslTruststorePass)
+		{
+			this.sslTruststorePass = sslTruststorePass;
+			return this;
+		}
 
 		/* add more setters here to incrementally set parameters */
 		public void print()
@@ -164,6 +209,13 @@ public class DebeziumRunner {
 			logger.warn("snapshotMinRowToStreamResults= " + this.snapshotMinRowToStreamResults);
 			logger.warn("incrementalSnapshotChunkSize = " + this.incrementalSnapshotChunkSize);
 			logger.warn("incrementalSnapshotWatermarkingStrategy = " + this.incrementalSnapshotWatermarkingStrategy);
+			logger.warn("offsetFlushIntervalMs = " + this.offsetFlushIntervalMs);
+			logger.warn("captureOnlySelectedTableDDL = " + this.captureOnlySelectedTableDDL);
+			logger.warn("sslmode = " + this.sslmode);
+			logger.warn("sslKeystore = " + this.sslKeystore);
+			logger.warn("sslKeystorePass = " + this.sslKeystorePass);
+			logger.warn("sslTruststore = " + this.sslTruststore);
+			logger.warn("sslTruststorePass = " + this.sslTruststorePass);
 		}
 
 	}
@@ -279,6 +331,17 @@ public class DebeziumRunner {
 				schemahistoryfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_schemahistory.dat";
 				signalfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_signal.dat";
 
+				if (myParameters.sslmode != null)
+					props.setProperty("database.ssl.mode", myParameters.sslmode);
+				if (myParameters.sslKeystore != null)
+					props.setProperty("database.ssl.keystore", myParameters.sslKeystore);
+				if (myParameters.sslKeystorePass != null)
+					props.setProperty("database.ssl.keystore.password", myParameters.sslKeystorePass);
+				if (myParameters.sslTruststore != null)
+					props.setProperty("database.ssl.truststore", myParameters.sslTruststore);
+				if (myParameters.sslTruststorePass != null)
+					props.setProperty("database.ssl.truststore.password", myParameters.sslTruststorePass);
+
 				break;
 			}
 			case TYPE_ORACLE:
@@ -292,10 +355,23 @@ public class DebeziumRunner {
 			case TYPE_SQLSERVER:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");
-				props.setProperty("database.encrypt", "false");	/* todo: enable tls */
 				offsetfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_offsets.dat";
 				schemahistoryfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_schemahistory.dat";
 				signalfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_signal.dat";
+				
+				if (myParameters.sslmode != null && !myParameters.sslmode.equals("disabled"))
+					props.setProperty("database.encrypt", "true");
+				else
+					props.setProperty("database.encrypt", "false");
+
+				if (myParameters.sslKeystore != null)
+					props.setProperty("database.ssl.keystore", myParameters.sslKeystore);
+				if (myParameters.sslKeystorePass != null)
+					props.setProperty("database.ssl.keystore.password", myParameters.sslKeystorePass);
+				if (myParameters.sslTruststore != null)
+					props.setProperty("database.ssl.truststore", myParameters.sslTruststore);
+				if (myParameters.sslTruststorePass != null)
+					props.setProperty("database.ssl.truststore.password", myParameters.sslTruststorePass);
 				break;
 			}
 		}
@@ -311,6 +387,46 @@ public class DebeziumRunner {
 
 		if (myParameters.table.equals("null"))
 			logger.warn("table is null - skip setting table.include.list property");
+		else if (myParameters.table.startsWith("file:"))
+		{
+			logger.warn("reading table list from file...");
+			String filepath = myParameters.table.substring(5);
+			File tablefile = new File(filepath);
+			if (tablefile.exists())
+			{
+				ObjectMapper objmapper = new ObjectMapper();
+				try
+				{
+					JsonNode js = objmapper.readTree(tablefile);
+					if (js.has("table_list") && js.get("table_list").isArray())
+					{
+						JsonNode tableListNode = js.get("table_list");
+						StringBuilder tablelist = new StringBuilder();
+						for (JsonNode table : tableListNode)
+						{
+							tablelist.append(table.asText()).append(",");
+						}
+						if (tablelist.length() > 0)
+							tablelist.setLength(tablelist.length() - 1);
+
+						logger.warn("tables to capture: " + tablelist.toString());
+						props.setProperty("table.include.list", tablelist.toString());
+					}
+					else
+					{
+						logger.warn("file has no array named 'table_list' - skip setting table.include.list property");
+					}
+				}
+				catch (IOException e)
+				{
+					logger.warn("table file fails to parse - skip setting table.include.list property");
+				}
+			}
+			else
+			{
+				logger.warn("table file does not exist - skip setting table.include.list property");
+			}
+		}
 		else
 			props.setProperty("table.include.list", myParameters.table);
 		
@@ -333,8 +449,8 @@ public class DebeziumRunner {
 		props.setProperty("schema.history.internal.file.filename", schemahistoryfile);
 		props.setProperty("offset.storage", "org.apache.kafka.connect.storage.FileOffsetBackingStore");
 		props.setProperty("offset.storage.file.filename", offsetfile);
-		props.setProperty("offset.flush.interval.ms", "60000");
-		props.setProperty("schema.history.internal.store.only.captured.tables.ddl", "true");
+		props.setProperty("offset.flush.interval.ms", String.valueOf(myParameters.offsetFlushIntervalMs));
+		props.setProperty("schema.history.internal.store.only.captured.tables.ddl", myParameters.captureOnlySelectedTableDDL ? "true" : "false");
 		props.setProperty("max.batch.size", String.valueOf(myParameters.batchSize));
 		props.setProperty("max.queue.size", String.valueOf(myParameters.queueSize));
 		props.setProperty("record.processing.order", "ORDERED");
@@ -679,7 +795,8 @@ public class DebeziumRunner {
 		writeOffsetFile(inputFile, rawData);
 	}
 	
-	public Map<ByteBuffer, ByteBuffer> readOffsetFile(File inputFile) {
+	public Map<ByteBuffer, ByteBuffer> readOffsetFile(File inputFile)
+	{
         Map<ByteBuffer, ByteBuffer> originalData = new HashMap<>();
 
         try (FileInputStream fileIn = new FileInputStream(inputFile);
@@ -701,7 +818,8 @@ public class DebeziumRunner {
         return originalData;
     }
 
-    public void writeOffsetFile(File outputFile, Map<byte[], byte[]> rawData) {
+    public void writeOffsetFile(File outputFile, Map<byte[], byte[]> rawData)
+	{
         try (FileOutputStream fileOut = new FileOutputStream(outputFile);
              ObjectOutputStream objectOut = new ObjectOutputStream(fileOut)) {
                 objectOut.writeObject(rawData);
@@ -709,6 +827,11 @@ public class DebeziumRunner {
             throw new RuntimeException(e);
         }
     }
+
+	public void jvmMemDump()
+	{
+		checkMemoryStatus();
+	}
 	public static void main(String[] args)
 	{
 		/* testing code can be put here */

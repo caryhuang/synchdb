@@ -53,6 +53,7 @@ PG_FUNCTION_INFO_V1(synchdb_resume_engine);
 PG_FUNCTION_INFO_V1(synchdb_set_offset);
 PG_FUNCTION_INFO_V1(synchdb_add_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_restart_connector);
+PG_FUNCTION_INFO_V1(synchdb_log_jvm_meminfo);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -64,6 +65,7 @@ PG_FUNCTION_INFO_V1(synchdb_restart_connector);
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
 int myConnectorId = -1;	/* Global index number to SynchdbSharedState in shared memory - global per worker */
 BatchInfo myBatchInfo;
+ExtraConnectionInfo extraConnInfo = {0}; /* global extra connector parameters read from rule file */
 
 /* GUC variables */
 int synchdb_worker_naptime = 500;
@@ -80,8 +82,8 @@ int dbz_snapshot_fetch_size = 0; /* 0: auto */
 int dbz_snapshot_min_row_to_stream_results = 0; /* 0: always stream */
 int dbz_incremental_snapshot_chunk_size = 2048;
 char * dbz_incremental_snapshot_watermarking_strategy = "insert_insert";
-
-
+int dbz_offset_flush_interval_ms = 60000;
+bool dbz_capture_only_selected_table_ddl = true;
 
 /* JNI-related variables */
 static JavaVM *jvm = NULL; /* represents java vm instance */
@@ -128,7 +130,10 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 	jmethodID setBatchSize, setQueueSize, setSkippedOperations, setConnectTimeout, setQueryTimeout;
 	jmethodID setSnapshotThreadNum, setSnapshotFetchSize, setSnapshotMinRowToStreamResults;
 	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
+	jmethodID setOffsetFlushIntervalMs, setCaptureOnlySelectedTableDDL;
+	jmethodID setSslmode, setSslKeystore, setSslKeystorePass, setSslTruststore, setSslTruststorePass;
 	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
+	jstring jdbz_sslmode, jdbz_sslkeystore, jdbz_sslkeystorepass, jdbz_ssltruststore, jdbz_ssltruststorepass;
 
 	setBatchSize = (*env)->GetMethodID(env, myParametersClass, "setBatchSize",
 			"(I)Lcom/example/DebeziumRunner$MyParameters;");
@@ -269,6 +274,156 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 
 	if (jdbz_watermarking_strategy)
 			(*env)->DeleteLocalRef(env, jdbz_watermarking_strategy);
+
+	setOffsetFlushIntervalMs = (*env)->GetMethodID(env, myParametersClass, "setOffsetFlushIntervalMs",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setOffsetFlushIntervalMs)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setOffsetFlushIntervalMs, dbz_offset_flush_interval_ms);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setOffsetFlushIntervalMs method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setOffsetFlushIntervalMs method");
+
+	setCaptureOnlySelectedTableDDL = (*env)->GetMethodID(env, myParametersClass, "setCaptureOnlySelectedTableDDL",
+			"(Z)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setCaptureOnlySelectedTableDDL)
+	{
+		jboolean bval = dbz_capture_only_selected_table_ddl ? JNI_TRUE : JNI_FALSE;
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setCaptureOnlySelectedTableDDL, bval);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setCaptureOnlySelectedTableDDL method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setCaptureOnlySelectedTableDDL method");
+
+	jdbz_watermarking_strategy = (*env)->NewStringUTF(env, dbz_incremental_snapshot_watermarking_strategy);
+
+	setIncrementalSnapshotWatermarkingStrategy = (*env)->GetMethodID(env, myParametersClass, "setIncrementalSnapshotWatermarkingStrategy",
+			"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setIncrementalSnapshotWatermarkingStrategy)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIncrementalSnapshotWatermarkingStrategy, jdbz_watermarking_strategy);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setIncrementalSnapshotWatermarkingStrategy method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setIncrementalSnapshotWatermarkingStrategy method");
+
+	if (jdbz_watermarking_strategy)
+			(*env)->DeleteLocalRef(env, jdbz_watermarking_strategy);
+
+	if (extraConnInfo.ssl_mode != NULL)
+	{
+		jdbz_sslmode = (*env)->NewStringUTF(env, extraConnInfo.ssl_mode);
+
+		setSslmode = (*env)->GetMethodID(env, myParametersClass, "setSslmode",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setSslmode)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslmode, jdbz_sslmode);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setSslmode method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setSslmode method");
+
+		if (jdbz_sslmode)
+				(*env)->DeleteLocalRef(env, jdbz_sslmode);
+	}
+
+	if (extraConnInfo.ssl_keystore != NULL)
+	{
+		jdbz_sslkeystore = (*env)->NewStringUTF(env, extraConnInfo.ssl_keystore);
+
+		setSslKeystore = (*env)->GetMethodID(env, myParametersClass, "setSslKeystore",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setSslKeystore)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslKeystore, jdbz_sslkeystore);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setSslKeystore method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setSslKeystore method");
+
+		if (jdbz_sslkeystore)
+				(*env)->DeleteLocalRef(env, jdbz_sslkeystore);
+	}
+
+	if (extraConnInfo.ssl_keystore_pass != NULL)
+	{
+		jdbz_sslkeystorepass = (*env)->NewStringUTF(env, extraConnInfo.ssl_keystore_pass);
+
+		setSslKeystorePass = (*env)->GetMethodID(env, myParametersClass, "setSslKeystorePass",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setSslKeystorePass)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslKeystorePass, jdbz_sslkeystorepass);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setSslKeystorePass method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setSslKeystorePass method");
+
+		if (jdbz_sslkeystorepass)
+				(*env)->DeleteLocalRef(env, jdbz_sslkeystorepass);
+	}
+
+	if (extraConnInfo.ssl_truststore != NULL)
+	{
+		jdbz_ssltruststore = (*env)->NewStringUTF(env, extraConnInfo.ssl_truststore);
+
+		setSslTruststore = (*env)->GetMethodID(env, myParametersClass, "setSslTruststore",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setSslTruststore)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslTruststore, jdbz_ssltruststore);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setSslTruststore method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setSslTruststore method");
+
+		if (jdbz_ssltruststore)
+				(*env)->DeleteLocalRef(env, jdbz_ssltruststore);
+	}
+
+	if (extraConnInfo.ssl_truststore_pass != NULL)
+	{
+		jdbz_ssltruststorepass = (*env)->NewStringUTF(env, extraConnInfo.ssl_truststore_pass);
+
+		setSslTruststorePass = (*env)->GetMethodID(env, myParametersClass, "setSslTruststorePass",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setSslTruststorePass)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslTruststorePass, jdbz_ssltruststorepass);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setSslTruststorePass method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setSslTruststorePass method");
+
+		if (jdbz_ssltruststorepass)
+				(*env)->DeleteLocalRef(env, jdbz_ssltruststorepass);
+	}
 	/*
 	 * additional parameters that we want to pass to Debezium on the java side
 	 * will be added here, Make sure to add the matching methods in the MyParameters
@@ -806,6 +961,37 @@ dbz_engine_get_offset(int connectorId)
 }
 
 /*
+ * dbz_engine_memory_dump - prints current heap and non-heap memory allocated
+ * and used by the connector JVM.
+ */
+static void
+dbz_engine_memory_dump(void)
+{
+	jmethodID jvmMemDump;
+
+	if (!jvm)
+	{
+		elog(WARNING, "jvm not initialized");
+		return;
+	}
+
+	if (!env)
+	{
+		elog(WARNING, "jvm env not initialized");
+		return;
+	}
+
+	jvmMemDump = (*env)->GetMethodID(env, cls, "jvmMemDump", "()V");
+	if (jvmMemDump == NULL)
+	{
+		elog(WARNING, "Failed to find jvmMemDump method");
+		return;
+	}
+
+	(*env)->CallVoidMethod(env, obj, jvmMemDump);
+}
+
+/*
  * synchdb_state_tupdesc - Create a TupleDesc for SynchDB state information
  *
  * This function constructs a TupleDesc that describes the structure of
@@ -964,6 +1150,8 @@ connectorStateAsString(ConnectorState state)
 		return "updating offset";
 	case STATE_RESTARTING:
 		return "restarting";
+	case STATE_MEMDUMP:
+		return "dumping memory";
 	}
 	return "UNKNOWN";
 }
@@ -1218,6 +1406,20 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 			set_shm_connector_state(connectorId, STATE_STOPPED);
 			return;
 		}
+		set_shm_connector_state(connectorId, STATE_SYNCING);
+	}
+	else if (reqcopy->reqstate == STATE_MEMDUMP)
+	{
+		/* Handle offset update request */
+		elog(LOG, "Requesting memdump for %s connector",
+				connInfo->name);
+
+		set_shm_connector_state(connectorId, STATE_MEMDUMP);
+		/* todo: call the java routine to dump jvm heap memory summary in log */
+
+		dbz_engine_memory_dump();
+
+		/* after new offset is set, change state back to STATE_PAUSED */
 		set_shm_connector_state(connectorId, STATE_SYNCING);
 	}
 	else
@@ -2132,7 +2334,7 @@ synchdb_engine_main(Datum main_arg)
 	/* initialize format converter */
 	fc_initFormatConverter(connectorType);
 
-	/* load custom rules if applicable */
+	/* load custom rules + additional connector parameters if applicable */
 	if (connInfo.rulefile && strlen(connInfo.rulefile) > 0 && strcasecmp(connInfo.rulefile, "null"))
 		fc_load_rules(connectorType, connInfo.rulefile);
 
@@ -2870,5 +3072,57 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 
 	elog(WARNING, "sent restart request interrupt to dbz connector (%s)",
 			text_to_cstring(name_text));
+	PG_RETURN_INT32(0);
+}
+
+Datum
+synchdb_log_jvm_meminfo(PG_FUNCTION_ARGS)
+{
+	int connectorId = -1;
+	pid_t pid;
+	SynchdbRequest *req;
+
+	/* Parse input arguments */
+	text *name_text = PG_GETARG_TEXT_PP(0);
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
+	pid = get_shm_connector_pid(connectorId);
+	if (pid == InvalidPid)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) is not running", text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
+
+	/* point to the right construct based on type */
+	req = &(sdb_state->connectors[connectorId].req);
+
+	/* an active state change request is currently in progress */
+	if (req->reqstate != STATE_UNDEF)
+		ereport(ERROR,
+				(errmsg("an active request is currently active for connector %s",
+						text_to_cstring(name_text)),
+				 errhint("wait for it to finish and try again later")));
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	req->reqstate = STATE_MEMDUMP;
+	LWLockRelease(&sdb_state->lock);
+
+	elog(WARNING, "sent memdump request interrupt to dbz connector %s (%d)",
+			text_to_cstring(name_text), connectorId);
 	PG_RETURN_INT32(0);
 }
