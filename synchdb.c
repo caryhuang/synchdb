@@ -2251,6 +2251,28 @@ _PG_init(void)
 							   0,
 							   NULL, NULL, NULL);
 
+	DefineCustomIntVariable("synchdb.dbz_offset_flush_interval_ms",
+							"time in milliseconds to flush offset file to disk",
+							NULL,
+							&dbz_offset_flush_interval_ms,
+							60000,
+							1000,
+							3600000,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("synchdb.dbz_capture_only_selected_table_ddl",
+							 "whether or not debezium should capture the schema or all tables(false) or selected tables(true).",
+							 NULL,
+							 &dbz_capture_only_selected_table_ddl,
+							 true,
+							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	if (process_shared_preload_libraries_in_progress)
 	{
 		/* can't define PGC_POSTMASTER variable after startup */
