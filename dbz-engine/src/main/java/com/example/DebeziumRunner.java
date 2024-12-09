@@ -460,7 +460,7 @@ public class DebeziumRunner {
 		props.setProperty("snapshot.max.threads", String.valueOf(myParameters.snapshotThreadNum));
 		props.setProperty("signal.enabled.channels", "file");
 		props.setProperty("signal.file", signalfile);
-		props.setProperty("signal.data.collection", "synchdb.dbzsignal");	/* todo: make it configurable */
+		//props.setProperty("signal.data.collection", "synchdb.dbzsignal");	/* todo: make it configurable */
 		props.setProperty("incremental.snapshot.chunk.size", String.valueOf(myParameters.incrementalSnapshotChunkSize));
 		props.setProperty("incremental.snapshot.watermarking.strategy", myParameters.incrementalSnapshotWatermarkingStrategy);
 		props.setProperty("incremental.snapshot.allow.schema.changes", "false");
