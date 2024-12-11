@@ -2102,7 +2102,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		{
 			if (addquote)
 			{
-				escapeSingleQuote(in, addquote);
+				out = escapeSingleQuote(in, addquote);
 			}
 			else
 			{
@@ -2250,7 +2250,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					 */
 					if (addquote)
 					{
-						escapeSingleQuote(in, addquote);
+						out = escapeSingleQuote(in, addquote);
 					}
 					else
 					{
@@ -2410,7 +2410,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 
 			if (addquote)
 			{
-				escapeSingleQuote(in, addquote);
+				out = escapeSingleQuote(in, addquote);
 			}
 			else
 			{
@@ -2733,7 +2733,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					pgcolval_after->position = colval_after->position;
 					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
 
-
+					data = processDataByType(colval_before, false, dbzdml->remoteObjectId);
 					if (data != NULL)
 					{
 						pgcolval_before->value = pstrdup(data);
