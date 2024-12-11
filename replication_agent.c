@@ -31,10 +31,16 @@
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 
+/* external global variables */
 extern bool synchdb_dml_use_spi;
 extern uint64 SPI_processed;
 extern int myConnectorId;
 
+/*
+ * swap_tokens
+ *
+ * helper function to swap specific token strings with the given data
+ */
 static char *
 swap_tokens(const char * expression, const char * data, const char * wkb, const char * srid)
 {
@@ -98,6 +104,8 @@ swap_tokens(const char * expression, const char * data, const char * wkb, const 
 	return pstrdup(filledexpression);
 }
 /*
+ * spi_execute_select_one
+ *
  * This function performs SPI_execute SELECT and returns an array of
  * Datums that represent each column, Caller is expected to know exactly
  * how to process this array of Datums
@@ -810,6 +818,12 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type)
 	return -1;
 }
 
+/*
+ * ra_getConninfoByName
+ *
+ * This function executes a SELECT query on synchdb_conninfo table with the given
+ * connector name as filter and returns a ConnectionInfo structure
+ */
 int
 ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** connector)
 {
@@ -861,12 +875,23 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	return 0;
 }
 
+/*
+ * ra_executeCommand
+ *
+ * Main entry to execute a query with SPI
+ */
 int
 ra_executeCommand(const char * query)
 {
 	return spi_execute(query, TYPE_UNDEF);
 }
 
+/*
+ * ra_listConnInfoNames
+ *
+ * This function executes a query on synchdb_conninfo and returns a list of connector
+ * names
+ */
 int
 ra_listConnInfoNames(char ** out, int * numout)
 {
@@ -936,6 +961,11 @@ ra_listConnInfoNames(char ** out, int * numout)
 	return 0;
 }
 
+/*
+ * ra_transformDataExpression
+ *
+ * Main entry to perform data transformation on the given data using SPI
+ */
 char *
 ra_transformDataExpression(char * data, char * wkb, char * srid, char * expression)
 {
