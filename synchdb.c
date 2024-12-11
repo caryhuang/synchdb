@@ -715,7 +715,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, i);
 			if (event == NULL)
 			{
-				elog(WARNING, "dbz_engine_get_change: Received NULL event at index %d", i);
+				elog(DEBUG1, "dbz_engine_get_change: Received NULL event at index %d", i);
 				continue;
 			}
 

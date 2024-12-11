@@ -369,6 +369,9 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 		/* Do the insert. */
 		ExecSimpleRelationInsert(resultRelInfo, estate, slot);
 
+		/* increment command ID */
+		CommandCounterIncrement();
+
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
 
@@ -554,6 +557,9 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			ret = -1;
 		}
 
+		/* increment command ID */
+		CommandCounterIncrement();
+
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
 		EvalPlanQualEnd(&epqstate);
@@ -705,6 +711,9 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 			elog(DEBUG1, "tuple to delete not found");
 			ret = -1;
 		}
+
+		/* increment command ID */
+		CommandCounterIncrement();
 
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
