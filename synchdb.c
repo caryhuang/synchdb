@@ -430,6 +430,7 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 	 * inner class inside DebeziumRunner class.
 	 */
 }
+
 /*
  * dbz_engine_stop - Stop the Debezium engine
  *
@@ -529,6 +530,18 @@ dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj)
 	return 0;
 }
 
+/*
+ * processCompletionMessage - completion message processor
+ *
+ * This function processes the completion message sent from the Debezium runner
+ * in the event of an connector exit
+ *
+ * @param eventStr: the completion message string
+ * @param myConnectorId: Connector ID of interest
+ * @param dbzExitSignal: Set by the function to indicate connector has exited
+ *
+ * @return: void
+ */
 static void
 processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExitSignal)
 {
@@ -552,7 +565,8 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
 		*dbzExitSignal = true;
 	}
 
-	/* message is the last error or exit message the connector produced before
+	/*
+	 * message is the last error or exit message the connector produced before
 	 * it exited
 	 */
 	message = strtok(NULL, ";");
@@ -562,6 +576,7 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
 		set_shm_connector_errmsg(myConnectorId, message);
 	}
 }
+
 /*
  * dbz_engine_get_change - Retrieve and process change events from the Debezium engine
  *
@@ -571,11 +586,15 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
  * @param env: Pointer to the JNI environment
  * @param cls: Pointer to the DebeziumRunner class
  * @param obj: Pointer to the DebeziumRunner object
+ * @param myConnectorId: The connector ID of interest
+ * @param dbzExitSignal: Set by this function to indicate the connector has exited
+ * @param batchinfo: Set by this function to indicate a valid batch is in progress
  *
  * @return: 0 on success, -1 on failure
  */
 static int
-dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal, BatchInfo * batchinfo)
+dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId,
+		bool * dbzExitSignal, BatchInfo * batchinfo)
 {
 	jmethodID getChangeEvents, sizeMethod, getMethod;
 	jobject changeEventsList;
@@ -761,6 +780,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
  *
  * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
  * @param connectorType: The type of connector to start
+ * @param snapshotMode: Snapshot mode to start the connector with
  *
  * @return: 0 on success, -1 on failure
  */
@@ -872,7 +892,7 @@ cleanup:
  * This function retrieves the current offset for a specific connector type
  * from the Debezium engine.
  *
- * @param connectorType: The type of connector to get the offset for
+ * @param connectorId: The connector ID of interest
  *
  * @return: The offset as a string (caller must free), or NULL on failure
  */
@@ -961,7 +981,9 @@ dbz_engine_get_offset(int connectorId)
 }
 
 /*
- * dbz_engine_memory_dump - prints current heap and non-heap memory allocated
+ * dbz_engine_memory_dump - Logs memory summary of JVM
+ *
+ * This function prints current heap and non-heap memory allocated
  * and used by the connector JVM.
  */
 static void
@@ -998,7 +1020,7 @@ dbz_engine_memory_dump(void)
  * the tuple returned by SynchDB state queries. It defines the columns
  * that will be present in the result set.
  *
- * Returns: A blessed TupleDesc, or NULL on failure
+ * @return: A blessed TupleDesc, or NULL on failure
  */
 static TupleDesc
 synchdb_state_tupdesc(void)
@@ -1028,7 +1050,6 @@ synchdb_state_tupdesc(void)
  *
  * Allocate and initialize synchdb related shared memory, if not already
  * done, and set up backend-local pointer to that state.
- *
  */
 static void
 synchdb_init_shmem(void)
@@ -1092,6 +1113,7 @@ synchdb_detach_shmem(int code, Datum arg)
  * @param worker: Pointer to the BackgroundWorker structure to be prepared
  * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
  * @param connector: String representing the connector type
+ * @param connectorid: Connector ID of interest
  * @param snapshotMode: Snapshot mode to use to start Debezium engine
  */
 static void
@@ -1125,6 +1147,13 @@ prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char
 
 /*
  * connectorStateAsString - Convert ConnectorState to string representation
+ *
+ * This function sets up a BackgroundWorker structure with the appropriate
+ * information based on the connector type and connection details.
+ *
+ * @param state: Connector state enum
+ *
+ * @return connector state in string
  */
 static const char *
 connectorStateAsString(ConnectorState state)
@@ -1162,7 +1191,7 @@ connectorStateAsString(ConnectorState state)
  * This function resets the request state and clears the request data for a
  * specific connector type in shared memory.
  *
- * @param type: The type of connector whose request state should be reset
+ * @param connectorId: The connector ID of interest
  */
 static void
 reset_shm_request_state(int connectorId)
@@ -1244,7 +1273,7 @@ dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char 
 	return 0;
 }
 
-/**
+/*
  * processRequestInterrupt - Handles state transition requests for SynchDB connectors
  *
  * This function processes requests to change the state of a SynchDB connector,
@@ -1252,6 +1281,8 @@ dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char 
  *
  * @param connInfo: Pointer to the connection information
  * @param type: The type of connector being processed
+ * @param connectorId: Connector ID of interest
+ * @param snapshotMode: The new snapshot mode requested
  */
 static void
 processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId, const char * snapshotMode)
@@ -1437,7 +1468,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 	pfree(currstatecopy);
 }
 
-/**
+/*
  * setup_environment - Prepares the environment for the SynchDB background worker
  *
  * This function sets up signal handlers, initializes the database connection,
@@ -1445,6 +1476,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
  *
  * @param connectorType: The type of connector being set up
  * @param dst_db: The name of the destination database to connect to
+ * @param snapshotMode: The snapshot mode requested
  */
 static void
 setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode)
@@ -1496,13 +1528,11 @@ setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char 
 		 connectorTypeToString(*connectorType), *connectorType);
 }
 
-/**
+/*
  * initialize_jvm - Initialize the Java Virtual Machine and Debezium engine
  *
  * This function sets up the Java environment, locates the Debezium engine JAR file,
  * creates a Java VM, and initializes the Debezium engine.
- *
- * @param connectorType: The type of connector being initialized
  */
 static void
 initialize_jvm(void)
@@ -1571,7 +1601,7 @@ initialize_jvm(void)
 	elog(INFO, "Debezium engine initialized successfully");
 }
 
-/**
+/*
  * start_debezium_engine - Starts the Debezium engine for a given connector
  *
  * This function initiates the Debezium engine using the provided connection
@@ -1579,6 +1609,7 @@ initialize_jvm(void)
  *
  * @param connectorType: The type of connector being started
  * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
+ * @param snapshotMode: Snapshot mode requested
  */
 static void
 start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode)
@@ -1596,6 +1627,16 @@ start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInf
 		 connInfo->hostname, connInfo->port, connectorType);
 }
 
+/*
+ * main_loop - Main processor of SynchDB connector worker
+ *
+ * This function continuously fetches change requests from Debezium runner and
+ * process them until exit signal is received.
+ *
+ * @param connectorType: The type of connector being started
+ * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
+ * @param snapshotMode: Snapshot mode requested
+ */
 static void
 main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode)
 {
@@ -1654,6 +1695,14 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 	elog(LOG, "Main LOOP QUIT");
 }
 
+/*
+ * cleanup - Cleanup routine
+ *
+ * This function shuts down Debezium runner, JVM and cleans up format converter
+ * resources
+ *
+ * @param connectorType: The type of connector being started
+ */
 static void
 cleanup(ConnectorType connectorType)
 {
@@ -1677,6 +1726,16 @@ cleanup(ConnectorType connectorType)
 	fc_deinitFormatConverter(connectorType);
 }
 
+/*
+ * assign_connector_id - Requests a new connector ID
+ *
+ * This function returns a free connector ID associated with the given name
+ *
+ * @param name: The name of the connector to request a connector ID
+ *
+ * @return the connector ID associated with the given name, -1 if
+ * no free connector ID is available.
+ */
 static int
 assign_connector_id(char * name)
 {
@@ -1715,6 +1774,16 @@ assign_connector_id(char * name)
 	return -1;
 }
 
+/*
+ * get_shm_connector_id_by_name - get connector ID from given name
+ *
+ * This function returns a connector ID associated with the given name
+ *
+ * @param name: The name of the connector to request a connector ID
+ *
+ * @return: The connector ID associated with the given name, -1 if
+ * no free connector ID is available.
+ */
 static int
 get_shm_connector_id_by_name(const char * name)
 {
@@ -1733,6 +1802,15 @@ get_shm_connector_id_by_name(const char * name)
 	return -1;
 }
 
+/*
+ * dbz_mark_batch_complete - notify Debezium a completed batch
+ *
+ * This function notifies Debezium runner that a batch has been successfully completed
+ *
+ * @param batchid: The unique batch ID that has been completed successfully
+ *
+ * @return: 0 on success, -1 on failure
+ */
 static int
 dbz_mark_batch_complete(int batchid)
 {
@@ -1781,6 +1859,13 @@ dbz_mark_batch_complete(int batchid)
 	return 0;
 }
 
+/*
+ * synchdb_auto_launcher_main - auto connector launcher main routine
+ *
+ * This is the main routine of auto connector launcher
+ *
+ * @param main_arg: not used
+ */
 void
 synchdb_auto_launcher_main(Datum main_arg)
 {
@@ -1818,6 +1903,11 @@ synchdb_auto_launcher_main(Datum main_arg)
 	elog(DEBUG1, "stop synchdb_auto_launcher_main");
 }
 
+/*
+ * synchdb_start_leader_worker
+ *
+ * Helper function to start a auto connector launcher background worker
+ */
 static void
 synchdb_start_leader_worker(void)
 {
@@ -1836,6 +1926,15 @@ synchdb_start_leader_worker(void)
 	RegisterBackgroundWorker(&worker);
 }
 
+/*
+ * connectorTypeToString
+ *
+ * This function converts connector type from enum to string
+ *
+ * @param type: Connector type in enum
+ *
+ * @return connector type in string
+ */
 const char *
 connectorTypeToString(ConnectorType type)
 {
@@ -1854,7 +1953,16 @@ connectorTypeToString(ConnectorType type)
 	}
 }
 
-/* public functions to access / change synchdb parameters in shared memory */
+/*
+ * get_shm_connector_name
+ *
+ * This function converts connector type from enum to string in lowercase
+ *
+ * @param type: Connector type in enum
+ *
+ * @return connector type in string
+ * todo: potential duplicate
+ */
 const char *
 get_shm_connector_name(ConnectorType type)
 {
@@ -1872,6 +1980,15 @@ get_shm_connector_name(ConnectorType type)
 	}
 }
 
+/*
+ * get_shm_connector_pid
+ *
+ * This function gets pid of the given connectorID
+ *
+ * @param connectorId: Connector ID of interest
+ *
+ * @return pid of the connector, -1 if connector is not running
+ */
 pid_t
 get_shm_connector_pid(int connectorId)
 {
@@ -1881,6 +1998,14 @@ get_shm_connector_pid(int connectorId)
 	return sdb_state->connectors[connectorId].pid;
 }
 
+/*
+ * set_shm_connector_pid
+ *
+ * This function sets pid of the given connectorID
+ *
+ * @param connectorId: Connector ID of interest
+ * @param pid: New pid value
+ */
 void
 set_shm_connector_pid(int connectorId, pid_t pid)
 {
@@ -1892,6 +2017,15 @@ set_shm_connector_pid(int connectorId, pid_t pid)
 	LWLockRelease(&sdb_state->lock);
 }
 
+/*
+ * get_shm_connector_errmsg
+ *
+ * This function gets the last error message of the given connectorID
+ *
+ * @param connectorId: Connector ID of interest
+ *
+ * @return the error message in string
+ */
 const char *
 get_shm_connector_errmsg(int connectorId)
 {
@@ -1908,7 +2042,7 @@ get_shm_connector_errmsg(int connectorId)
  * This function sets the error message for a given connector type in the shared
  * memory state. It ensures thread-safety by using a lock when accessing shared memory.
  *
- * @param type: The type of connector for which to set the error message
+ * @param connectorId: Connector ID of interest
  * @param err: The error message to set. If NULL, an empty string will be set.
  */
 void
@@ -1922,6 +2056,15 @@ set_shm_connector_errmsg(int connectorId, const char *err)
 	LWLockRelease(&sdb_state->lock);
 }
 
+/*
+ * get_shm_connector_stage - Get the current connector stage
+ *
+ * This function gets current connector stage based on the change request received.
+ *
+ * @param connectorId: Connector ID of interest
+ *
+ * @return connector stage in string
+ */
 static const char *
 get_shm_connector_stage(int connectorId)
 {
@@ -1959,6 +2102,15 @@ get_shm_connector_stage(int connectorId)
 	return "unknown";
 }
 
+/*
+ * get_shm_connector_stage_enum - Get the current connector stage in enum
+ *
+ * This function gets current connector stage based on the change request received.
+ *
+ * @param connectorId: Connector ID of interest
+ *
+ * @return connector stage in enum
+ */
 ConnectorStage
 get_shm_connector_stage_enum(int connectorId)
 {
@@ -1978,6 +2130,14 @@ get_shm_connector_stage_enum(int connectorId)
 	return stage;
 }
 
+/*
+ * set_shm_connector_stage - Set the current connector stage in enum
+ *
+ * This function sets current connector stage
+ *
+ * @param connectorId: Connector ID of interest
+ * @param stage: new connector stage
+ */
 void
 set_shm_connector_stage(int connectorId, ConnectorStage stage)
 {
@@ -1995,7 +2155,7 @@ set_shm_connector_stage(int connectorId, ConnectorStage stage)
  * This function retrieves the current state of a given connector type from the shared
  * memory state. It returns the state as a string representation.
  *
- * @param type: The type of connector for which to get the state
+ * @param connectorId: Connector ID of interest
  *
  * @return: A string representation of the connector's state. If the shared memory
  *          is not initialized or the connector type is unknown, it returns "stopped"
@@ -2026,7 +2186,7 @@ get_shm_connector_state(int connectorId)
  * This function retrieves the current state of a given connector type from the shared
  * memory state as a ConnectorState enum value.
  *
- * @param type: The type of connector for which to get the state
+ * @param connectorId: Connector ID of interest
  *
  * @return: A ConnectorState enum representing the connector's state. If the shared memory
  *          is not initialized or the connector type is unknown, it returns STATE_UNDEF.
@@ -2056,7 +2216,7 @@ get_shm_connector_state_enum(int connectorId)
  * This function sets the state of a given connector type in the shared memory.
  * It ensures thread-safety by using an exclusive lock when accessing shared memory.
  *
- * @param type: The type of connector for which to set the state
+ * @param connectorId: Connector ID of interest
  * @param state: The new state to set for the connector
  */
 void
@@ -2070,13 +2230,17 @@ set_shm_connector_state(int connectorId, ConnectorState state)
 	LWLockRelease(&sdb_state->lock);
 }
 
-/* TODO: set_shm_dbz_offset:
+/*
+ * set_shm_dbz_offset - Set the offset of a paused connector
+ *
  * This method reads from dbz's offset file per connector type, which does not
  * reflect the real-time offset of dbz engine. If we were to resume from this point
  * due to an error, there may be duplicate values after the resume in which we must
  * handle. In the future, we will need to explore a more accurate way to find out
  * the offset managed within dbz so we could freely resume from any reference not
- * just at the flushed locations
+ * just at the flushed locations. todo
+ *
+ * @param connectorId: Connector ID of interest
  */
 void
 set_shm_dbz_offset(int connectorId)
@@ -2097,6 +2261,13 @@ set_shm_dbz_offset(int connectorId)
 	pfree(offset);
 }
 
+/*
+ * get_shm_dbz_offset - Get the offset from a connector
+ *
+ * This method gets the offset value of the given connector from shared memory
+ *
+ * @param connectorId: Connector ID of interest
+ */
 const char *
 get_shm_dbz_offset(int connectorId)
 {
@@ -2381,6 +2552,11 @@ synchdb_engine_main(Datum main_arg)
 	proc_exit(0);
 }
 
+/*
+ * synchdb_start_engine_bgw_snapshot_mode
+ *
+ * This function starts a connector with a custom snapshot mode
+ */
 Datum
 synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 {
@@ -2484,6 +2660,11 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_start_engine_bgw
+ *
+ * This function starts a connector with the default initial snapshot mode
+ */
 Datum
 synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 {
@@ -2575,6 +2756,11 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_stop_engine_bgw
+ *
+ * This function stops a running connector
+ */
 Datum
 synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 {
@@ -2631,6 +2817,11 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_get_state
+ *
+ * This function dumps the states of all connectors
+ */
 Datum
 synchdb_get_state(PG_FUNCTION_ARGS)
 {
@@ -2690,6 +2881,11 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	SRF_RETURN_DONE(funcctx);
 }
 
+/*
+ * synchdb_pause_engine
+ *
+ * This function pauses a running connector
+ */
 Datum
 synchdb_pause_engine(PG_FUNCTION_ARGS)
 {
@@ -2742,6 +2938,11 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_resume_engine
+ *
+ * This function resumes a paused connector
+ */
 Datum
 synchdb_resume_engine(PG_FUNCTION_ARGS)
 {
@@ -2794,6 +2995,11 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_set_offset
+ *
+ * This function sets the given offset to debezium's offset file
+ */
 Datum
 synchdb_set_offset(PG_FUNCTION_ARGS)
 {
@@ -2858,6 +3064,11 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_add_conninfo
+ *
+ * This function adds a connector info to system
+ */
 Datum
 synchdb_add_conninfo(PG_FUNCTION_ARGS)
 {
@@ -3006,6 +3217,11 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
 }
 
+/*
+ * synchdb_restart_connector
+ *
+ * This function restarts a connector with given snapshot mode
+ */
 Datum
 synchdb_restart_connector(PG_FUNCTION_ARGS)
 {
@@ -3097,6 +3313,11 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_log_jvm_meminfo
+ *
+ * This function dumps JVM memory usage info in PostgreSQL log
+ */
 Datum
 synchdb_log_jvm_meminfo(PG_FUNCTION_ARGS)
 {

@@ -41,14 +41,17 @@
 #include "common/base64.h"
 #include "port/pg_bswap.h"
 
+/* global external variables */
 extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
 extern ExtraConnectionInfo extraConnInfo;
 
+/* data transformation related hash tables */
 static HTAB * dataCacheHash;
 static HTAB * objectMappingHash;
 static HTAB * transformExpressionHash;
 
+/* data type mapping related hash tables */
 static HTAB * mysqlDatatypeHash;
 static HTAB * sqlserverDatatypeHash;
 
@@ -158,7 +161,11 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 
 #define SIZE_SQLSERVER_DATATYPE_MAPPING (sizeof(sqlserver_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
-/* this helper function counts the number of active (not dropped) columns */
+/*
+ * count_active_columns
+ *
+ * this helper function counts the number of active (not dropped) columns from given tupdesc
+ */
 static int
 count_active_columns(TupleDesc tupdesc)
 {
@@ -172,6 +179,11 @@ count_active_columns(TupleDesc tupdesc)
 	return count;
 }
 
+/*
+ * bytearray_to_escaped_string
+ *
+ * converts byte array to escaped string
+ */
 static void
 bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char *output_string)
 {
@@ -193,6 +205,11 @@ bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char
 	strcat(ptr, "'");
 }
 
+/*
+ * derive_value_from_byte
+ *
+ * computes the int value from given byte
+ */
 static long
 derive_value_from_byte(const unsigned char * bytes, int len)
 {
@@ -216,6 +233,11 @@ derive_value_from_byte(const unsigned char * bytes, int len)
 	return value;
 }
 
+/*
+ * reverse_byte_array
+ *
+ * reverse the given byte array
+ */
 static void
 reverse_byte_array(unsigned char * array, int length)
 {
@@ -231,6 +253,11 @@ reverse_byte_array(unsigned char * array, int length)
 	}
 }
 
+/*
+ * trim_leading_zeros
+ *
+ * trim the leading zeros from the given string
+ */
 static void
 trim_leading_zeros(char *str)
 {
@@ -254,6 +281,11 @@ trim_leading_zeros(char *str)
 	str[j] = '\0';
 }
 
+/*
+ * prepend_zeros
+ *
+ * prepend zeros to the given string
+ */
 static void
 prepend_zeros(char *str, int num_zeros)
 {
@@ -275,7 +307,11 @@ prepend_zeros(char *str, int num_zeros)
     pfree(temp);
 }
 
-
+/*
+ * byte_to_binary
+ *
+ * convert the given byte to a binary string with 1s and 0s
+ */
 static void
 byte_to_binary(unsigned char byte, char * binary_str)
 {
@@ -286,6 +322,11 @@ byte_to_binary(unsigned char byte, char * binary_str)
 	binary_str[8] = '\0';
 }
 
+/*
+ * bytes_to_binary_string
+ *
+ * convert the given bytes to a binary string with 1s and 0s
+ */
 static void
 bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_str)
 {
@@ -300,7 +341,11 @@ bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_st
 	}
 }
 
-/* Function to find exact match from given line */
+/*
+ * find_exact_string_match
+ *
+ * Function to find exact match from given line
+ */
 static bool
 find_exact_string_match(char * line, char * wordtofind)
 {
@@ -316,7 +361,11 @@ find_exact_string_match(char * line, char * wordtofind)
 	return false;
 }
 
-/* Function to remove double quotes from a string */
+/*
+ * remove_double_quotes
+ *
+ * Function to remove double quotes from a string
+ */
 static void
 remove_double_quotes(StringInfoData * str)
 {
@@ -336,6 +385,11 @@ remove_double_quotes(StringInfoData * str)
 	str->len = newlen;
 }
 
+/*
+ * escapeSingleQuote
+ *
+ * escape the single quotes in the given input and returns a palloc-ed string
+ */
 static char *
 escapeSingleQuote(const char * in, bool addquote)
 {
@@ -382,6 +436,12 @@ escapeSingleQuote(const char * in, bool addquote)
 	return out;
 }
 
+/*
+ * transform_data_expression
+ *
+ * return the expression to run on the given column name based on the transform
+ * object rule definitions
+ */
 static char *
 transform_data_expression(const char * remoteObjid, const char * colname)
 {
@@ -421,6 +481,11 @@ transform_data_expression(const char * remoteObjid, const char * colname)
 	return res;
 }
 
+/*
+ * transform_object_name
+ *
+ * transform the remote object name based on the object name rule file definitions
+ */
 static char *
 transform_object_name(const char * objid, const char * objtype)
 {
@@ -457,6 +522,8 @@ transform_object_name(const char * objid, const char * objtype)
 }
 
 /*
+ * populate_primary_keys
+ *
  * this function constructs primary key clauses based on jsonin. jsonin
  * is expected to be a json array with string element, for example:
  * ["col1","col2"]
@@ -575,7 +642,12 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 		}
 	}
 }
-/* Function to get a string element from a JSONB path */
+
+/*
+ * getPathElementString
+ *
+ * Function to get a string element from a JSONB path
+ */
 static int
 getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool removequotes)
 {
@@ -664,7 +736,11 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 	return 0;
 }
 
-/* Function to get a JSONB element from a path */
+/*
+ * getPathElementJsonb
+ *
+ * Function to get a JSONB element from a path
+ */
 static Jsonb *
 getPathElementJsonb(Jsonb * jb, char * path)
 {
@@ -734,7 +810,11 @@ getPathElementJsonb(Jsonb * jb, char * path)
 	return out;
 }
 
-/* Functions to destroy various structures */
+/*
+ * destroyDBZDDL
+ *
+ * Function to destroy DBZ_DDL structure
+ */
 static void
 destroyDBZDDL(DBZ_DDL * ddlinfo)
 {
@@ -755,6 +835,11 @@ destroyDBZDDL(DBZ_DDL * ddlinfo)
 	}
 }
 
+/*
+ * destroyPGDDL
+ *
+ * Function to destroy PG_DDL structure
+ */
 static void
 destroyPGDDL(PG_DDL * ddlinfo)
 {
@@ -766,6 +851,11 @@ destroyPGDDL(PG_DDL * ddlinfo)
 	}
 }
 
+/*
+ * destroyPGDML
+ *
+ * Function to destroy PG_DML structure
+ */
 static void
 destroyPGDML(PG_DML * dmlinfo)
 {
@@ -783,6 +873,11 @@ destroyPGDML(PG_DML * dmlinfo)
 	}
 }
 
+/*
+ * destroyDBZDML
+ *
+ * Function to destroy DBZ_DML structure
+ */
 static void
 destroyDBZDML(DBZ_DML * dmlinfo)
 {
@@ -810,7 +905,13 @@ destroyDBZDML(DBZ_DML * dmlinfo)
 	}
 }
 
-/* Function to parse Debezium DDL */
+/*
+ * parseDBZDDL
+ *
+ * Function to parse Debezium DDL expressed in Jsonb
+ *
+ * @return DBZ_DDL structure
+ */
 static DBZ_DDL *
 parseDBZDDL(Jsonb * jb)
 {
@@ -1061,6 +1162,8 @@ parseDBZDDL(Jsonb * jb)
 }
 
 /*
+ * splitIdString
+ *
  * Function to split ID string into database, schema, and table.
  *
  * This function breaks down a fully qualified id string (database.
@@ -1119,7 +1222,11 @@ splitIdString(char * id, char ** db, char ** schema, char ** table, bool usedb)
 	}
 }
 
-/* Function to transform DDL columns */
+/*
+ * transformDDLColumns
+ *
+ * Function to transform DDL columns
+ */
 static void
 transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntype, bool datatypeonly, StringInfoData * strinfo)
 {
@@ -1356,6 +1463,11 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 		pfree(colNameObjId.data);
 }
 
+/*
+ * composeAlterColumnClauses
+ *
+ * This functions build the ALTER COLUM SQL clauses based on given inputs
+ */
 static char *
 composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols, TupleDesc tupdesc)
 {
@@ -1480,7 +1592,11 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 	return ret;
 }
 
-/* Function to convert Debezium DDL to PostgreSQL DDL */
+/*
+ * convert2PGDDL
+ *
+ * This functions converts DBZ_DDL to PG_DDL structure
+ */
 static PG_DDL *
 convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 {
@@ -1958,6 +2074,8 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 }
 
 /*
+ * processDataByType
+ *
  * this function performs necessary data conversions to convert input data
  * as string and output a processed string based on type
  */
@@ -2506,6 +2624,11 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 	return out;
 }
 
+/*
+ * list_sort_cmp
+ *
+ * helper function to compare 2 ListCells for sorting
+ */
 static int
 list_sort_cmp(const ListCell *a, const ListCell *b)
 {
@@ -2519,6 +2642,11 @@ list_sort_cmp(const ListCell *a, const ListCell *b)
 	return 0;
 }
 
+/*
+ * convert2PGDML
+ *
+ * this function converts  DBZ_DML to PG_DML strucutre
+ */
 static PG_DML *
 convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 {
@@ -2766,6 +2894,11 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 	return pgdml;
 }
 
+/*
+ * get_additional_parameters
+ *
+ * this function fetches additional parameters from Jsonb based on the given column data types
+ */
 static void
 get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefore, int pos)
 {
@@ -2838,6 +2971,11 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 		pfree(strinfo.data);
 }
 
+/*
+ * parseDBZDML
+ *
+ * this function parses a Jsonb that represents DML operation and produce a DBZ_DML structure
+ */
 static DBZ_DML *
 parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 {
@@ -3648,6 +3786,11 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	return dbzdml;
 }
 
+/*
+ * fc_get_connector_type
+ *
+ * this function takes connector type in string and returns a corresponding enum
+ */
 ConnectorType
 fc_get_connector_type(const char * connector)
 {
@@ -3670,6 +3813,11 @@ fc_get_connector_type(const char * connector)
 	}
 }
 
+/*
+ * init_mysql
+ *
+ * initialize data type hash table for mysql database
+ */
 static void
 init_mysql(void)
 {
@@ -3713,6 +3861,11 @@ init_mysql(void)
 	}
 }
 
+/*
+ * init_sqlserver
+ *
+ * initialize data type hash table for sqlserver database
+ */
 static void
 init_sqlserver(void)
 {
@@ -3756,6 +3909,11 @@ init_sqlserver(void)
 	}
 }
 
+/*
+ * fc_initFormatConverter
+ *
+ * main entry to initialize all hash tables for all supported database types
+ */
 void
 fc_initFormatConverter(ConnectorType connectorType)
 {
@@ -3795,6 +3953,11 @@ fc_initFormatConverter(ConnectorType connectorType)
 	}
 }
 
+/*
+ * fc_deinitFormatConverter
+ *
+ * main entry to de-initialize all hash tables for all supported database types
+ */
 void
 fc_deinitFormatConverter(ConnectorType connectorType)
 {
@@ -3822,7 +3985,12 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 	}
 }
 
-
+/*
+ * fc_load_rules
+ *
+ * read the given rulefile and parse them into several object type and data
+ * transformation hash tables
+ */
 bool
 fc_load_rules(ConnectorType connectorType, const char * rulefile)
 {
@@ -4272,7 +4440,11 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 	return true;
 }
 
-/* Main function to process Debezium change event */
+/*
+ * fc_processDBZChangeEvent
+ *
+ * Main function to process Debezium change event
+ */
 int
 fc_processDBZChangeEvent(const char * event)
 {
