@@ -4446,7 +4446,7 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
  * Main function to process Debezium change event
  */
 int
-fc_processDBZChangeEvent(const char * event)
+fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats)
 {
 	Datum jsonb_datum;
 	Jsonb *jb;
@@ -4490,6 +4490,9 @@ fc_processDBZChangeEvent(const char * event)
     	DBZ_DDL * dbzddl = NULL;
     	PG_DDL * pgddl = NULL;
 
+    	/* increment batch statistics */
+    	increment_connector_statistics(myBatchStats, STATS_DDL, 1);
+
     	/* (1) parse */
     	elog(DEBUG1, "parsing DBZ DDL change event...");
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
@@ -4498,6 +4501,7 @@ fc_processDBZChangeEvent(const char * event)
     	{
     		elog(DEBUG1, "malformed DDL event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		MemoryContextSwitchTo(oldContext);
     		MemoryContextDelete(tempContext);
     		return -1;
@@ -4511,6 +4515,7 @@ fc_processDBZChangeEvent(const char * event)
     	{
     		elog(WARNING, "failed to convert DBZ DDL to PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDDL(dbzddl);
     		MemoryContextSwitchTo(oldContext);
     		MemoryContextDelete(tempContext);
@@ -4524,6 +4529,7 @@ fc_processDBZChangeEvent(const char * event)
     	{
     		elog(WARNING, "failed to execute PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDDL(dbzddl);
     		destroyPGDDL(pgddl);
     		MemoryContextSwitchTo(oldContext);
@@ -4543,7 +4549,8 @@ fc_processDBZChangeEvent(const char * event)
     	DBZ_DML * dbzdml = NULL;
     	PG_DML * pgdml = NULL;
 
-    	elog(DEBUG1, "this is DML change event");
+    	/* increment batch statistics */
+    	increment_connector_statistics(myBatchStats, STATS_DML, 1);
 
     	/* (1) parse */
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
@@ -4552,6 +4559,7 @@ fc_processDBZChangeEvent(const char * event)
 		{
 			elog(WARNING, "malformed DNL event");
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 			MemoryContextSwitchTo(oldContext);
 			MemoryContextDelete(tempContext);
 			return -1;
@@ -4564,6 +4572,7 @@ fc_processDBZChangeEvent(const char * event)
     	{
     		elog(WARNING, "failed to convert DBZ DML to PG DML change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDML(dbzdml);
     		MemoryContextSwitchTo(oldContext);
     		MemoryContextDelete(tempContext);
@@ -4573,10 +4582,11 @@ fc_processDBZChangeEvent(const char * event)
     	/* (3) execute */
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
     	elog(DEBUG1, "executing PG DML change event...");
-    	if(ra_executePGDML(pgdml, type))
+    	if(ra_executePGDML(pgdml, type, myBatchStats))
     	{
     		elog(WARNING, "failed to execute PG DML change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
         	destroyDBZDML(dbzdml);
         	destroyPGDML(pgdml);
         	MemoryContextSwitchTo(oldContext);

@@ -152,7 +152,7 @@ typedef struct transformExpressionHashEntry
 } TransformExpressionHashEntry;
 
 /* Function prototypes */
-int fc_processDBZChangeEvent(const char * event);
+int fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats);
 ConnectorType fc_get_connector_type(const char * connector);
 void fc_initFormatConverter(ConnectorType connectorType);
 void fc_deinitFormatConverter(ConnectorType connectorType);

@@ -54,6 +54,7 @@ PG_FUNCTION_INFO_V1(synchdb_set_offset);
 PG_FUNCTION_INFO_V1(synchdb_add_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_restart_connector);
 PG_FUNCTION_INFO_V1(synchdb_log_jvm_meminfo);
+PG_FUNCTION_INFO_V1(synchdb_get_stats);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -64,7 +65,6 @@ PG_FUNCTION_INFO_V1(synchdb_log_jvm_meminfo);
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
 int myConnectorId = -1;	/* Global index number to SynchdbSharedState in shared memory - global per worker */
-BatchInfo myBatchInfo;
 ExtraConnectionInfo extraConnInfo = {0}; /* global extra connector parameters read from rule file */
 
 /* GUC variables */
@@ -98,11 +98,13 @@ PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
 /* Static function prototypes */
 static int dbz_engine_stop(void);
 static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
-static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal, BatchInfo * batchinfo);
+static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal,
+		BatchInfo * batchinfo, SynchdbStatistics * myBatchStats);
 static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode);
 static char *dbz_engine_get_offset(int connectorId);
 static int dbz_mark_batch_complete(int batchid);
 static TupleDesc synchdb_state_tupdesc(void);
+static TupleDesc synchdb_stats_tupdesc(void);
 static void synchdb_init_shmem(void);
 static void synchdb_detach_shmem(int code, Datum arg);
 static void prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid, const char * snapshotMode);
@@ -116,6 +118,7 @@ static void start_debezium_engine(ConnectorType connectorType, const ConnectionI
 static void main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
 static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass);
+static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
 
 /*
  * set_extra_dbz_parameters - configures extra paramters for Debezium runner
@@ -589,12 +592,13 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
  * @param myConnectorId: The connector ID of interest
  * @param dbzExitSignal: Set by this function to indicate the connector has exited
  * @param batchinfo: Set by this function to indicate a valid batch is in progress
+ * @param myBatchStats: update connector statistics to this struct
  *
  * @return: 0 on success, -1 on failure
  */
 static int
 dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId,
-		bool * dbzExitSignal, BatchInfo * batchinfo)
+		bool * dbzExitSignal, BatchInfo * batchinfo, SynchdbStatistics * myBatchStats)
 {
 	jmethodID getChangeEvents, sizeMethod, getMethod;
 	jobject changeEventsList;
@@ -719,7 +723,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		 * as we process the batch
 		 */
 		batchinfo->batchId = atoi(&eventStr[2]);
-		elog(WARNING, "Synchdb received batchid(%d) with size(%d)", batchinfo->batchId, size-1);
+		elog(DEBUG1, "Synchdb received batchid(%d) with size(%d)", batchinfo->batchId, size-1);
 
 		/* free reference to metadata element at index 0 */
 		(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
@@ -735,6 +739,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			if (event == NULL)
 			{
 				elog(DEBUG1, "dbz_engine_get_change: Received NULL event at index %d", i);
+				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 				continue;
 			}
 
@@ -743,12 +748,13 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			{
 				elog(WARNING, "dbz_engine_get_change: Failed to get string for event at index %d", i);
 				(*env)->DeleteLocalRef(env, event);
+				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 				continue;
 			}
 
 			elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
 			/* change event message, send to format converter */
-			if (fc_processDBZChangeEvent(eventStr) != 0)
+			if (fc_processDBZChangeEvent(eventStr, myBatchStats) != 0)
 			{
 				elog(DEBUG1, "dbz_engine_get_change: Failed to process event at index %d", i);
 			}
@@ -759,6 +765,8 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 
 		PopActiveSnapshot();
 		CommitTransactionCommand();
+
+		increment_connector_statistics(myBatchStats, STATS_TOTAL_CHANGE_EVENT, size-1);
 
 		/* read offset currently flushed to file for displaying to user */
 		set_shm_dbz_offset(myConnectorId);
@@ -1046,6 +1054,41 @@ synchdb_state_tupdesc(void)
 }
 
 /*
+ * synchdb_stats_tupdesc - Create a TupleDesc for SynchDB statistic information
+ *
+ * This function constructs a TupleDesc that describes the structure of
+ * the tuple returned by SynchDB statistic queries. It defines the columns
+ * that will be present in the result set.
+ *
+ * @return: A blessed TupleDesc, or NULL on failure
+ */
+static TupleDesc
+synchdb_stats_tupdesc(void)
+{
+	TupleDesc tupdesc;
+	AttrNumber attrnum = 11;
+	AttrNumber a = 0;
+
+	tupdesc = CreateTemplateTupleDesc(attrnum);
+
+	/* todo: add more columns here per connector if needed */
+	TupleDescInitEntry(tupdesc, ++a, "name", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "ddls", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "dmls", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "reads", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "creates", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "updates", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "deletes", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "bad_events", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "total_events", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "batches_done", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "average_batch_size", INT8OID, -1, 0);
+
+	Assert(a == maxattr);
+	return BlessTupleDesc(tupdesc);
+}
+
+/*
  * synchdb_init_shmem - Initialize or attach to synchdb shared memory
  *
  * Allocate and initialize synchdb related shared memory, if not already
@@ -1091,8 +1134,8 @@ synchdb_detach_shmem(int code, Datum arg)
 {
 	pid_t enginepid;
 
-	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d, myBatchId %d",
-			DatumGetUInt32(arg), code, myBatchInfo.batchId);
+	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d",
+			DatumGetUInt32(arg), code);
 
 	enginepid = get_shm_connector_pid(DatumGetUInt32(arg));
 	if (enginepid == MyProcPid)
@@ -1642,6 +1685,8 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 {
 	ConnectorState currstate;
 	bool dbzExitSignal = false;
+	BatchInfo myBatchInfo = {0};
+	SynchdbStatistics myBatchStats = {0};
 
 	elog(LOG, "Main LOOP ENTER ");
 	while (!ShutdownRequestPending)
@@ -1663,26 +1708,40 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 		currstate = get_shm_connector_state_enum(myConnectorId);
 		switch (currstate)
 		{
-		case STATE_SYNCING:
-			dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal, &myBatchInfo);
+			case STATE_SYNCING:
+			{
+				/* reset batchinfo and batchStats*/
+				myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
+				myBatchInfo.batchSize = 0;
+				memset(&myBatchStats, 0, sizeof(myBatchStats));
 
-			/*
-			 * if a valid batchid is set by dbz_engine_get_change(), it means we have
-			 * successfully completed a batch change request and we shall notify dbz
-			 * that it's been completed.
-			 */
-			if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
-				dbz_mark_batch_complete(myBatchInfo.batchId);
+				dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal, &myBatchInfo, &myBatchStats);
 
-			/* we are done with a batch, make it invalid */
-			myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
-			break;
-		case STATE_PAUSED:
-			/* Do nothing when paused */
-			break;
-		default:
-			/* Handle other states if necessary */
-			break;
+				/*
+				 * if a valid batchid is set by dbz_engine_get_change(), it means we have
+				 * successfully completed a batch change request and we shall notify dbz
+				 * that it's been completed.
+				 */
+				if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
+				{
+					dbz_mark_batch_complete(myBatchInfo.batchId);
+
+					/* increment batch connector statistics */
+					increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+
+					/* update the batch statistics to shared memory */
+					set_shm_connector_statistics(myConnectorId, &myBatchStats);
+				}
+				break;
+			}
+			case STATE_PAUSED:
+			{
+				/* Do nothing when paused */
+				break;
+			}
+			default:
+				/* Handle other states if necessary */
+				break;
 		}
 
 		(void)WaitLatch(MyLatch,
@@ -2103,6 +2162,88 @@ get_shm_connector_stage(int connectorId)
 }
 
 /*
+ * set_shm_connector_statistics - adds the give stats
+ *
+ * This function adds the given stats info to the one in shared memory so user
+ * can see updated stats
+ *
+ * @param connectorId: Connector ID of interest
+ * @param stats: connector statistics struct
+ */
+static void
+set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats)
+{
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	sdb_state->connectors[connectorId].stats.stats_create +=
+			stats->stats_create;
+	sdb_state->connectors[connectorId].stats.stats_ddl +=
+			stats->stats_ddl;
+	sdb_state->connectors[connectorId].stats.stats_delete +=
+			stats->stats_delete;
+	sdb_state->connectors[connectorId].stats.stats_dml +=
+			stats->stats_dml;
+	sdb_state->connectors[connectorId].stats.stats_read +=
+			stats->stats_read;
+	sdb_state->connectors[connectorId].stats.stats_update +=
+			stats->stats_update;
+	sdb_state->connectors[connectorId].stats.stats_bad_change_event +=
+			stats->stats_bad_change_event;
+	sdb_state->connectors[connectorId].stats.stats_total_change_event +=
+			stats->stats_total_change_event;
+	sdb_state->connectors[connectorId].stats.stats_batch_completion +=
+			stats->stats_batch_completion;
+	LWLockRelease(&sdb_state->lock);
+}
+
+/*
+ * increment_connector_statistics - increment statistics
+ *
+ * This function increments statistic counter for specified type
+ *
+ * @param which: type of statistic to increment
+ */
+void
+increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics which, int incby)
+{
+	if (!myStats)
+		return;
+
+	switch(which)
+	{
+		case STATS_DDL:
+			myStats->stats_ddl += incby;
+			break;
+		case STATS_DML:
+			myStats->stats_dml += incby;
+			break;
+		case STATS_READ:
+			myStats->stats_read += incby;
+			break;
+		case STATS_CREATE:
+			myStats->stats_create += incby;
+			break;
+		case STATS_UPDATE:
+			myStats->stats_update += incby;
+			break;
+		case STATS_DELETE:
+			myStats->stats_delete += incby;
+			break;
+		case STATS_BAD_CHANGE_EVENT:
+			myStats->stats_bad_change_event += incby;
+			break;
+		case STATS_TOTAL_CHANGE_EVENT:
+			myStats->stats_total_change_event += incby;
+			break;
+		case STATS_BATCH_COMPLETION:
+			myStats->stats_batch_completion += incby;
+			break;
+		default:
+			break;
+	}
+}
+
+
+/*
  * get_shm_connector_stage_enum - Get the current connector stage in enum
  *
  * This function gets current connector stage based on the change request received.
@@ -2507,10 +2648,6 @@ synchdb_engine_main(Datum main_arg)
 	/* extract connectorId from main_arg */
 	myConnectorId = DatumGetUInt32(main_arg);
 
-	/* initialize batchinfo */
-	myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
-	myBatchInfo.batchSize = 0;
-
 	/* Set up signal handlers, initialize shared memory and obtain connInfo*/
 	setup_environment(&connectorType, &connInfo, &snapshotMode);
 
@@ -2852,10 +2989,6 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	funcctx = SRF_PERCALL_SETUP();
 	idx = (int *)funcctx->user_fctx;
 
-	/*
-	 * todo: put 3 to a dynamic MACRO as the number of connector synchdb currently
-	 * can support
-	 */
 	if (*idx < SYNCHDB_MAX_ACTIVE_CONNECTORS)
 	{
 		Datum values[8];
@@ -2871,6 +3004,72 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 		values[5] = CStringGetTextDatum(get_shm_connector_state(*idx));
 		values[6] = CStringGetTextDatum(get_shm_connector_errmsg(*idx));
 		values[7] = CStringGetTextDatum(get_shm_dbz_offset(*idx));
+		LWLockRelease(&sdb_state->lock);
+
+		*idx += 1;
+
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+	SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * synchdb_get_stats
+ *
+ * This function dumps the statistics of all connectors
+ */
+Datum
+synchdb_get_stats(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	int *idx = NULL;
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		funcctx->tuple_desc = synchdb_stats_tupdesc();
+		funcctx->user_fctx = palloc0(sizeof(int));
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	idx = (int *)funcctx->user_fctx;
+
+	if (*idx < SYNCHDB_MAX_ACTIVE_CONNECTORS)
+	{
+		Datum values[11];
+		bool nulls[11] = {0};
+		HeapTuple tuple;
+
+		LWLockAcquire(&sdb_state->lock, LW_SHARED);
+		values[0] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
+		values[1] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_ddl);
+		values[2] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_dml);
+		values[3] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_read);
+		values[4] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_create);
+		values[5] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_update);
+		values[6] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_delete);
+		values[7] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_bad_change_event);
+		values[8] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_total_change_event);
+		values[9] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_batch_completion);
+		values[10] = sdb_state->connectors[*idx].stats.stats_batch_completion > 0?
+					Int64GetDatum(sdb_state->connectors[*idx].stats.stats_total_change_event /
+							sdb_state->connectors[*idx].stats.stats_batch_completion) :
+					Int64GetDatum(0);
 		LWLockRelease(&sdb_state->lock);
 
 		*idx += 1;
