@@ -774,8 +774,9 @@ ra_executePGDDL(PG_DDL * pgddl, ConnectorType type)
  * or calls a custom handler function.
  */
 int
-ra_executePGDML(PG_DML * pgdml, ConnectorType type)
+ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats)
 {
+	int ret = -1;
 	if (!pgdml)
     {
         elog(WARNING, "Invalid DML operation");
@@ -785,29 +786,46 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type)
 	switch (pgdml->op)
 	{
 		case 'r':  // Read operation
+		{
+			if (synchdb_dml_use_spi)
+				ret = spi_execute(pgdml->dmlquery, type);
+			else
+				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type);
+
+			increment_connector_statistics(myBatchStats, STATS_READ, 1);
+			break;
+		}
 		case 'c':  // Create operation
 		{
 			if (synchdb_dml_use_spi)
-				return spi_execute(pgdml->dmlquery, type);
+				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				return synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type);
+				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type);
+
+			increment_connector_statistics(myBatchStats, STATS_CREATE, 1);
+			break;
 		}
 		case 'u':  // Update operation
 		{
 			if (synchdb_dml_use_spi)
-				return spi_execute(pgdml->dmlquery, type);
+				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				return synchdb_handle_update(pgdml->columnValuesBefore,
+				ret = synchdb_handle_update(pgdml->columnValuesBefore,
 											 pgdml->columnValuesAfter,
 											 pgdml->tableoid,
 											 type);
+			increment_connector_statistics(myBatchStats, STATS_UPDATE, 1);
+			break;
 		}
 		case 'd':  // Delete operation
 		{
 			if (synchdb_dml_use_spi)
-				return spi_execute(pgdml->dmlquery, type);
+				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				return synchdb_handle_delete(pgdml->columnValuesBefore, pgdml->tableoid, type);
+				ret = synchdb_handle_delete(pgdml->columnValuesBefore, pgdml->tableoid, type);
+
+			increment_connector_statistics(myBatchStats, STATS_DELETE, 1);
+			break;
 		}
 		default:
 		{
@@ -815,7 +833,7 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type)
 			return spi_execute(pgdml->dmlquery, type);
 		}
 	}
-	return -1;
+	return ret;
 }
 
 /*
