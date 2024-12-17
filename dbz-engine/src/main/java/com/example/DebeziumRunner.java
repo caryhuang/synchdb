@@ -639,7 +639,7 @@ public class DebeziumRunner {
 		
 		if (markall)
 		{
-			logger.warn("debezium marked all records in batchid(" + batchid + ") as processed");
+			logger.info("debezium marked all records in batchid(" + batchid + ") as processed");
 
 			for (i = 0; i < myBatch.records.size(); i++)
 			{

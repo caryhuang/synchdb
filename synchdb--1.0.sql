@@ -17,7 +17,7 @@ CREATE OR REPLACE FUNCTION synchdb_get_state() RETURNS SETOF record
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
-CREATE VIEW synchdb_state_view AS SELECT * FROM synchdb_get_state() AS (id int, connector text, conninfo_name text, pid int, stage text, state text, err text, last_dbz_offset text);
+CREATE VIEW synchdb_state_view AS SELECT * FROM synchdb_get_state() AS (id int, connector text, name text, pid int, stage text, state text, err text, last_dbz_offset text);
 
 CREATE OR REPLACE FUNCTION synchdb_pause_engine(text) RETURNS int
 AS '$libdir/synchdb'
@@ -43,6 +43,12 @@ CREATE OR REPLACE FUNCTION synchdb_log_jvm_meminfo(text) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
---CREATE TABLE IF NOT EXISTS synchdb_conninfo(name TEXT PRIMARY KEY, host TEXT NOT NULL, port INTEGER NOT NULL CHECK (port > 0 AND port <= 65535), username TEXT NOT NULL, password BYTEA);
+CREATE OR REPLACE FUNCTION synchdb_get_stats() RETURNS SETOF record
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE VIEW synchdb_stats_view AS SELECT * FROM synchdb_get_stats() AS (name text, ddls bigint, dmls bigint, reads bigint, creates bigint, updates bigint, deletes bigint, bad_events bigint, total_events bigint, batches_done bigint, avg_batch_size bigint);
+
 CREATE TABLE IF NOT EXISTS synchdb_conninfo(name TEXT PRIMARY KEY, isactive BOOL, data JSONB);
+
 
