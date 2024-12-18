@@ -55,6 +55,7 @@ PG_FUNCTION_INFO_V1(synchdb_add_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_restart_connector);
 PG_FUNCTION_INFO_V1(synchdb_log_jvm_meminfo);
 PG_FUNCTION_INFO_V1(synchdb_get_stats);
+PG_FUNCTION_INFO_V1(synchdb_reset_stats);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -84,6 +85,7 @@ int dbz_incremental_snapshot_chunk_size = 2048;
 char * dbz_incremental_snapshot_watermarking_strategy = "insert_insert";
 int dbz_offset_flush_interval_ms = 60000;
 bool dbz_capture_only_selected_table_ddl = true;
+int synchdb_max_connector_workers = 30;
 
 /* JNI-related variables */
 static JavaVM *jvm = NULL; /* represents java vm instance */
@@ -120,6 +122,26 @@ static void cleanup(ConnectorType connectorType);
 static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass);
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
 
+/*
+ * count_active_connectors
+ *
+ * helper function to count number of active connectors
+ *
+ * @return: number of active connectors
+ */
+static int
+count_active_connectors(void)
+{
+	int i = 0;
+
+	for (i = 0; i < synchdb_max_connector_workers; i++)
+	{
+		/* if an empty name is found, there is no need to continue counting */
+		if (strlen(sdb_state->connectors[i].conninfo.name) == 0)
+			break;
+	}
+	return i;
+}
 /*
  * set_extra_dbz_parameters - configures extra paramters for Debezium runner
  *
@@ -1034,15 +1056,14 @@ static TupleDesc
 synchdb_state_tupdesc(void)
 {
 	TupleDesc tupdesc;
-	AttrNumber attrnum = 8;
+	AttrNumber attrnum = 7;
 	AttrNumber a = 0;
 
 	tupdesc = CreateTemplateTupleDesc(attrnum);
 
 	/* todo: add more columns here per connector if needed */
-	TupleDescInitEntry(tupdesc, ++a, "id", INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "connector", TEXTOID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "conninfo_name", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "name", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "connector type", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "pid", INT4OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "stage", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "state", TEXTOID, -1, 0);
@@ -1108,7 +1129,14 @@ synchdb_init_shmem(void)
 	{
 		/* First time through ... */
 		LWLockInitialize(&sdb_state->lock, LWLockNewTrancheId());
-		for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	}
+	sdb_state->connectors =
+			ShmemInitStruct("synchdb_connectors",
+							sizeof(ActiveConnectors) * synchdb_max_connector_workers,
+							&found);
+	if (!found)
+	{
+		for (i = 0; i < synchdb_max_connector_workers; i++)
 		{
 			sdb_state->connectors[i].pid = InvalidPid;
 			sdb_state->connectors[i].state = STATE_UNDEF;
@@ -1804,7 +1832,7 @@ assign_connector_id(char * name)
 	 * first, check if "name" has been used in one of the connector slots.
 	 * If yes, return its index
 	 */
-	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
 		if (!strcasecmp(sdb_state->connectors[i].conninfo.name, name))
 		{
@@ -1813,7 +1841,7 @@ assign_connector_id(char * name)
 	}
 
 	/* if not, find the next unnamed free slot */
-	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
 		if (sdb_state->connectors[i].state == STATE_UNDEF &&
 				strlen(sdb_state->connectors[i].conninfo.name) == 0)
@@ -1823,7 +1851,7 @@ assign_connector_id(char * name)
 	}
 
 	/* if not, find the next free slot */
-	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
 		if (sdb_state->connectors[i].state == STATE_UNDEF)
 		{
@@ -1851,7 +1879,7 @@ get_shm_connector_id_by_name(const char * name)
 	if (!sdb_state)
 		return -1;
 
-	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
 		if (!strcmp(sdb_state->connectors[i].conninfo.name, name))
 		{
@@ -1929,7 +1957,7 @@ void
 synchdb_auto_launcher_main(Datum main_arg)
 {
 	int ret = -1, numout = 0, i = 0;
-	char * out[SYNCHDB_MAX_ACTIVE_CONNECTORS];
+	char ** out;
 
 	/* Establish signal handlers; once that's done, unblock signals. */
 	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
@@ -1948,17 +1976,26 @@ synchdb_auto_launcher_main(Datum main_arg)
 	 * it would fail to look up the retries, thus not starting any connector
 	 * workers.
 	 */
+
+	out = palloc0(sizeof(char *) * synchdb_max_connector_workers);
 	ret = ra_listConnInfoNames(out, &numout);
 	if (ret == 0)
 	{
-		for (i = 0; i < (numout > SYNCHDB_MAX_ACTIVE_CONNECTORS ?
-				SYNCHDB_MAX_ACTIVE_CONNECTORS : numout); i++)
+		for (i = 0; i < (numout > synchdb_max_connector_workers ?
+				synchdb_max_connector_workers : numout); i++)
 		{
 			elog(WARNING, "launching %s...", out[i]);
+			StartTransactionCommand();
+			PushActiveSnapshot(GetTransactionSnapshot());
+
 			DirectFunctionCall1(synchdb_start_engine_bgw, CStringGetTextDatum(out[i]));
+
+			PopActiveSnapshot();
+			CommitTransactionCommand();
 			sleep(2);
 		}
 	}
+	pfree(out);
 	elog(DEBUG1, "stop synchdb_auto_launcher_main");
 }
 
@@ -2585,6 +2622,18 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+	DefineCustomIntVariable("synchdb.max_connector_workers",
+							"max number of connector workers that can be run at any time. Higher number would occupy more"
+							"shared memory space",
+							NULL,
+							&synchdb_max_connector_workers,
+							30,
+							1,
+							65535,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
 	if (process_shared_preload_libraries_in_progress)
 	{
 		/* can't define PGC_POSTMASTER variable after startup */
@@ -2989,21 +3038,20 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	funcctx = SRF_PERCALL_SETUP();
 	idx = (int *)funcctx->user_fctx;
 
-	if (*idx < SYNCHDB_MAX_ACTIVE_CONNECTORS)
+	if (*idx < count_active_connectors())
 	{
-		Datum values[8];
-		bool nulls[8] = {0};
+		Datum values[7];
+		bool nulls[7] = {0};
 		HeapTuple tuple;
 
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
-		values[0] = Int32GetDatum(*idx);
+		values[0] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
 		values[1] = CStringGetTextDatum(get_shm_connector_name(sdb_state->connectors[*idx].type));
-		values[2] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
-		values[3] = Int32GetDatum((int)get_shm_connector_pid(*idx));
-		values[4] = CStringGetTextDatum(get_shm_connector_stage(*idx));
-		values[5] = CStringGetTextDatum(get_shm_connector_state(*idx));
-		values[6] = CStringGetTextDatum(get_shm_connector_errmsg(*idx));
-		values[7] = CStringGetTextDatum(get_shm_dbz_offset(*idx));
+		values[2] = Int32GetDatum((int)get_shm_connector_pid(*idx));
+		values[3] = CStringGetTextDatum(get_shm_connector_stage(*idx));
+		values[4] = CStringGetTextDatum(get_shm_connector_state(*idx));
+		values[5] = CStringGetTextDatum(get_shm_connector_errmsg(*idx));
+		values[6] = CStringGetTextDatum(get_shm_dbz_offset(*idx));
 		LWLockRelease(&sdb_state->lock);
 
 		*idx += 1;
@@ -3049,7 +3097,7 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 	funcctx = SRF_PERCALL_SETUP();
 	idx = (int *)funcctx->user_fctx;
 
-	if (*idx < SYNCHDB_MAX_ACTIVE_CONNECTORS)
+	if (*idx < count_active_connectors())
 	{
 		Datum values[11];
 		bool nulls[11] = {0};
@@ -3078,6 +3126,43 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
 	}
 	SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * synchdb_reset_stats
+ *
+ * This function resets the statistics information of specified connector
+ */
+Datum
+synchdb_reset_stats(PG_FUNCTION_ARGS)
+{
+	int connectorId;
+
+	/* Parse input arguments */
+	text *name_text = PG_GETARG_TEXT_PP(0);
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	memset(&sdb_state->connectors[connectorId].stats, 0, sizeof(SynchdbStatistics));
+	LWLockRelease(&sdb_state->lock);
+
+	PG_RETURN_INT32(0);
 }
 
 /*
