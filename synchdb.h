@@ -28,7 +28,7 @@
 #define SYNCHDB_CONNINFO_TABLELIST_SIZE 256
 #define SYNCHDB_CONNINFO_RULEFILENAME_SIZE 64
 #define SYNCHDB_CONNINFO_DB_NAME_SIZE 64
-#define SYNCHDB_MAX_ACTIVE_CONNECTORS 30
+//#define SYNCHDB_MAX_ACTIVE_CONNECTORS 30
 
 #define DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC 100000
 
@@ -138,6 +138,15 @@ typedef struct _ConnectionInfo
 } ConnectionInfo;
 
 /**
+ * ConnectorName - Used to store as a List* of names for automatic connector
+ * resume feature
+ */
+typedef struct _ConnectorName
+{
+	char name[SYNCHDB_CONNINFO_NAME_SIZE];
+} ConnectorName;
+
+/**
  * ExtraConnectionInfo - Extra DBZ Connection info parameters read from the
  * rule file (if specified). These won't be put in shared memory so they
  * are declared as pointers.
@@ -207,7 +216,7 @@ typedef struct _ActiveConnectors
 typedef struct _SynchdbSharedState
 {
 	LWLock		lock;		/* mutual exclusion */
-	ActiveConnectors connectors[SYNCHDB_MAX_ACTIVE_CONNECTORS];
+	ActiveConnectors * connectors;
 } SynchdbSharedState;
 
 /* Function prototypes */
