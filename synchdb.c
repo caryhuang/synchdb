@@ -86,6 +86,29 @@ char * dbz_incremental_snapshot_watermarking_strategy = "insert_insert";
 int dbz_offset_flush_interval_ms = 60000;
 bool dbz_capture_only_selected_table_ddl = true;
 int synchdb_max_connector_workers = 30;
+int synchdb_error_strategy = STRAT_EXIT_ON_ERROR;
+int dbz_log_level = LOG_LEVEL_WARN;
+
+static const struct config_enum_entry error_strategies[] =
+{
+	{"exit", STRAT_EXIT_ON_ERROR, false},
+	{"skip", STRAT_SKIP_ON_ERROR, false},
+	{"retry", STRAT_RETRY_ON_ERROR, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry dbz_log_levels[] =
+{
+	{"debug", LOG_LEVEL_DEBUG, false},
+	{"info", LOG_LEVEL_INFO, false},
+	{"warn", LOG_LEVEL_WARN, false},
+	{"error", LOG_LEVEL_ERROR, false},
+	{"all", LOG_LEVEL_ALL, false},
+	{"fatal", LOG_LEVEL_FATAL, false},
+	{"off", LOG_LEVEL_OFF, false},
+	{"trace", LOG_LEVEL_TRACE, false},
+	{NULL, 0, false}
+};
 
 /* JNI-related variables */
 static JavaVM *jvm = NULL; /* represents java vm instance */
@@ -157,6 +180,7 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
 	jmethodID setOffsetFlushIntervalMs, setCaptureOnlySelectedTableDDL;
 	jmethodID setSslmode, setSslKeystore, setSslKeystorePass, setSslTruststore, setSslTruststorePass;
+	jmethodID setLogLevel;
 	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
 	jstring jdbz_sslmode, jdbz_sslkeystore, jdbz_sslkeystorepass, jdbz_ssltruststore, jdbz_ssltruststorepass;
 
@@ -449,6 +473,19 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 		if (jdbz_ssltruststorepass)
 				(*env)->DeleteLocalRef(env, jdbz_ssltruststorepass);
 	}
+
+	setLogLevel = (*env)->GetMethodID(env, myParametersClass, "setLogLevel",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setLogLevel)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setLogLevel, dbz_log_level);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setLogLevel method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setLogLevel method");
 	/*
 	 * additional parameters that we want to pass to Debezium on the java side
 	 * will be added here, Make sure to add the matching methods in the MyParameters
@@ -2634,6 +2671,30 @@ _PG_init(void)
 							0,
 							NULL, NULL, NULL);
 
+	DefineCustomEnumVariable("synchdb.error_handling_strategy",
+							 "strategy to handle error. Possible values are skip, exit, or retry",
+							 NULL,
+							 &synchdb_error_strategy,
+							 STRAT_EXIT_ON_ERROR,
+							 error_strategies,
+							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomEnumVariable("synchdb.dbz_log_level",
+							 "log level of Debezium runner",
+							 NULL,
+							 &dbz_log_level,
+							 LOG_LEVEL_WARN,
+							 dbz_log_levels,
+							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	if (process_shared_preload_libraries_in_progress)
 	{
 		/* can't define PGC_POSTMASTER variable after startup */
@@ -2811,7 +2872,10 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
 					   BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_ConsistentState;
-	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	if (synchdb_error_strategy == STRAT_RETRY_ON_ERROR)
+		worker.bgw_restart_time = 5;
+	else
+		worker.bgw_restart_time = BGW_NEVER_RESTART;
 	worker.bgw_notify_pid = MyProcPid;
 
 	strcpy(worker.bgw_library_name, "synchdb");
@@ -2907,7 +2971,10 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
 					   BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_ConsistentState;
-	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	if (synchdb_error_strategy == STRAT_RETRY_ON_ERROR)
+		worker.bgw_restart_time = 5;
+	else
+		worker.bgw_restart_time = BGW_NEVER_RESTART;
 	worker.bgw_notify_pid = MyProcPid;
 
 	strcpy(worker.bgw_library_name, "synchdb");

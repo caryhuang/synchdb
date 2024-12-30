@@ -30,11 +30,13 @@
 #include "synchdb.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
+#include "storage/ipc.h"
 
 /* external global variables */
 extern bool synchdb_dml_use_spi;
 extern uint64 SPI_processed;
 extern int myConnectorId;
+extern int synchdb_error_strategy;
 
 /*
  * swap_tokens
@@ -394,13 +396,24 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 		if (errdata)
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "table %d: %s",
-					tableoid, errdata->message);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "%s.%s: %s | %s",
+					errdata->schema_name == NULL ? "" : errdata->schema_name,
+					errdata->table_name == NULL ? "" : errdata->table_name,
+					errdata->message,
+					errdata->detail == NULL ? "" : errdata->detail);
 			set_shm_connector_errmsg(myConnectorId, msg);
 			pfree(msg);
 		}
-
 		FreeErrorData(errdata);
+
+		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
+		{
+			ExecCloseIndices(resultRelInfo);
+			table_close(rel, NoLock);
+			ExecResetTupleTable(estate->es_tupleTable, false);
+			FreeExecutorState(estate);
+			return -1;
+		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -581,13 +594,25 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		if (errdata)
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "table %d: %s",
-					tableoid, errdata->message);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "%s.%s: %s | %s",
+					errdata->schema_name == NULL ? "" : errdata->schema_name,
+					errdata->table_name == NULL ? "" : errdata->table_name,
+					errdata->message,
+					errdata->detail == NULL ? "" : errdata->detail);
 			set_shm_connector_errmsg(myConnectorId, msg);
 			pfree(msg);
 		}
-
 		FreeErrorData(errdata);
+
+		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
+		{
+			ExecCloseIndices(resultRelInfo);
+			EvalPlanQualEnd(&epqstate);
+			ExecResetTupleTable(estate->es_tupleTable, false);
+			FreeExecutorState(estate);
+			table_close(rel, NoLock);
+			return -1;
+		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -736,13 +761,25 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		if (errdata)
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "table %d: %s",
-					tableoid, errdata->message);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "%s.%s: %s | %s",
+					errdata->schema_name == NULL ? "" : errdata->schema_name,
+					errdata->table_name == NULL ? "" : errdata->table_name,
+					errdata->message,
+					errdata->detail == NULL ? "" : errdata->detail);
 			set_shm_connector_errmsg(myConnectorId, msg);
 			pfree(msg);
 		}
-
 		FreeErrorData(errdata);
+
+		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
+		{
+			ExecCloseIndices(resultRelInfo);
+			EvalPlanQualEnd(&epqstate);
+			ExecResetTupleTable(estate->es_tupleTable, false);
+			FreeExecutorState(estate);
+			table_close(rel, NoLock);
+			return -1;
+		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
