@@ -28,7 +28,6 @@
 #define SYNCHDB_CONNINFO_TABLELIST_SIZE 256
 #define SYNCHDB_CONNINFO_RULEFILENAME_SIZE 64
 #define SYNCHDB_CONNINFO_DB_NAME_SIZE 64
-//#define SYNCHDB_MAX_ACTIVE_CONNECTORS 30
 
 #define DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC 100000
 
@@ -49,8 +48,8 @@
  */
 #define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_offsets.dat"
 #define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
-
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
+
 /* Enumerations */
 
 /**
@@ -109,6 +108,33 @@ typedef enum _connectorStatistics
 	STATS_BATCH_COMPLETION,
 	STATS_AVERAGE_BATCH_SIZE
 } ConnectorStatistics;
+
+/**
+ * ErrorStrategies - Enum representing different strategies to handle and error
+ */
+typedef enum _ErrorStrategies
+{
+	STRAT_UNDEF = 0,
+	STRAT_EXIT_ON_ERROR,
+	STRAT_SKIP_ON_ERROR,
+	STRAT_RETRY_ON_ERROR
+} ErrorStrategies;
+
+/**
+ * ErrorStrategies - Log levels of Debezium runner
+ */
+typedef enum _DbzLogLevels
+{
+	LOG_LEVEL_UNDEF = 0,
+	LOG_LEVEL_ALL,
+	LOG_LEVEL_DEBUG,
+	LOG_LEVEL_INFO,
+	LOG_LEVEL_WARN,
+	LOG_LEVEL_ERROR,
+	LOG_LEVEL_FATAL,
+	LOG_LEVEL_OFF,
+	LOG_LEVEL_TRACE
+} DbzLogLevels;
 
 /**
  * BatchInfo - Structure containing the metadata of a batch change request

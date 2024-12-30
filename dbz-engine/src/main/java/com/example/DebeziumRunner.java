@@ -5,7 +5,6 @@ import io.debezium.engine.format.Json;
 import io.debezium.engine.ChangeEvent;
 import io.debezium.embedded.async.ConvertingAsyncEngineBuilderFactory;
 import io.debezium.engine.format.KeyValueHeaderChangeEventFormat;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -27,10 +26,9 @@ import java.io.FileInputStream;
 import java.io.ObjectInputStream;
 import java.io.FileOutputStream;
 import java.io.ObjectOutputStream;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
+import org.apache.log4j.Logger;
+import org.apache.log4j.Level;
+import org.apache.log4j.*;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
@@ -39,7 +37,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class DebeziumRunner {
-	private static final Logger logger = LoggerFactory.getLogger(DebeziumRunner.class);
+	private static Logger logger = Logger.getRootLogger();
 	private List<String> changeEvents = new ArrayList<>();
 	private DebeziumEngine<ChangeEvent<String, String>> engine;
 	private ExecutorService executor;
@@ -54,6 +52,17 @@ public class DebeziumRunner {
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
 	final int BATCH_QUEUE_SIZE = 3;
+	
+	final int LOG_LEVEL_UNDEF = 0;
+	final int LOG_LEVEL_ALL = 1;
+	final int LOG_LEVEL_DEBUG = 2;
+	final int LOG_LEVEL_INFO = 3;
+	final int LOG_LEVEL_WARN = 4;
+	final int LOG_LEVEL_ERROR = 5;
+	final int LOG_LEVEL_FATAL = 6;
+	final int LOG_LEVEL_OFF = 7;
+	final int LOG_LEVEL_TRACE = 8;
+	
 
 	/* MyParameters class - encapsulates all supported debezium parameters */
 	public class MyParameters
@@ -87,6 +96,7 @@ public class DebeziumRunner {
 		private String sslKeystorePass;
 		private String sslTruststore;
 		private String sslTruststorePass;
+		private int logLevel;
 
 		/* constructor requires all required parameters for a connector to work */
 		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshotMode)
@@ -186,6 +196,11 @@ public class DebeziumRunner {
 			this.sslTruststorePass = sslTruststorePass;
 			return this;
 		}
+		public MyParameters setLogLevel(int logLevel)
+		{
+			this.logLevel = logLevel;
+			return this;
+		}
 
 		/* add more setters here to incrementally set parameters */
 		public void print()
@@ -216,6 +231,7 @@ public class DebeziumRunner {
 			logger.warn("sslKeystorePass = " + this.sslKeystorePass);
 			logger.warn("sslTruststore = " + this.sslTruststore);
 			logger.warn("sslTruststorePass = " + this.sslTruststorePass);
+			logger.warn("logLevel = " + this.logLevel);
 		}
 
 	}
@@ -311,8 +327,61 @@ public class DebeziumRunner {
 		String schemahistoryfile = "/dev/shm/schemahistory.dat";
 		String signalfile= "/dev/shm/signalfile.dat";
 		Properties props = new Properties();
-		myParameters.print();
 
+		/* Initialize Logging */
+		ConsoleAppender consoleAppender = new ConsoleAppender();
+        consoleAppender.setLayout(new PatternLayout("%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n"));
+        consoleAppender.setTarget(ConsoleAppender.SYSTEM_OUT);
+        consoleAppender.activateOptions();
+		logger.addAppender(consoleAppender);
+
+		switch (myParameters.logLevel)
+		{
+			case LOG_LEVEL_ALL:
+			{
+				logger.setLevel(Level.ALL);
+				break;
+			}
+			case LOG_LEVEL_DEBUG:
+			{
+				logger.setLevel(Level.DEBUG);
+				break;
+			}
+			case LOG_LEVEL_INFO:
+			{
+				logger.setLevel(Level.INFO);
+				break;
+			}
+			case LOG_LEVEL_ERROR:
+			{
+				logger.setLevel(Level.ERROR);
+				break;
+			}
+			case LOG_LEVEL_FATAL:
+			{
+				logger.setLevel(Level.FATAL);
+				break;
+			}
+			case LOG_LEVEL_OFF:
+			{
+				logger.setLevel(Level.OFF);
+				break;
+			}
+			case LOG_LEVEL_TRACE:
+			{
+				logger.setLevel(Level.TRACE);
+				break;
+			}
+			default:	
+			case LOG_LEVEL_UNDEF:
+			case LOG_LEVEL_WARN:
+			{
+				logger.setLevel(Level.WARN);
+				break;
+			}
+		}
+
+		myParameters.print();
         /* Setting connector specific properties */
         props.setProperty("name", "engine");
 		switch(myParameters.connectorType)
@@ -467,6 +536,7 @@ public class DebeziumRunner {
 		props.setProperty("min.row.count.to.stream.results", String.valueOf(myParameters.snapshotMinRowToStreamResults));
 
 		//props.setProperty("read.only", "true");
+		//props.setProperty("snapshot.include.collection.list", "");
 
 		logger.info("Hello from DebeziumRunner class!");
 
