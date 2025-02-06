@@ -41,6 +41,8 @@ typedef enum _timeRep
 	TIME_MICROTIMESTAMP,	/* number of microseconds since epoch */
 	TIME_NANOTIMESTAMP,		/* number of nanoseconds since epoch */
 	TIME_ZONEDTIMESTAMP,	/* string representation of timestamp with timezone */
+	TIME_MICRODURATION,	/* duration expressed in microseconds */
+	DATA_VARIABLE_SCALE,	/* indication if scale is variable (for oracle) */
 } TimeRep;
 
 /* Structure to represent a column in a DDL event */

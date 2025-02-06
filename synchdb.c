@@ -67,6 +67,7 @@ PG_FUNCTION_INFO_V1(synchdb_reset_stats);
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
 int myConnectorId = -1;	/* Global index number to SynchdbSharedState in shared memory - global per worker */
 ExtraConnectionInfo extraConnInfo = {0}; /* global extra connector parameters read from rule file */
+const char * g_eventStr = NULL;	/* global pointer to the JSON event currently working on */
 
 /* GUC variables */
 int synchdb_worker_naptime = 500;
@@ -88,6 +89,7 @@ bool dbz_capture_only_selected_table_ddl = true;
 int synchdb_max_connector_workers = 30;
 int synchdb_error_strategy = STRAT_EXIT_ON_ERROR;
 int dbz_log_level = LOG_LEVEL_WARN;
+bool synchdb_log_event_on_error = true;
 
 static const struct config_enum_entry error_strategies[] =
 {
@@ -812,6 +814,9 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			}
 
 			elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
+			if (synchdb_log_event_on_error)
+				g_eventStr = eventStr;
+
 			/* change event message, send to format converter */
 			if (fc_processDBZChangeEvent(eventStr, myBatchStats) != 0)
 			{
@@ -2695,6 +2700,15 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+	DefineCustomBoolVariable("synchdb.log_change_on_error",
+							 "option to log JSON change event from DBZ in case of error",
+							 NULL,
+							 &synchdb_log_event_on_error,
+							 true,
+							 PGC_SIGHUP,
+							 0,
+							 NULL, NULL, NULL);
+
 	if (process_shared_preload_libraries_in_progress)
 	{
 		/* can't define PGC_POSTMASTER variable after startup */
@@ -3530,7 +3544,8 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	connector = text_to_cstring(connector_text);
 
 	/* todo: check more */
-	if (strcasecmp(connector, "mysql") && strcasecmp(connector, "sqlserver"))
+	if (strcasecmp(connector, "mysql") && strcasecmp(connector, "sqlserver")
+			&& strcasecmp(connector, "oracle"))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unsupported connector")));
