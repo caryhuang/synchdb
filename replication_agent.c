@@ -519,13 +519,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 
 		/* We must open indexes here. */
 		ExecOpenIndices(resultRelInfo, false);
-
-		/*
-		 * check if there is a PK or relation identity index that we could use to
-		 * locate the old tuple. If no identity or PK, there may potentially be
-		 * other indexes created on other columns that can be used. But for now,
-		 * we do not bother checking for them. Mark it as todo for later.
-		 */
 		idxoid = GetRelationIdentityOrPK(rel);
 		if (OidIsValid(idxoid))
 		{
@@ -721,13 +714,6 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 
 		/* We must open indexes here. */
 		ExecOpenIndices(resultRelInfo, false);
-
-		/*
-		 * check if there is a PK or relation identity index that we could use to
-		 * locate the old tuple. If no identity or PK, there may potentially be
-		 * other indexes created on other columns that can be used. But for now,
-		 * we do not bother checking for them. Mark it as todo for later.
-		 */
 		idxoid = GetRelationIdentityOrPK(rel);
 		if (OidIsValid(idxoid))
 		{
