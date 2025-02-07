@@ -3358,7 +3358,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 	pfree(strinfo.data);
 
 	if (synchdb_dml_use_spi)
-		elog(WARNING, "pgdml->dmlquery %s", pgdml->dmlquery);
+		elog(DEBUG1, "pgdml->dmlquery %s", pgdml->dmlquery);
 
 	return pgdml;
 }
