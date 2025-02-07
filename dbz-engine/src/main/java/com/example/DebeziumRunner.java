@@ -400,6 +400,14 @@ public class DebeziumRunner {
 				schemahistoryfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_schemahistory.dat";
 				signalfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_signal.dat";
 
+				if (myParameters.database.equals("null"))
+					logger.warn("database is null - skip setting database.include.list property");
+				else
+				{
+					props.setProperty("database.include.list", myParameters.database);
+					props.setProperty("database.names", myParameters.database);
+				}
+
 				if (myParameters.sslmode != null)
 					props.setProperty("database.ssl.mode", myParameters.sslmode);
 				if (myParameters.sslKeystore != null)
@@ -419,6 +427,19 @@ public class DebeziumRunner {
 				offsetfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_offsets.dat";
 				schemahistoryfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_schemahistory.dat";
 				signalfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_signal.dat";
+
+                props.setProperty("database.dbname", myParameters.database);
+				if (myParameters.database.equals("null"))
+                    logger.warn("database is null - skip setting database.include.list property");
+                else
+                {
+                    props.setProperty("database.dbname", myParameters.database);
+                }
+				/* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
+				props.setProperty("schema.include.list", myParameters.user);
+				props.setProperty("lob.enabled", "true");
+				props.setProperty("poll.interval.ms", "100");
+				props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
 				break;
 			}
 			case TYPE_SQLSERVER:
@@ -428,6 +449,14 @@ public class DebeziumRunner {
 				schemahistoryfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_schemahistory.dat";
 				signalfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_signal.dat";
 				
+				if (myParameters.database.equals("null"))
+					logger.warn("database is null - skip setting database.include.list property");
+				else
+				{
+					props.setProperty("database.include.list", myParameters.database);
+					props.setProperty("database.names", myParameters.database);
+				}
+
 				if (myParameters.sslmode != null && !myParameters.sslmode.equals("disabled"))
 					props.setProperty("database.encrypt", "true");
 				else
@@ -446,13 +475,6 @@ public class DebeziumRunner {
 		}
 		
 		/* setting common properties */
-		if (myParameters.database.equals("null"))
-			logger.warn("database is null - skip setting database.include.list property");
-		else
-		{
-			props.setProperty("database.include.list", myParameters.database);
-			props.setProperty("database.names", myParameters.database);
-		}
 
 		if (myParameters.table.equals("null"))
 			logger.warn("table is null - skip setting table.include.list property");
@@ -776,7 +798,7 @@ public class DebeziumRunner {
 			case TYPE_ORACLE:
 			{
 				inputFile = new File("pg_synchdb/oracle_" + name + "_offsets.dat");
-				/* todo */
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 				break;
 			}
 			case TYPE_SQLSERVER:
@@ -829,8 +851,7 @@ public class DebeziumRunner {
 			}
 			case TYPE_ORACLE:
 			{
-				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
-				/* todo */
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 				break;
 			}
 			case TYPE_SQLSERVER:

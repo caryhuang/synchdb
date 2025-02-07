@@ -40,6 +40,7 @@
 #include "synchdb.h"
 #include "common/base64.h"
 #include "port/pg_bswap.h"
+#include "utils/datetime.h"
 
 /* global external variables */
 extern bool synchdb_dml_use_spi;
@@ -53,6 +54,7 @@ static HTAB * transformExpressionHash;
 
 /* data type mapping related hash tables */
 static HTAB * mysqlDatatypeHash;
+static HTAB * oracleDatatypeHash;
 static HTAB * sqlserverDatatypeHash;
 
 DatatypeHashEntry mysql_defaultTypeMappings[] =
@@ -119,6 +121,38 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 };
 #define SIZE_MYSQL_DATATYPE_MAPPING (sizeof(mysql_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
+DatatypeHashEntry oracle_defaultTypeMappings[] =
+{
+	{{"BINARY_DOUBLE", false}, "DOUBLE PRECISION", 0},
+	{{"BINARY_FLOAT", false}, "REAL", 0},
+	{{"FLOAT", false}, "REAL", 0},
+	{{"NUMBER", false}, "NUMERIC", -1},
+	{{"NUMERIC", false}, "NUMERIC", -1},
+	{{"LONG", false}, "TEXT", -1},
+	{{"INTERVAL DAY TO SECOND", false}, "INTERVAL DAY TO SECOND", -1},
+	{{"INTERVAL YEAR TO MONTH", false}, "INTERVAL YEAR TO MONTH", -1},
+	{{"TIMESTAMP", false}, "TIMESTAMP", -1},
+	{{"TIMESTAMP WITH LOCAL TIME ZONE", false}, "TIMESTAMPTZ", -1},
+	{{"TIMESTAMP WITH TIME ZONE", false}, "TIMESTAMPTZ", -1},
+	{{"DATE", false}, "DATE", -1},
+	{{"CHAR", false}, "CHAR", -1},
+	{{"NCHAR", false}, "CHAR", -1},
+	{{"NVARCHAR2", false}, "VARCHAR", -1},
+	{{"VARCHAR", false}, "VARCHAR", -1},
+	{{"VARCHAR2", false}, "VARCHAR", -1},
+	{{"LONG RAW", false}, "BYTEA", 0},
+	{{"RAW", false}, "BYTEA", 0},
+	{{"DECIMAL", false}, "DECIMAL", -1},
+	/* Large objects */
+	{{"BFILE", false}, "TEXT", 0},
+	{{"BLOB", false}, "BYTEA", 0},
+	{{"CLOB", false}, "TEXT", 0},
+	{{"NCLOB", false}, "TEXT", 0},
+	{{"ROWID", false}, "TEXT", 0},
+	{{"UROWID", false}, "TEXT", 0}
+};
+#define SIZE_ORACLE_DATATYPE_MAPPING (sizeof(oracle_defaultTypeMappings) / sizeof(DatatypeHashEntry))
+
 DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 {
 	{{"int identity", true}, "SERIAL", 0},
@@ -160,6 +194,33 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 };
 
 #define SIZE_SQLSERVER_DATATYPE_MAPPING (sizeof(sqlserver_defaultTypeMappings) / sizeof(DatatypeHashEntry))
+
+/*
+ * remove_precision
+ *
+ * this helper function removes precision parameters enclosed in () from the input string
+ */
+static void
+remove_precision(char * str, bool * removed) {
+	char *openParen = strchr(str, '(');
+	char *closeParen;
+
+	if (removed == NULL)
+		return;
+
+	while (openParen != NULL)
+	{
+		closeParen = strchr(openParen, ')');
+		if (closeParen != NULL)
+		{
+			memmove(openParen, closeParen + 1, strlen(closeParen));
+			*removed = true;
+		}
+		else
+			break;
+		openParen = strchr(openParen, '(');
+	}
+}
 
 /*
  * count_active_columns
@@ -1343,6 +1404,81 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 		}
 		case TYPE_ORACLE:
 		{
+			DatatypeHashEntry * entry;
+			DatatypeHashKey key = {0};
+			bool found = false, removed = false;
+
+			/*
+			 * oracle data type may contain length and scale information in the col->typeName,
+			 * but these are also available in col->length and col->scale. We need to remove
+			 * them here to ensure proper data type transforms.
+			 */
+			remove_precision(col->typeName, &removed);
+
+			/* if precision or size is removed, make size = scale, and empty scale */
+			if (removed)
+			{
+				col->length = col->scale;
+				col->scale = 0;
+			}
+
+			key.autoIncremented = col->autoIncremented;
+			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s",
+					colNameObjId.data, col->typeName);
+
+			entry = (DatatypeHashEntry *) hash_search(oracleDatatypeHash, &key, HASH_FIND, &found);
+			if (!found)
+			{
+				/*
+				 * no mapping found, so no data type translation for this particular column.
+				 * Now, check if there is a global data type translation rule
+				 */
+				memset(&key, 0, sizeof(DatatypeHashKey));
+				key.autoIncremented = col->autoIncremented;
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s",
+						col->typeName);
+
+				entry = (DatatypeHashEntry *) hash_search(oracleDatatypeHash, &key, HASH_FIND, &found);
+				if (!found)
+				{
+					/* no mapping found, so no transformation done */
+					elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
+							key.extTypeName, key.autoIncremented);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", col->typeName);
+					else
+						appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+				}
+				else
+				{
+					/* use the mapped values and sizes */
+					elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
+							key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+							entry->pgsqlTypeLength);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+					else
+						appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+					if (entry->pgsqlTypeLength != -1)
+						col->length = entry->pgsqlTypeLength;
+				}
+			}
+			else
+			{
+				/* use the mapped values and sizes */
+				elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
+						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+						entry->pgsqlTypeLength);
+
+				if (datatypeonly)
+					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+				else
+					appendStringInfo(strinfo, " %s %s ", col->name, entry->pgsqlTypeName);
+
+				if (entry->pgsqlTypeLength != -1)
+					col->length = entry->pgsqlTypeLength;
+			}
 			break;
 		}
 		case TYPE_SQLSERVER:
@@ -2080,7 +2216,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
  * as string and output a processed string based on type
  */
 static char *
-processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObjectId)
+processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObjectId, ConnectorType type)
 {
 	char * out = NULL;
 	char * in = colval->value;
@@ -2092,8 +2228,58 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 	if (!strcasecmp(in, "NULL"))
 		return NULL;
 
-	elog(DEBUG1," processing %s with value %s", colval->name, colval->value);
+	/*
+	 * in Oracle connector, the "in" value may be expressed as JSON with scale
+	 * value inside if the data type is "variable scale". Check if this is the
+	 * case and handle it accordingly
+	 */
+	if (type == TYPE_ORACLE)
+	{
+		/* if input value is a JSON and variabel scale is set */
+		if (in[0] == '{' && in[strlen(in) - 1] == '}' &&
+				colval->timerep == DATA_VARIABLE_SCALE)
+		{
+			StringInfoData strinfo;
+			Datum jsonb_datum;
+			Jsonb *jb;
 
+			elog(DEBUG1, "handling value expressed in JSON: %s", colval->value);
+
+			initStringInfo(&strinfo);
+			jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
+			jb = DatumGetJsonbP(jsonb_datum);
+
+			getPathElementString(jb, "scale", &strinfo, true);
+			if (!strcasecmp(strinfo.data, "null"))
+				colval->scale = 0;
+			else
+				colval->scale = atoi(strinfo.data);
+
+			elog(DEBUG1, "colval->scale is set to %d", colval->scale);
+			getPathElementString(jb, "value", &strinfo, true);
+			if (!strcasecmp(strinfo.data, "null"))
+			{
+				elog(WARNING, "JSON has scale but with no value");
+			}
+			else
+			{
+				/* replace colval->value with the new value derived from the JSON */
+				pfree(colval->value);
+				colval->value = pstrdup(strinfo.data);
+
+				/* make "in" points to colval->value for subsequent processing */
+				in = colval->value;
+				elog(DEBUG1, "colval->value is set to %s", colval->value);
+			}
+
+			if(strinfo.data)
+				pfree(strinfo.data);
+		}
+	}
+	/*
+	 * handle the "in" value based on the data types created on the PostgreSQL
+	 * side
+	 */
 	switch(colval->datatype)
 	{
 		case BOOLOID:
@@ -2103,9 +2289,72 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		case FLOAT8OID:
 		case FLOAT4OID:
 		{
-			/* no extra processing for nunmeric types */
-			out = (char *) palloc0(strlen(in) + 1);
-			strlcpy(out, in, strlen(in) + 1);
+			/*
+			 * Oracle could express numeric values with variable scale. If this is
+			 * the case, handle it accordingly.
+			 */
+			if (type == TYPE_ORACLE && colval->timerep == DATA_VARIABLE_SCALE)
+			{
+				int newlen = 0, decimalpos = 0;
+				long value = 0;
+				char buffer[32] = {0};
+				int tmpoutlen = pg_b64_dec_len(strlen(in));
+				unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
+
+				tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+
+				value = derive_value_from_byte(tmpout, tmpoutlen);
+
+				snprintf(buffer, sizeof(buffer), "%ld", value);
+				if (colval->scale > 0)
+				{
+					if (strlen(buffer) > colval->scale)
+					{
+						/* ex: 123 -> 1.23*/
+						newlen = strlen(buffer) + 1;	/* plus 1 decimal */
+						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+						decimalpos = strlen(buffer) - colval->scale;
+						strncpy(out, buffer, decimalpos);
+						out[decimalpos] = '.';
+						strcpy(out + decimalpos + 1, buffer + decimalpos);
+					}
+					else if (strlen(buffer) == colval->scale)
+					{
+						/* ex: 123 -> 0.123 */
+						newlen = strlen(buffer) + 2;	/* plus 1 decimal and 1 zero */
+						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+						snprintf(out, newlen + 1, "0.%s", buffer);
+					}
+					else
+					{
+						/* ex: 1 -> 0.001*/
+						int scale_factor = 1, i = 0;
+						double res = 0.0;
+
+						/* plus 1 decimal and 1 zero and the zeros as a result of left shift */
+						newlen = strlen(buffer) + (colval->scale - strlen(buffer)) + 2;
+						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+
+						for (i = 0; i< colval->scale; i++)
+							scale_factor *= 10;
+
+						res = (double)value / (double)scale_factor;
+						snprintf(out, newlen + 1, "%g", res);
+					}
+				}
+				else
+				{
+					newlen = strlen(buffer);	/* no decimal */
+					out = (char *) palloc0(newlen + 1);
+					strlcpy(out, buffer, newlen + 1);
+				}
+			}
+			else
+			{
+				/* no extra processing for nunmeric types in other connectors */
+				out = (char *) palloc0(strlen(in) + 1);
+				strlcpy(out, in, strlen(in) + 1);
+			}
 			break;
 		}
 		case MONEYOID:
@@ -2116,7 +2365,6 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			char buffer[32] = {0};
 			int tmpoutlen = pg_b64_dec_len(strlen(in));
 			unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
-
 
 			tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
 
@@ -2512,6 +2760,129 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			pfree(tmpout);
 			break;
 		}
+		case INTERVALOID:
+		{
+			long long input = atoll(in);
+			time_t seconds = 0, remains = 0;
+			char inter[64 + 1] = {0};
+			int fields;
+
+			/* break down the input based on colval->timerep */
+			switch (colval->timerep)
+			{
+				case TIME_MICRODURATION:
+				{
+					/* interval in microseconds - convert to seconds */
+					seconds = (time_t)(input / 1000 / 1000);
+					remains = input % 1000000;
+					break;
+				}
+				default:
+				{
+					set_shm_connector_errmsg(myConnectorId, "no interval representation available to"
+							"process INTERVALOID value");
+					elog(ERROR, "no interval representation available to process INTERVALOID value");
+				}
+			}
+
+			/* we need to figure out interval's range and precision from colval->typemod */
+			fields = INTERVAL_RANGE(colval->typemod);
+			switch (fields)
+			{
+				case INTERVAL_MASK(YEAR):	/* year */
+					snprintf(inter, sizeof(inter), "%d years",
+							(int) seconds / SECS_PER_YEAR);
+					break;
+				case INTERVAL_MASK(MONTH):	/* month */
+					snprintf(inter, sizeof(inter), "%d months",
+							(int) seconds / (SECS_PER_DAY * DAYS_PER_MONTH));
+					break;
+				case INTERVAL_MASK(DAY):	/* day */
+					snprintf(inter, sizeof(inter), "%d days",
+							(int) seconds / SECS_PER_DAY);
+					break;
+				case INTERVAL_MASK(HOUR):	/* hour */
+					snprintf(inter, sizeof(inter), "%d days",
+							(int) seconds / SECS_PER_HOUR);
+					break;
+				case INTERVAL_MASK(MINUTE):	/* minute */
+					snprintf(inter, sizeof(inter), "%d days",
+							(int) seconds / SECS_PER_MINUTE);
+					break;
+				case INTERVAL_MASK(SECOND):	/* second */
+					snprintf(inter, sizeof(inter), "%d seconds",
+							(int) seconds);
+					break;
+				case INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH):	/* year to month */
+					snprintf(inter, sizeof(inter), "%d years %d months",
+							(int) seconds / SECS_PER_YEAR,
+							(int) (seconds / (SECS_PER_DAY * DAYS_PER_MONTH)) % MONTHS_PER_YEAR);
+					break;
+				case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR):		/* day to hour */
+					snprintf(inter, sizeof(inter), "%d days %d hours",
+							(int) seconds / SECS_PER_DAY,
+							(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY);
+					break;
+				case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE):	/* day to minute */
+					snprintf(inter, sizeof(inter), "%d days %02d:%02d",
+							(int) seconds / SECS_PER_DAY,
+							(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY,
+							(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR);
+					break;
+				case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):	/* day to second */
+					snprintf(inter, sizeof(inter), "%d days %02d:%02d:%02d.%06d",
+							(int) seconds / SECS_PER_DAY,
+							(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY,
+							(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR,
+							(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
+							(int) remains);
+					break;
+				case INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE):	/* hour to minute */
+					snprintf(inter, sizeof(inter), "%02d:%02d",
+							(int) seconds / SECS_PER_HOUR,
+							(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR);
+					break;
+				case INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):	/* hour to second */
+					snprintf(inter, sizeof(inter), "%02d:%02d:%02d.%06d",
+							(int) (seconds / SECS_PER_HOUR),
+							(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR,
+							(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
+							(int) remains);
+					break;
+				case INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):	/* minute to second */
+					snprintf(inter, sizeof(inter), "%02d:%02d.%06d",
+							(int) seconds / SECS_PER_MINUTE,
+							(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
+							(int) remains);
+					break;
+				case INTERVAL_FULL_RANGE:	/* full range */
+					snprintf(inter, sizeof(inter), "%d years %d months % days %02d:%02d:%02d.%06d",
+							(int) seconds / SECS_PER_YEAR,
+							(int) (seconds / (SECS_PER_DAY * DAYS_PER_MONTH)) % MONTHS_PER_YEAR,
+							(int) (seconds / SECS_PER_DAY) % (SECS_PER_DAY * DAYS_PER_MONTH),
+							(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY,
+							(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR,
+							(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
+							(int) remains);
+					break;
+				default:
+				{
+					set_shm_connector_errmsg(myConnectorId, "invalid INTERVAL typmod");
+					elog(ERROR, "invalid INTERVAL typmod: 0x%x", colval->typemod);
+					break;
+				}
+			}
+			if (addquote)
+			{
+				out = escapeSingleQuote(inter, addquote);
+			}
+			else
+			{
+				out = (char *) palloc0(strlen(inter) + 1);
+				memcpy(out, inter, strlen(inter));
+			}
+			break;
+		}
 		case TIMETZOID:
 		/* todo: support more data types as needed */
 		default:
@@ -2523,7 +2894,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			 * is number-oriented, and with addquote=true, it will produce the number
 			 * in quotes which may not be desirable.
 			 */
-			elog(DEBUG1,"no special handling for data type %d, treat it as text",
+			elog(WARNING,"no special handling for data type %d, treat it as text",
 					colval->datatype);
 
 			if (addquote)
@@ -2565,10 +2936,11 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		initStringInfo(&strinfo);
 
 		/*
-		 * assume json if it contains "wkb" todo: need a better way to check if data
-		 * is in JSON format without erroring out in the case it is not
+		 * special case for MySQL GEOMETRY type. It is expressed as JSON with "wkb" and
+		 * "srid" inside. Need to process these accordingly. There may be more special
+		 * cases expressed as JSON, we will add more here as they are discovered. TODO
 		 */
-		if (strstr(out, "\"wkb\""))
+		if (out[0] == '{' && out[strlen(out) - 1] == '}' && strstr(out, "\"wkb\""))
 		{
 			jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(out));
 			jb = DatumGetJsonbP(jsonb_datum);
@@ -2605,7 +2977,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		}
 		else
 		{
-			/* regular data - no handling needed */
+			/* regular data - proceed with regular transform */
 			escapedData = escapeSingleQuote(out, false);
 			transData = ra_transformDataExpression(escapedData, NULL, NULL, transformExpression);
 			if (transData)
@@ -2682,7 +3054,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 				foreach(cell, dbzdml->columnValuesAfter)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
-					char * data = processDataByType(colval, true, dbzdml->remoteObjectId);
+					char * data = processDataByType(colval, true, dbzdml->remoteObjectId, type);
 
 					if (data != NULL)
 					{
@@ -2708,7 +3080,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval, false, dbzdml->remoteObjectId);
+					char * data = processDataByType(colval, false, dbzdml->remoteObjectId, type);
 
 					if (data != NULL)
 					{
@@ -2733,13 +3105,29 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 			{
 				/* --- Convert to use SPI to handler DML --- */
 				appendStringInfo(&strinfo, "DELETE FROM %s WHERE ", dbzdml->mappedObjectId);
+
+				/* fixme: in Oracle connector, if remote table contains BLOB, CLOB or NCLOB columns
+				 * the change event will not contain their old values. Instead it will place a placeholder
+				 * value like '__synchdb_unavailable_value' to indicate. This also means that the following
+				 * WHERE clause will construct with these placeholder values, causing the row to not delete.
+				 *
+				 * We could either:
+				 *
+				 * 1) put the primary keys in the WHERE clause only. (Need to figure out which columns are
+				 * primary keys)
+				 *
+				 * 2) still put all columns in the WHERE clause, but filter out BLOB, CLOB, NCLOB. (We need
+				 * special marking on which column to exclude from WHERE clause construction)
+				 *
+				 * setting synchdb_dml_use_spi = false will not have this issue.
+				 */
 				foreach(cell, dbzdml->columnValuesBefore)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval, true, dbzdml->remoteObjectId);
+					data = processDataByType(colval, true, dbzdml->remoteObjectId, type);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s", data);
@@ -2765,7 +3153,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					PG_DML_COLUMN_VALUE * pgcolval = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval, false, dbzdml->remoteObjectId);
+					char * data = processDataByType(colval, false, dbzdml->remoteObjectId, type);
 
 					if (data != NULL)
 					{
@@ -2796,7 +3184,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval, true, dbzdml->remoteObjectId);
+					data = processDataByType(colval, true, dbzdml->remoteObjectId, type);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s,", data);
@@ -2804,13 +3192,28 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					}
 					else
 					{
-						appendStringInfo(&strinfo, "%s", "null");
+						appendStringInfo(&strinfo, "%s,", "null");
 					}
 				}
 				/* remove extra "," */
 				strinfo.data[strinfo.len - 1] = '\0';
 				strinfo.len = strinfo.len - 1;
 
+				/* fixme: in Oracle connector, if remote table contains BLOB, CLOB or NCLOB columns
+				 * the change event will not contain their old values. Instead it will place a placeholder
+				 * value like '__synchdb_unavailable_value' to indicate. This also means that the following
+				 * WHERE clause will construct with these placeholder values, causing the row to not update.
+				 *
+				 * We could either:
+				 *
+				 * 1) put the primary keys in the WHERE clause only. (Need to figure out which columns are
+				 * primary keys)
+				 *
+				 * 2) still put all columns in the WHERE clause, but filter out BLOB, CLOB, NCLOB. (We need
+				 * special marking on which column to exclude from WHERE clause construction)
+				 *
+				 * setting synchdb_dml_use_spi = false will not have this issue.
+				 */
 				appendStringInfo(&strinfo,  " WHERE ");
 				foreach(cell, dbzdml->columnValuesBefore)
 				{
@@ -2818,7 +3221,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					char * data;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
-					data = processDataByType(colval, true, dbzdml->remoteObjectId);
+					data = processDataByType(colval, true, dbzdml->remoteObjectId, type);
 					if (data != NULL)
 					{
 						appendStringInfo(&strinfo, "%s", data);
@@ -2847,7 +3250,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 					PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId);
+					char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId, type);
 
 					if (data != NULL)
 					{
@@ -2861,7 +3264,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					pgcolval_after->position = colval_after->position;
 					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
 
-					data = processDataByType(colval_before, false, dbzdml->remoteObjectId);
+					data = processDataByType(colval_before, false, dbzdml->remoteObjectId, type);
 					if (data != NULL)
 					{
 						pgcolval_before->value = pstrdup(data);
@@ -2890,7 +3293,9 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 	/* free the data inside strinfo as we no longer needs it */
 	pfree(strinfo.data);
 
-	elog(DEBUG1, "pgdml->dmlquery %s", pgdml->dmlquery);
+	if (synchdb_dml_use_spi)
+		elog(DEBUG1, "pgdml->dmlquery %s", pgdml->dmlquery);
+
 	return pgdml;
 }
 
@@ -2926,12 +3331,32 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 				colval->scale = -1;	/* has no scale */
 			else
 				colval->scale = atoi(strinfo.data);	/* has scale */
+
+			/* also check if variable scale is used (Oracle) */
+			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.name",
+					isbefore ? 0 : 1, pos);
+
+			getPathElementString(jb, path, &strinfo, true);
+
+			if (!strcasecmp(strinfo.data, "NULL"))
+				colval->timerep = TIME_UNDEF;	/* has no specific representation */
+			else
+			{
+				if (find_exact_string_match(strinfo.data, "io.debezium.data.VariableScaleDecimal"))
+					colval->timerep = DATA_VARIABLE_SCALE;
+			}
 			break;
 		}
+		case INT8OID:
+		case INT2OID:
+		case INT4OID:
+		case FLOAT8OID:
+		case FLOAT4OID:
 		case DATEOID:
 		case TIMEOID:
 		case TIMESTAMPOID:
 		case TIMETZOID:
+		case INTERVALOID:
 		{
 			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.name",
 					isbefore ? 0 : 1, pos);
@@ -2958,9 +3383,12 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 					colval->timerep = TIME_NANOTIMESTAMP;
 				else if (find_exact_string_match(strinfo.data, "io.debezium.time.ZonedTimestamp"))
 					colval->timerep = TIME_ZONEDTIMESTAMP;
+				else if (find_exact_string_match(strinfo.data, "io.debezium.time.MicroDuration"))
+					colval->timerep = TIME_MICRODURATION;
+				else if (find_exact_string_match(strinfo.data, "io.debezium.data.VariableScaleDecimal"))
+					colval->timerep = DATA_VARIABLE_SCALE;
 				else
 					colval->timerep = TIME_UNDEF;
-				elog(DEBUG1, "timerep %d", colval->timerep);
 			}
 			break;
 		}
@@ -3235,7 +3663,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			 * 	}
 			 *
 			 * 	This parser expects the payload to contain only scalar values. In some special
-			 * 	cases like geometry column type, the payload could contain sub element like:
+			 * 	cases like geometry or oracle's number column type, the payload could contain
+			 * 	sub element like:
 			 * 	"after" : {
 			 * 		"id"; 1,
 			 * 		"g": {
@@ -3243,6 +3672,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			 * 			"srid": null
 			 * 		},
 			 * 		"h": null
+			 * 		"i": {
+             *          "scale": 0,
+             *          "value": "AQ=="
+             *      }
 			 * 	}
 			 * 	in this case, the parser will parse the entire sub element as string under the key "g"
 			 * 	in the above example.
@@ -3356,6 +3789,11 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
+
+						/* convert to lower case column name */
+						for (j = 0; j < strlen(colval->name); j++)
+							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
+
 						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
 						colval->remoteColumnName = pstrdup(colval->name);
@@ -3521,6 +3959,11 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
+
+						/* convert to lower case column name */
+						for (j = 0; j < strlen(colval->name); j++)
+							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
+
 						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
 						colval->remoteColumnName = pstrdup(colval->name);
@@ -3705,6 +4148,11 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 							colval->name = pstrdup(key);
+
+							/* convert to lower case column name */
+							for (j = 0; j < strlen(colval->name); j++)
+								colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
+
 							colval->value = pstrdup(value);
 							/* a copy of original column name for expression rule lookup at later stage */
 							colval->remoteColumnName = pstrdup(colval->name);
@@ -3862,6 +4310,54 @@ init_mysql(void)
 }
 
 /*
+ * init_oracle
+ *
+ * initialize data type hash table for oracle database
+ */
+static void
+init_oracle(void)
+{
+	HASHCTL	info;
+	int i = 0;
+	DatatypeHashEntry * entry;
+	bool found = 0;
+
+	info.keysize = sizeof(DatatypeHashKey);
+	info.entrysize = sizeof(DatatypeHashEntry);
+	info.hcxt = CurrentMemoryContext;
+
+	oracleDatatypeHash = hash_create("oracle datatype hash",
+							 256,
+							 &info,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	for (i = 0; i < SIZE_ORACLE_DATATYPE_MAPPING; i++)
+	{
+		entry = (DatatypeHashEntry *) hash_search(oracleDatatypeHash, &(oracle_defaultTypeMappings[i].key), HASH_ENTER, &found);
+		if (!found)
+		{
+			entry->key.autoIncremented = oracle_defaultTypeMappings[i].key.autoIncremented;
+			memset(entry->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+			strncpy(entry->key.extTypeName,
+					oracle_defaultTypeMappings[i].key.extTypeName,
+					strlen(oracle_defaultTypeMappings[i].key.extTypeName));
+
+			entry->pgsqlTypeLength = oracle_defaultTypeMappings[i].pgsqlTypeLength;
+			memset(entry->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+			strncpy(entry->pgsqlTypeName,
+					oracle_defaultTypeMappings[i].pgsqlTypeName,
+					strlen(oracle_defaultTypeMappings[i].pgsqlTypeName));
+
+			elog(DEBUG1, "Inserted mapping '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+		}
+		else
+		{
+			elog(DEBUG1, "mapping exists '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+		}
+	}
+}
+
+/*
  * init_sqlserver
  *
  * initialize data type hash table for sqlserver database
@@ -3938,6 +4434,7 @@ fc_initFormatConverter(ConnectorType connectorType)
 		}
 		case TYPE_ORACLE:
 		{
+			init_oracle();
 			break;
 		}
 		case TYPE_SQLSERVER:
@@ -3970,6 +4467,7 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 		}
 		case TYPE_ORACLE:
 		{
+			hash_destroy(oracleDatatypeHash);
 			break;
 		}
 		case TYPE_SQLSERVER:
@@ -4037,7 +4535,7 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 			rulehash = mysqlDatatypeHash;
 			break;
 		case TYPE_ORACLE:
-			rulehash = NULL; /* todo */
+			rulehash = oracleDatatypeHash;
 			break;
 		case TYPE_SQLSERVER:
 			rulehash = sqlserverDatatypeHash;

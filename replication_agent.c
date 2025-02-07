@@ -37,6 +37,8 @@ extern bool synchdb_dml_use_spi;
 extern uint64 SPI_processed;
 extern int myConnectorId;
 extern int synchdb_error_strategy;
+extern bool synchdb_log_event_on_error;
+extern char * g_eventStr;
 
 /*
  * swap_tokens
@@ -277,6 +279,10 @@ spi_execute(const char * query, ConnectorType type)
 		if (errdata)
 			set_shm_connector_errmsg(myConnectorId, errdata->message);
 
+		/* dump the JSON change event as additional detail if available */
+		if (synchdb_log_event_on_error && g_eventStr != NULL)
+			elog(LOG, "%s", g_eventStr);
+
 		FreeErrorData(errdata);
 		SPI_finish();
 		ret = -1;
@@ -406,6 +412,10 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 		}
 		FreeErrorData(errdata);
 
+		/* dump the JSON change event as additional detail if available */
+		if (synchdb_log_event_on_error && g_eventStr != NULL)
+			elog(LOG, "%s", g_eventStr);
+
 		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
 		{
 			ExecCloseIndices(resultRelInfo);
@@ -509,13 +519,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 
 		/* We must open indexes here. */
 		ExecOpenIndices(resultRelInfo, false);
-
-		/*
-		 * check if there is a PK or relation identity index that we could use to
-		 * locate the old tuple. If no identity or PK, there may potentially be
-		 * other indexes created on other columns that can be used. But for now,
-		 * we do not bother checking for them. Mark it as todo for later.
-		 */
 		idxoid = GetRelationIdentityOrPK(rel);
 		if (OidIsValid(idxoid))
 		{
@@ -574,7 +577,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		}
 		else
 		{
-			elog(DEBUG1, "tuple to update not found");
+			elog(ERROR, "tuple to update not found");
 			ret = -1;
 		}
 
@@ -603,6 +606,10 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			pfree(msg);
 		}
 		FreeErrorData(errdata);
+
+		/* dump the JSON change event as additional detail if available */
+		if (synchdb_log_event_on_error && g_eventStr != NULL)
+			elog(LOG, "%s", g_eventStr);
 
 		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
 		{
@@ -707,13 +714,6 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 
 		/* We must open indexes here. */
 		ExecOpenIndices(resultRelInfo, false);
-
-		/*
-		 * check if there is a PK or relation identity index that we could use to
-		 * locate the old tuple. If no identity or PK, there may potentially be
-		 * other indexes created on other columns that can be used. But for now,
-		 * we do not bother checking for them. Mark it as todo for later.
-		 */
 		idxoid = GetRelationIdentityOrPK(rel);
 		if (OidIsValid(idxoid))
 		{
@@ -741,7 +741,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		}
 		else
 		{
-			elog(DEBUG1, "tuple to delete not found");
+			elog(ERROR, "tuple to delete not found");
 			ret = -1;
 		}
 
@@ -770,6 +770,10 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 			pfree(msg);
 		}
 		FreeErrorData(errdata);
+
+		/* dump the JSON change event as additional detail if available */
+		if (synchdb_log_event_on_error && g_eventStr != NULL)
+			elog(LOG, "%s", g_eventStr);
 
 		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
 		{
