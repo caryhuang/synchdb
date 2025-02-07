@@ -569,16 +569,13 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 				}
 			}
 			ExecStoreVirtualTuple(remoteslot);
-
 			EvalPlanQualSetSlot(&epqstate, remoteslot);
-
 			ExecSimpleRelationUpdate(resultRelInfo, estate, &epqstate, localslot,
 									 remoteslot);
 		}
 		else
 		{
 			elog(ERROR, "tuple to update not found");
-			ret = -1;
 		}
 
 		/* increment command ID */
@@ -736,13 +733,11 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		if (found)
 		{
 			EvalPlanQualSetSlot(&epqstate, localslot);
-
 			ExecSimpleRelationDelete(resultRelInfo, estate, &epqstate, localslot);
 		}
 		else
 		{
 			elog(ERROR, "tuple to delete not found");
-			ret = -1;
 		}
 
 		/* increment command ID */
