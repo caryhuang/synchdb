@@ -75,6 +75,7 @@ typedef struct
 	Oid oid;
 	int position;
 	int typemod;
+	bool ispk;
 } NameOidEntry;
 
 /* Structure to represent a column value in a DML event */
@@ -88,6 +89,7 @@ typedef struct dbz_dml_column_value
 	int scale;		/* location of decimal point - decimal type only */
 	int timerep;	/* how dbz represents time related fields */
 	int typemod;	/* extra data type modifier */
+	bool ispk;		/* indicate if this column is a primary key*/
 } DBZ_DML_COLUMN_VALUE;
 
 /* Structure to represent a DML event */

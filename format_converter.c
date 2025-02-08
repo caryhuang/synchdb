@@ -126,6 +126,45 @@ DatatypeHashEntry oracle_defaultTypeMappings[] =
 	{{"BINARY_DOUBLE", false}, "DOUBLE PRECISION", 0},
 	{{"BINARY_FLOAT", false}, "REAL", 0},
 	{{"FLOAT", false}, "REAL", 0},
+	{{"NUMBER(0,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(1,0)", false}, "SMALLINT", 0},
+	{{"NUMBER(2,0)", false}, "SMALLINT", 0},
+	{{"NUMBER(3,0)", false}, "SMALLINT", 0},
+	{{"NUMBER(4,0)", false}, "SMALLINT", 0},
+	{{"NUMBER(5,0)", false}, "INT", 0},
+	{{"NUMBER(6,0)", false}, "INT", 0},
+	{{"NUMBER(7,0)", false}, "INT", 0},
+	{{"NUMBER(8,0)", false}, "INT", 0},
+	{{"NUMBER(9,0)", false}, "INT", 0},
+	{{"NUMBER(10,0)", false}, "BIGINT", 0},
+	{{"NUMBER(11,0)", false}, "BIGINT", 0},
+	{{"NUMBER(12,0)", false}, "BIGINT", 0},
+	{{"NUMBER(13,0)", false}, "BIGINT", 0},
+	{{"NUMBER(14,0)", false}, "BIGINT", 0},
+	{{"NUMBER(15,0)", false}, "BIGINT", 0},
+	{{"NUMBER(16,0)", false}, "BIGINT", 0},
+	{{"NUMBER(17,0)", false}, "BIGINT", 0},
+	{{"NUMBER(18,0)", false}, "BIGINT", 0},
+	{{"NUMBER(19,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(20,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(21,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(22,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(23,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(24,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(25,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(26,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(27,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(28,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(29,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(30,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(31,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(32,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(33,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(34,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(35,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(36,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(37,0)", false}, "NUMERIC", -1},
+	{{"NUMBER(38,0)", false}, "NUMERIC", -1},
 	{{"NUMBER", false}, "NUMERIC", -1},
 	{{"NUMERIC", false}, "NUMERIC", -1},
 	{{"LONG", false}, "TEXT", -1},
@@ -143,13 +182,14 @@ DatatypeHashEntry oracle_defaultTypeMappings[] =
 	{{"LONG RAW", false}, "BYTEA", 0},
 	{{"RAW", false}, "BYTEA", 0},
 	{{"DECIMAL", false}, "DECIMAL", -1},
+	{{"ROWID", false}, "TEXT", 0},
+	{{"UROWID", false}, "TEXT", 0},
+	{{"XMLTYPE", false}, "TEXT", 0},
 	/* Large objects */
 	{{"BFILE", false}, "TEXT", 0},
 	{{"BLOB", false}, "BYTEA", 0},
 	{{"CLOB", false}, "TEXT", 0},
-	{{"NCLOB", false}, "TEXT", 0},
-	{{"ROWID", false}, "TEXT", 0},
-	{{"UROWID", false}, "TEXT", 0}
+	{{"NCLOB", false}, "TEXT", 0}
 };
 #define SIZE_ORACLE_DATATYPE_MAPPING (sizeof(oracle_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
@@ -1040,8 +1080,8 @@ parseDBZDDL(Jsonb * jb)
 		 *   },
 		 *   ...... rest of array elements
 		 *
-		 * columns arrat may contains another array of enumValues, this is ignored
-		 * for now as enums are mapped to text as of now
+		 * columns array may contains another array of enumValues, this is ignored
+		 * for now as enums are to be mapped to text as of now
 		 *
 		 *	   "enumValues":
 		 *     [
@@ -1411,7 +1451,8 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 			/*
 			 * oracle data type may contain length and scale information in the col->typeName,
 			 * but these are also available in col->length and col->scale. We need to remove
-			 * them here to ensure proper data type transforms.
+			 * them here to ensure proper data type transforms. Known data type to have this
+			 * addition is INTERVAL DAY(3) TO SECOND(6)
 			 */
 			remove_precision(col->typeName, &removed);
 
@@ -1422,9 +1463,26 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				col->scale = 0;
 			}
 
-			key.autoIncremented = col->autoIncremented;
-			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s",
-					colNameObjId.data, col->typeName);
+			if (!strcasecmp(col->typeName, "NUMBER") && col->scale == 0)
+			{
+				/*
+				 * special case: variable length NUMBER value - re-structure col->typeName so that
+				 * it includes length and precision information before we do any data type mapping
+				 * lookup. This ensures a more granular mappings. We only do this when col->scale
+				 * is zero because it indicates an integer type, and PostgreSQL has different int
+				 * types for different sizes.
+				 */
+				key.autoIncremented = col->autoIncremented;
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s(%d,%d)",
+						colNameObjId.data, col->typeName, col->length, col->scale);
+			}
+			else
+			{
+				/* all other cases - no special handling */
+				key.autoIncremented = col->autoIncremented;
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s",
+						colNameObjId.data, col->typeName);
+			}
 
 			entry = (DatatypeHashEntry *) hash_search(oracleDatatypeHash, &key, HASH_FIND, &found);
 			if (!found)
@@ -1434,9 +1492,26 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				 * Now, check if there is a global data type translation rule
 				 */
 				memset(&key, 0, sizeof(DatatypeHashKey));
-				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s",
-						col->typeName);
+				if (!strcasecmp(col->typeName, "NUMBER") && col->scale == 0)
+				{
+					/*
+					 * special case: variable length NUMBER value - re-structure col->typeName so that
+					 * it includes length and precision information before we do any data type mapping
+					 * lookup. This ensures a more granular mappings. We only do this when col->scale
+					 * is zero because it indicates an integer type, and PostgreSQL has different int
+					 * types for different sizes.
+					 */
+					key.autoIncremented = col->autoIncremented;
+					snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d,%d)",
+							col->typeName, col->length, col->scale);
+				}
+				else
+				{
+					/* all other cases - no special handling */
+					key.autoIncremented = col->autoIncremented;
+					snprintf(key.extTypeName, sizeof(key.extTypeName), "%s",
+							col->typeName);
+				}
 
 				entry = (DatatypeHashEntry *) hash_search(oracleDatatypeHash, &key, HASH_FIND, &found);
 				if (!found)
@@ -1861,7 +1936,13 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (col->defaultValueExpression && strlen(col->defaultValueExpression) > 0
 					&& !col->autoIncremented)
 			{
-				appendStringInfo(&strinfo, "DEFAULT %s ", col->defaultValueExpression);
+				/* use DEFAULT NULL regardless of the value of col->defaultValueExpression
+				 * because it may contain expressions not recognized by PostgreSQL. We could
+				 * make this part more intelligent by checking if the given expression can
+				 * be applied by PostgreSQL and use it only when it can. But for now, we will
+				 * just put default null here. Todo
+				 */
+				appendStringInfo(&strinfo, "DEFAULT %s ", "NULL");
 			}
 
 			appendStringInfo(&strinfo, ",");
@@ -2059,7 +2140,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 		if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
 		{
-			elog(WARNING, "adding new column");
+			elog(DEBUG1, "adding new column");
 			altered = false;
 			foreach(cell, dbzddl->columns)
 			{
@@ -2075,7 +2156,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				}
 				if (!found)
 				{
-					elog(WARNING, "adding new column %s", col->name);
+					elog(DEBUG1, "adding new column %s", col->name);
 					altered = true;
 					appendStringInfo(&strinfo, "ADD COLUMN");
 
@@ -2112,7 +2193,13 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					if (col->defaultValueExpression && strlen(col->defaultValueExpression) > 0
 							&& !col->autoIncremented)
 					{
-						appendStringInfo(&strinfo, "DEFAULT %s ", col->defaultValueExpression);
+						/* use DEFAULT NULL regardless of the value of col->defaultValueExpression
+						 * because it may contain expressions not recognized by PostgreSQL. We could
+						 * make this part more intelligent by checking if the given expression can
+						 * be applied by PostgreSQL and use it only when it can. But for now, we will
+						 * just put default null here. Todo
+						 */
+						appendStringInfo(&strinfo, "DEFAULT %s ", "NULL");
 					}
 
 					appendStringInfo(&strinfo, ",");
@@ -2134,14 +2221,14 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			}
 			else
 			{
-				elog(WARNING, "no column altered");
+				elog(DEBUG1, "no column altered");
 				pfree(pgddl);
 				return NULL;
 			}
 		}
 		else if (list_length(dbzddl->columns) < count_active_columns(tupdesc))
 		{
-			elog(WARNING, "dropping old column");
+			elog(DEBUG1, "dropping old column");
 			altered = false;
 			for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 			{
@@ -2162,7 +2249,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				}
 				if (!found)
 				{
-					elog(WARNING, "dropping old column %s", NameStr(attr->attname));
+					elog(DEBUG1, "dropping old column %s", NameStr(attr->attname));
 					altered = true;
 					appendStringInfo(&strinfo, "DROP COLUMN %s,", NameStr(attr->attname));
 				}
@@ -2176,7 +2263,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			}
 			else
 			{
-				elog(WARNING, "no column altered");
+				elog(DEBUG1, "no column altered");
 				pfree(pgddl);
 				return NULL;
 			}
@@ -2188,12 +2275,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (alterclause)
 			{
 				appendStringInfo(&strinfo, "%s", alterclause);
-				elog(WARNING, "alter clause: %s", strinfo.data);
+				elog(DEBUG1, "alter clause: %s", strinfo.data);
 				pfree(alterclause);
 			}
 			else
 			{
-				elog(WARNING, "no column altered");
+				elog(DEBUG1, "no column altered");
 				pfree(pgddl);
 				return NULL;
 			}
@@ -3105,26 +3192,14 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 			{
 				/* --- Convert to use SPI to handler DML --- */
 				appendStringInfo(&strinfo, "DELETE FROM %s WHERE ", dbzdml->mappedObjectId);
-
-				/* fixme: in Oracle connector, if remote table contains BLOB, CLOB or NCLOB columns
-				 * the change event will not contain their old values. Instead it will place a placeholder
-				 * value like '__synchdb_unavailable_value' to indicate. This also means that the following
-				 * WHERE clause will construct with these placeholder values, causing the row to not delete.
-				 *
-				 * We could either:
-				 *
-				 * 1) put the primary keys in the WHERE clause only. (Need to figure out which columns are
-				 * primary keys)
-				 *
-				 * 2) still put all columns in the WHERE clause, but filter out BLOB, CLOB, NCLOB. (We need
-				 * special marking on which column to exclude from WHERE clause construction)
-				 *
-				 * setting synchdb_dml_use_spi = false will not have this issue.
-				 */
 				foreach(cell, dbzdml->columnValuesBefore)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					char * data;
+
+					/* only put primary key columns in WHERE clause */
+					if (!colval->ispk)
+						continue;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
 					data = processDataByType(colval, true, dbzdml->remoteObjectId, type);
@@ -3199,26 +3274,15 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 				strinfo.data[strinfo.len - 1] = '\0';
 				strinfo.len = strinfo.len - 1;
 
-				/* fixme: in Oracle connector, if remote table contains BLOB, CLOB or NCLOB columns
-				 * the change event will not contain their old values. Instead it will place a placeholder
-				 * value like '__synchdb_unavailable_value' to indicate. This also means that the following
-				 * WHERE clause will construct with these placeholder values, causing the row to not update.
-				 *
-				 * We could either:
-				 *
-				 * 1) put the primary keys in the WHERE clause only. (Need to figure out which columns are
-				 * primary keys)
-				 *
-				 * 2) still put all columns in the WHERE clause, but filter out BLOB, CLOB, NCLOB. (We need
-				 * special marking on which column to exclude from WHERE clause construction)
-				 *
-				 * setting synchdb_dml_use_spi = false will not have this issue.
-				 */
 				appendStringInfo(&strinfo,  " WHERE ");
 				foreach(cell, dbzdml->columnValuesBefore)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					char * data;
+
+					/* only put primary key columns in WHERE clause */
+					if (!colval->ispk)
+						continue;
 
 					appendStringInfo(&strinfo, "%s = ", colval->name);
 					data = processDataByType(colval, true, dbzdml->remoteObjectId, type);
@@ -3427,6 +3491,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	bool found;
 	DataCacheKey cachekey = {0};
 	DataCacheEntry * cacheentry;
+	Bitmapset * pkattrs;
 
 	/* these are the components that compose of an object ID before transformation */
 	char * db = NULL, * schema = NULL, * table = NULL;
@@ -3617,6 +3682,14 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		rel = table_open(dbzdml->tableoid, NoLock);
 		tupdesc = RelationGetDescr(rel);
 
+		/* get primary key bitmapset */
+		pkattrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_PRIMARY_KEY);
+		if (!pkattrs)
+		{
+			/* should it be ERROR? */
+			elog(WARNING, "No primary key found for relation %s", RelationGetRelationName(rel));
+		}
+
 		/* cache tupdesc */
 		cacheentry->tupdesc = CreateTupleDescCopy(tupdesc);
 
@@ -3636,6 +3709,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 				entry->oid = attr->atttypid;
 				entry->position = attnum;
 				entry->typemod = attr->atttypmod;
+				if (bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
+					entry->ispk =true;
+
 				elog(DEBUG2, "Inserted name '%s' with OID %u and position %d", entry->name, entry->oid, entry->position);
 			}
 			else
@@ -3643,6 +3719,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 				elog(DEBUG2, "Name '%s' already exists with OID %u and position %d", entry->name, entry->oid, entry->position);
 			}
 		}
+		bms_free(pkattrs);
 		table_close(rel, NoLock);
 	}
 	switch(op)
@@ -3820,10 +3897,11 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							colval->datatype = entry->oid;
 							colval->position = entry->position;
 							colval->typemod = entry->typemod;
+							colval->ispk = entry->ispk;
 							get_additional_parameters(jb, colval, false, entry->position - 1);
 						}
 						else
-							elog(WARNING, "cannot find data type for column %s. None-existent column?", colval->name);
+							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
 						elog(DEBUG1, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
 						dbzdml->columnValuesAfter = lappend(dbzdml->columnValuesAfter, colval);
@@ -3991,7 +4069,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							colval->datatype = entry->oid;
 							colval->position = entry->position;
 							colval->typemod = entry->typemod;
-
+							colval->ispk = entry->ispk;
 							get_additional_parameters(jb, colval, true, entry->position - 1);
 						}
 						else
@@ -4179,7 +4257,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								colval->datatype = entry->oid;
 								colval->position = entry->position;
 								colval->typemod = entry->typemod;
-
+								colval->ispk = entry->ispk;
 								if (i == 0)
 									get_additional_parameters(jb, colval, true, entry->position - 1);
 								else
