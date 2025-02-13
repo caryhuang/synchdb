@@ -78,6 +78,12 @@ typedef struct
 	bool ispk;
 } NameOidEntry;
 
+typedef struct
+{
+	char name[NAMEDATALEN];
+	int jsonpos;
+} NameJsonposEntry;
+
 /* Structure to represent a column value in a DML event */
 typedef struct dbz_dml_column_value
 {

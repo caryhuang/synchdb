@@ -422,6 +422,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 			table_close(rel, NoLock);
 			ExecResetTupleTable(estate->es_tupleTable, false);
 			FreeExecutorState(estate);
+			FlushErrorState();
 			return -1;
 		}
 		PG_RE_THROW();
@@ -615,6 +616,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			ExecResetTupleTable(estate->es_tupleTable, false);
 			FreeExecutorState(estate);
 			table_close(rel, NoLock);
+			FlushErrorState();
 			return -1;
 		}
 		PG_RE_THROW();
@@ -777,6 +779,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 			ExecResetTupleTable(estate->es_tupleTable, false);
 			FreeExecutorState(estate);
 			table_close(rel, NoLock);
+			FlushErrorState();
 			return -1;
 		}
 		PG_RE_THROW();
