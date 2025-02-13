@@ -46,6 +46,8 @@
 extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
 extern ExtraConnectionInfo extraConnInfo;
+extern bool synchdb_log_event_on_error;
+extern char * g_eventStr;
 
 /* data transformation related hash tables */
 static HTAB * dataCacheHash;
@@ -167,9 +169,10 @@ DatatypeHashEntry oracle_defaultTypeMappings[] =
 	{{"NUMBER(38,0)", false}, "NUMERIC", -1},
 	{{"NUMBER", false}, "NUMERIC", -1},
 	{{"NUMERIC", false}, "NUMERIC", -1},
+	{{"DATE", false}, "TIMESTAMP", -1},
 	{{"LONG", false}, "TEXT", -1},
 	{{"INTERVAL DAY TO SECOND", false}, "INTERVAL DAY TO SECOND", -1},
-	{{"INTERVAL YEAR TO MONTH", false}, "INTERVAL YEAR TO MONTH", -1},
+	{{"INTERVAL YEAR TO MONTH", false}, "INTERVAL YEAR TO MONTH", 0},
 	{{"TIMESTAMP", false}, "TIMESTAMP", -1},
 	{{"TIMESTAMP WITH LOCAL TIME ZONE", false}, "TIMESTAMPTZ", -1},
 	{{"TIMESTAMP WITH TIME ZONE", false}, "TIMESTAMPTZ", -1},
@@ -911,6 +914,142 @@ getPathElementJsonb(Jsonb * jb, char * path)
 	return out;
 }
 
+static HTAB *
+build_schema_jsonpos_hash(Jsonb * jb)
+{
+	HTAB * jsonposhash;
+	HASHCTL hash_ctl;
+	Jsonb * schemadata = NULL;
+	JsonbIterator *it;
+	JsonbValue v;
+	JsonbIteratorToken r;
+	char * key = NULL;
+	char * value = NULL;
+	bool inarray = false, pause = false;
+	int jsonpos = 0;
+	NameJsonposEntry * entry;
+	bool found = false;
+	int j = 0;
+
+	memset(&hash_ctl, 0, sizeof(hash_ctl));
+	hash_ctl.keysize = NAMEDATALEN;
+	hash_ctl.entrysize = sizeof(NameJsonposEntry);
+	hash_ctl.hcxt = CurrentMemoryContext;
+
+	jsonposhash = hash_create("Name to jsonpos Hash Table",
+							512, // limit to 512 columns max
+							&hash_ctl,
+							HASH_ELEM | HASH_CONTEXT);
+
+	schemadata = getPathElementJsonb(jb, "schema.fields.0.fields");
+	if (schemadata)
+	{
+		it = JsonbIteratorInit(&schemadata->root);
+		while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
+		{
+			switch (r)
+			{
+				case WJB_BEGIN_OBJECT:
+					elog(DEBUG1, "start of object (%s)", key ? key : "null");
+					break;
+				case WJB_END_OBJECT:
+					elog(DEBUG1, "end of object (%s)", key ? key : "null");
+					break;
+				case WJB_BEGIN_ARRAY:
+					elog(DEBUG1, "start of array (%s)",
+							key ? key : "null");
+					if (inarray == false)
+						inarray = true;
+					else
+						pause = true;
+					break;
+				case WJB_END_ARRAY:
+					elog(DEBUG1, "end of array (%s)", key ? key : "null");
+					if (pause)
+						pause = false;
+					break;
+				case WJB_KEY:
+					if (pause)
+						break;
+					key = pnstrdup(v.val.string.val, v.val.string.len);
+					elog(DEBUG1, "Key: %s", key);
+					break;
+				case WJB_VALUE:
+				case WJB_ELEM:
+					if (pause)
+						break;
+					switch (v.type)
+					{
+						case jbvNull:
+							elog(DEBUG1, "Value: NULL");
+							value = pnstrdup("NULL", strlen("NULL"));
+							break;
+						case jbvString:
+							value = pnstrdup(v.val.string.val, v.val.string.len);
+							elog(DEBUG1, "String Value: %s", value);
+							break;
+						case jbvNumeric:
+						{
+							value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
+							elog(DEBUG1, "Numeric Value: %s", value);
+							break;
+						}
+						case jbvBool:
+							elog(DEBUG1, "Boolean Value: %s", v.val.boolean ? "true" : "false");
+							if (v.val.boolean)
+								value = pnstrdup("true", strlen("true"));
+							else
+								value = pnstrdup("false", strlen("false"));
+							break;
+						case jbvBinary:
+							elog(DEBUG1, "Binary Value: not handled yet");
+							value = pnstrdup("NULL", strlen("NULL"));
+							break;
+						default:
+							elog(DEBUG1, "Unknown value type: %d", v.type);
+							value = pnstrdup("NULL", strlen("NULL"));
+							break;
+					}
+				break;
+				default:
+					elog(WARNING, "Unknown token: %d", r);
+					break;
+			}
+
+			/* check if we have a key - value pair */
+			if (key != NULL && value != NULL)
+			{
+				/* we are only interested in column name and their position in the schema section */
+				if (!strcasecmp(key, "field"))
+				{
+					elog(DEBUG1, "CONSUMING field = %s", value);
+
+					for (j = 0; j < strlen(value); j++)
+						value[j] = (char) pg_tolower((unsigned char) value[j]);
+
+					entry = (NameJsonposEntry *) hash_search(jsonposhash, value, HASH_ENTER, &found);
+					if (!found)
+					{
+						strlcpy(entry->name, value, NAMEDATALEN);
+						entry->jsonpos = jsonpos;
+						elog(DEBUG1, "Inserted name '%s' with jsonos %d", entry->name, entry->jsonpos);
+					}
+					else
+					{
+						elog(DEBUG1, "Name '%s' already exists with jsonpos %d", entry->name, entry->jsonpos);
+					}
+					jsonpos++;
+				}
+				pfree(key);
+				pfree(value);
+				key = NULL;
+				value = NULL;
+			}
+		}
+	}
+	return jsonposhash;
+}
+
 /*
  * destroyDBZDDL
  *
@@ -1456,8 +1595,12 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 			 */
 			remove_precision(col->typeName, &removed);
 
-			/* if precision or size is removed, make size = scale, and empty scale */
-			if (removed)
+			/*
+			 * for INTERVAL DAY TO SECOND or if precision operators have been removed previously,
+			 * we need to make size = scale, and empty the scale to maintain compatibility in
+			 * PostgreSQL.
+			 */
+			if ((!strcasecmp(col->typeName, "INTERVAL DAY TO SECOND") && col->scale > 0) || removed)
 			{
 				col->length = col->scale;
 				col->scale = 0;
@@ -1680,7 +1823,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
  * This functions build the ALTER COLUM SQL clauses based on given inputs
  */
 static char *
-composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols, TupleDesc tupdesc)
+composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols, TupleDesc tupdesc, Relation rel)
 {
 	ListCell * cell;
 	int attnum = 1;
@@ -1689,9 +1832,12 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 	char * mappedColumnName = NULL;
 	char * ret = NULL;
 	bool found = false;
+	Bitmapset * pkattrs;
+	bool atleastone = false;
 
 	initStringInfo(&colNameObjId);
 	initStringInfo(&strinfo);
+	pkattrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_PRIMARY_KEY);
 
 	foreach(cell, dbzcols)
 	{
@@ -1718,6 +1864,10 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 			if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
 			{
 				found = true;
+
+				/* skip ALTER on primary key columns */
+				if (pkattrs != NULL && bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
+					continue;
 
 				/* check data type */
 				appendStringInfo(&strinfo, "ALTER COLUMN %s SET DATA TYPE",
@@ -1776,6 +1926,7 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 							mappedColumnName);
 				}
 				appendStringInfo(&strinfo, ",");
+				atleastone = true;
 			}
 		}
 		if (!found)
@@ -1799,6 +1950,13 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 
 	if(strinfo.data)
 		pfree(strinfo.data);
+
+	if (pkattrs != NULL)
+		bms_free(pkattrs);
+
+	/* no column altered, return null */
+	if (!atleastone)
+		return NULL;
 
 	return ret;
 }
@@ -2132,7 +2290,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			elog(ERROR, "%s", msg);
 		}
 
-		elog(WARNING, "namespace %s.%s has PostgreSQL OID %d", schema, table, tableoid);
+		elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", schema, table, tableoid);
 
 		rel = table_open(tableoid, NoLock);
 		tupdesc = RelationGetDescr(rel);
@@ -2271,7 +2429,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		else
 		{
 			char * alterclause = NULL;
-			alterclause = composeAlterColumnClauses(dbzddl->id, type, dbzddl->columns, tupdesc);
+			alterclause = composeAlterColumnClauses(dbzddl->id, type, dbzddl->columns, tupdesc, rel);
 			if (alterclause)
 			{
 				appendStringInfo(&strinfo, "%s", alterclause);
@@ -2637,7 +2795,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 				{
 					set_shm_connector_errmsg(myConnectorId, "no time representation available to"
 							"process DATEOID value");
-					elog(ERROR, "no time representation available to process DATEOID value");
+					elog(ERROR, "no time representation available to process DATEOID value for %s", colval->name);
 				}
 			}
 
@@ -2718,7 +2876,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 				{
 					set_shm_connector_errmsg(myConnectorId, "no time representation available to"
 							"process TIMESTAMPOID value");
-					elog(ERROR, "no time representation available to process TIMESTAMPOID value");
+					elog(ERROR, "no time representation available to process TIMESTAMPOID value for %s", colval->name);
 				}
 			}
 			tm_info = gmtime(&seconds);
@@ -2794,7 +2952,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 				{
 					set_shm_connector_errmsg(myConnectorId, "no time representation available to"
 							"process TIMEOID value");
-					elog(ERROR, "no time representation available to process TIMEOID value");
+					elog(ERROR, "no time representation available to process TIMEOID value for %s", colval->name);
 				}
 			}
 			if (colval->typemod > 0)
@@ -2868,7 +3026,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 				{
 					set_shm_connector_errmsg(myConnectorId, "no interval representation available to"
 							"process INTERVALOID value");
-					elog(ERROR, "no interval representation available to process INTERVALOID value");
+					elog(ERROR, "no interval representation available to process INTERVALOID value for %s", colval->name);
 				}
 			}
 
@@ -3190,6 +3348,8 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 		{
 			if (synchdb_dml_use_spi)
 			{
+				bool atleastone = false;
+
 				/* --- Convert to use SPI to handler DML --- */
 				appendStringInfo(&strinfo, "DELETE FROM %s WHERE ", dbzdml->mappedObjectId);
 				foreach(cell, dbzdml->columnValuesBefore)
@@ -3197,7 +3357,6 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					char * data;
 
-					/* only put primary key columns in WHERE clause */
 					if (!colval->ispk)
 						continue;
 
@@ -3213,11 +3372,29 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 						appendStringInfo(&strinfo, "%s", "null");
 					}
 					appendStringInfo(&strinfo, " AND ");
+					atleastone = true;
 				}
-				/* remove extra " AND " */
-				strinfo.data[strinfo.len - 5] = '\0';
-				strinfo.len = strinfo.len - 5;
 
+				if (atleastone)
+				{
+					/* remove extra " AND " */
+					strinfo.data[strinfo.len - 5] = '\0';
+					strinfo.len = strinfo.len - 5;
+				}
+				else
+				{
+					/*
+					 * no primary key to use as WHERE clause, logs a warning and skip this operation
+					 * for now
+					 */
+					elog(WARNING, "no primary key available to build DELETE query for table %s. Operation"
+							" skipped. Set synchdb.dml_use_spi = false to support DELETE without primary key",
+							dbzdml->mappedObjectId);
+
+					pfree(strinfo.data);
+					destroyPGDML(pgdml);
+					return NULL;
+				}
 				appendStringInfo(&strinfo, ";");
 			}
 			else
@@ -3251,6 +3428,8 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 		{
 			if (synchdb_dml_use_spi)
 			{
+				bool atleastone = false;
+
 				/* --- Convert to use SPI to handler DML --- */
 				appendStringInfo(&strinfo, "UPDATE %s SET ", dbzdml->mappedObjectId);
 				foreach(cell, dbzdml->columnValuesAfter)
@@ -3280,7 +3459,6 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					char * data;
 
-					/* only put primary key columns in WHERE clause */
 					if (!colval->ispk)
 						continue;
 
@@ -3296,12 +3474,29 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 						appendStringInfo(&strinfo, "%s", "null");
 					}
 					appendStringInfo(&strinfo, " AND ");
+					atleastone = true;
 				}
 
-				/* remove extra " AND " */
-				strinfo.data[strinfo.len - 5] = '\0';
-				strinfo.len = strinfo.len - 5;
+				if (atleastone)
+				{
+					/* remove extra " AND " */
+					strinfo.data[strinfo.len - 5] = '\0';
+					strinfo.len = strinfo.len - 5;
+				}
+				else
+				{
+					/*
+					 * no primary key to use as WHERE clause, logs a warning and skip this operation
+					 * for now
+					 */
+					elog(WARNING, "no primary key available to build UPDATE query for table %s. Operation"
+							" skipped. Set synchdb.dml_use_spi = false to support UPDATE without primary key",
+							dbzdml->mappedObjectId);
 
+					pfree(strinfo.data);
+					destroyPGDML(pgdml);
+					return NULL;
+				}
 				appendStringInfo(&strinfo, ";");
 			}
 			else
@@ -3369,15 +3564,31 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
  * this function fetches additional parameters from Jsonb based on the given column data types
  */
 static void
-get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefore, int pos)
+get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefore, HTAB * namejsonposhash)
 {
 	StringInfoData strinfo;
+	int pos = 0;
 	char path[SYNCHDB_JSON_PATH_SIZE] = {0};
+	NameJsonposEntry * entry;
+	bool found = false;
 
-	if (!colval || !colval->name || colval->datatype == InvalidOid)
+	if (!colval || !colval->name || colval->datatype == InvalidOid || namejsonposhash == NULL)
 		return;
 
 	initStringInfo(&strinfo);
+
+	/* find the position in schema from namejsonposhash */
+	entry = (NameJsonposEntry *) hash_search(namejsonposhash, colval->name, HASH_FIND, &found);
+	if (found)
+		pos = entry->jsonpos;
+	else
+	{
+		/* dump the JSON change event as additional detail if available */
+		if (synchdb_log_event_on_error && g_eventStr != NULL)
+			elog(LOG, "%s", g_eventStr);
+
+		elog(ERROR, "cannot find schema info for column %s in JSON change event", colval->name);
+	}
 
 	switch (colval->datatype)
 	{
@@ -3426,7 +3637,6 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 					isbefore ? 0 : 1, pos);
 
 			getPathElementString(jb, path, &strinfo, true);
-
 			if (!strcasecmp(strinfo.data, "NULL"))
 				colval->timerep = TIME_UNDEF;	/* has no specific representation */
 			else
@@ -3486,6 +3696,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	int attnum, j = 0;
 
 	HTAB * typeidhash;
+	HTAB * namejsonposhash;
 	HASHCTL hash_ctl;
 	NameOidEntry * entry;
 	bool found;
@@ -3687,7 +3898,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		if (!pkattrs)
 		{
 			/* should it be ERROR? */
-			elog(WARNING, "No primary key found for relation %s", RelationGetRelationName(rel));
+			elog(WARNING, "No primary key found for relation %s. Please use synchdb.dml_use_spi = "
+					"false to support UPDATE and DELETE without primary key",
+					RelationGetRelationName(rel));
 		}
 
 		/* cache tupdesc */
@@ -3709,7 +3922,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 				entry->oid = attr->atttypid;
 				entry->position = attnum;
 				entry->typemod = attr->atttypmod;
-				if (bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
+				if (pkattrs && bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
 					entry->ispk =true;
 
 				elog(DEBUG2, "Inserted name '%s' with OID %u and position %d", entry->name, entry->oid, entry->position);
@@ -3722,6 +3935,18 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		bms_free(pkattrs);
 		table_close(rel, NoLock);
 	}
+
+	/* build another hash to store json value's locations of schema data for correct additional param lookups */
+	namejsonposhash = build_schema_jsonpos_hash(jb);
+	if (!namejsonposhash)
+	{
+		/* dump the JSON change event as additional detail if available */
+		if (synchdb_log_event_on_error && g_eventStr != NULL)
+			elog(LOG, "%s", g_eventStr);
+
+		elog(ERROR, "cannot parse schema section of change event JSON. Abort");
+	}
+
 	switch(op)
 	{
 		case 'c':	/* create: data created after initial sync (INSERT) */
@@ -3898,7 +4123,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							colval->position = entry->position;
 							colval->typemod = entry->typemod;
 							colval->ispk = entry->ispk;
-							get_additional_parameters(jb, colval, false, entry->position - 1);
+							get_additional_parameters(jb, colval, false, namejsonposhash);
 						}
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
@@ -4070,7 +4295,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							colval->position = entry->position;
 							colval->typemod = entry->typemod;
 							colval->ispk = entry->ispk;
-							get_additional_parameters(jb, colval, true, entry->position - 1);
+							get_additional_parameters(jb, colval, true, namejsonposhash);
 						}
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
@@ -4259,9 +4484,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								colval->typemod = entry->typemod;
 								colval->ispk = entry->ispk;
 								if (i == 0)
-									get_additional_parameters(jb, colval, true, entry->position - 1);
+									get_additional_parameters(jb, colval, true, namejsonposhash);
 								else
-									get_additional_parameters(jb, colval, false, entry->position - 1);
+									get_additional_parameters(jb, colval, false, namejsonposhash);
 							}
 							else
 								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
@@ -5089,7 +5314,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats)
     	pgddl = convert2PGDDL(dbzddl, type);
     	if (!pgddl)
     	{
-    		elog(WARNING, "failed to convert DBZ DDL to PG DDL change event");
+    		elog(DEBUG1, "failed to convert DBZ DDL to PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDDL(dbzddl);
