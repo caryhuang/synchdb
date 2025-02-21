@@ -19,7 +19,7 @@ CREATE VIEW synchdb_att_view AS
 		synchdb_attribute.ext_attname,
 		pg_attribute.attname AS pg_attname,
 		synchdb_attribute.ext_atttypename,
-		(SELECT typname FROM pg_type WHERE pg_type.oid = pg_attribute.atttypid) AS pg_atttypid
+		(SELECT typname FROM pg_type WHERE pg_type.oid = pg_attribute.atttypid) AS pg_atttypename
 	FROM synchdb_attribute
 	LEFT JOIN pg_attribute
 	ON synchdb_attribute.attrelid = pg_attribute.attrelid
