@@ -49,6 +49,7 @@
 #define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_offsets.dat"
 #define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
+#define SYNCHDB_ATTRIBUTE_TABLE "synchdb_attribute"
 
 /* Enumerations */
 

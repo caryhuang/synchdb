@@ -54,5 +54,3 @@ LANGUAGE C IMMUTABLE STRICT;
 CREATE VIEW synchdb_stats_view AS SELECT * FROM synchdb_get_stats() AS (name text, ddls bigint, dmls bigint, reads bigint, creates bigint, updates bigint, deletes bigint, bad_events bigint, total_events bigint, batches_done bigint, avg_batch_size bigint);
 
 CREATE TABLE IF NOT EXISTS synchdb_conninfo(name TEXT PRIMARY KEY, isactive BOOL, data JSONB);
-
-
