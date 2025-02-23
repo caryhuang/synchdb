@@ -40,6 +40,7 @@
 #include "replication_agent.h"
 #include "access/xact.h"
 #include "utils/snapmgr.h"
+#include "commands/dbcommands.h"
 
 PG_MODULE_MAGIC;
 
@@ -3522,7 +3523,16 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 				 errmsg("destination database cannot be empty or longer than %d",
 						 SYNCHDB_CONNINFO_DB_NAME_SIZE)));
 	}
-	strlcpy(connInfo.dstdb, text_to_cstring(dst_db_text), SYNCHDB_CONNINFO_DB_NAME_SIZE);
+
+	if (strcasecmp(text_to_cstring(dst_db_text), get_database_name(MyDatabaseId)))
+	{
+		elog(WARNING, "adjusting destination database from %s to the current database %s",
+				text_to_cstring(dst_db_text),
+				get_database_name(MyDatabaseId));
+		strlcpy(connInfo.dstdb, get_database_name(MyDatabaseId), SYNCHDB_CONNINFO_DB_NAME_SIZE);
+	}
+	else
+		strlcpy(connInfo.dstdb, text_to_cstring(dst_db_text), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 
 	/* table can be empty or NULL */
 	if (VARSIZE(table_text) - VARHDRSZ == 0)

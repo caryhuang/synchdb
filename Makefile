@@ -3,7 +3,7 @@
 MODULE_big = synchdb
 
 EXTENSION = synchdb
-DATA = synchdb--1.0.sql
+DATA = synchdb--1.0.sql synchdb--1.0--1.1.sql
 PGFILEDESC = "synchdb - allows logical replication with heterogeneous databases"
 
 REGRESS = synchdb
