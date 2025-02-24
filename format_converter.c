@@ -2055,7 +2055,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				/* table stays as table but no schema */
 				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s (", table);
-				pgddl->schema = NULL;
+				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
 		}
@@ -2205,7 +2205,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				/* table stays as table but no schema */
 				schema = pstrdup("public");
 				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s;", table);
-				pgddl->schema = NULL;
+				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
 		}
@@ -2252,6 +2252,9 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		Relation rel;
 		TupleDesc tupdesc;
 		DataCacheKey cachekey = {0};
+		StringInfoData colNameObjId;
+
+		initStringInfo(&colNameObjId);
 
 		mappedObjName = transform_object_name(dbzddl->id, "table");
 		if (mappedObjName)
@@ -2287,7 +2290,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				/* table stays as table but no schema */
 				schema = pstrdup("public");
 				appendStringInfo(&strinfo, "ALTER TABLE %s ", table);
-				pgddl->schema = NULL;
+				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
 		}
@@ -2363,13 +2366,31 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		pkoid = RelationGetPrimaryKeyIndex(rel);
 		table_close(rel, NoLock);
 
+		/*
+		 * DBZ supplies more columns than what PostreSQL have. This means ALTER
+		 * TABLE ADD COLUMN operation. Let's find which one is to be added.
+		 */
 		if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
 		{
 			altered = false;
 			foreach(cell, dbzddl->columns)
 			{
 				DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
+				char * mappedColumnName = NULL;
+
 				pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
+
+				/* express a column name in fully qualified id */
+				resetStringInfo(&colNameObjId);
+				appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
+				mappedColumnName = transform_object_name(colNameObjId.data, "column");
+				if (mappedColumnName)
+				{
+					elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+							colNameObjId.data, mappedColumnName);
+				}
+				else
+					mappedColumnName = pstrdup(col->name);
 
 				found = false;
 				for (attnum = 1; attnum <= tupdesc->natts; attnum++)
@@ -2380,11 +2401,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					if (strstr(NameStr(attr->attname), "pg.dropped"))
 						continue;
 
-					/*
-					 * fixme, the pg_attribute table name may have been transformed to
-					 * another name, so we need to map it here.
-					 */
-					if (!strcasecmp(col->name, NameStr(attr->attname)))
+					if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
 					{
 						found = true;
 						break;
@@ -2392,7 +2409,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				}
 				if (!found)
 				{
-					elog(DEBUG1, "adding new column %s", col->name);
+					elog(DEBUG1, "adding new column %s", mappedColumnName);
 					altered = true;
 					appendStringInfo(&strinfo, "ADD COLUMN");
 
@@ -2416,7 +2433,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
 					if (strstr(col->typeName, "UNSIGNED"))
 					{
-						appendStringInfo(&strinfo, "CHECK (%s >= 0) ", col->name);
+						appendStringInfo(&strinfo, "CHECK (%s >= 0) ", pgcol->attname);
 					}
 
 					/* is it optional? */
@@ -2455,6 +2472,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				 * and pgddl->columns the same size
 				 */
 				pgddl->columns = lappend(pgddl->columns, pgcol);
+
+				if(mappedColumnName)
+					pfree(mappedColumnName);
+
+				if (colNameObjId.data)
+					pfree(colNameObjId.data);
 			}
 
 			if (altered)
@@ -2489,6 +2512,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		}
 		else if (list_length(dbzddl->columns) < count_active_columns(tupdesc))
 		{
+			/*
+			 * DBZ supplies less columns than what PostreSQL have. This means ALTER
+			 * TABLE DROP COLUMN operation. Let's find which one is to be dropped.
+			 */
 			altered = false;
 			for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 			{
@@ -2502,15 +2529,36 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				foreach(cell, dbzddl->columns)
 				{
 					DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
-					/*
-					 * fixme, the pg_attribute table name may have been transformed to
-					 * another name, so we need to map it here
-					 */
-					if (!strcasecmp(col->name, NameStr(attr->attname)))
+					char * mappedColumnName = NULL;
+
+					/* express a column name in fully qualified id */
+					resetStringInfo(&colNameObjId);
+					appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
+					mappedColumnName = transform_object_name(colNameObjId.data, "column");
+					if (mappedColumnName)
+					{
+						elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+								colNameObjId.data, mappedColumnName);
+					}
+					else
+						mappedColumnName = pstrdup(col->name);
+
+					if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
 					{
 						found = true;
+						if (mappedColumnName)
+							pfree(mappedColumnName);
+
+						if (colNameObjId.data)
+							pfree(colNameObjId.data);
+
 						break;
 					}
+					if (mappedColumnName)
+						pfree(mappedColumnName);
+
+					if (colNameObjId.data)
+						pfree(colNameObjId.data);
 				}
 				if (!found)
 				{
@@ -2543,8 +2591,11 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		}
 		else
 		{
+			/*
+			 * DBZ supplies the same number of columns as what PostreSQL have. This means
+			 * general ALTER TABLE operation.
+			 */
 			char * alterclause = NULL;
-
 			alterclause = composeAlterColumnClauses(dbzddl->id, type, dbzddl->columns, tupdesc, rel, pgddl);
 			if (alterclause)
 			{
@@ -3695,13 +3746,13 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 	NameJsonposEntry * entry;
 	bool found = false;
 
-	if (!colval || !colval->name || colval->datatype == InvalidOid || namejsonposhash == NULL)
+	if (!colval || !colval->remoteColumnName || colval->datatype == InvalidOid || namejsonposhash == NULL)
 		return;
 
 	initStringInfo(&strinfo);
 
-	/* find the position in schema from namejsonposhash */
-	entry = (NameJsonposEntry *) hash_search(namejsonposhash, colval->name, HASH_FIND, &found);
+	/* find the position in schema from namejsonposhash using untransformed remoteColumnName */
+	entry = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
 	if (found)
 		pos = entry->jsonpos;
 	else
@@ -3710,11 +3761,12 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 		if (synchdb_log_event_on_error && g_eventStr != NULL)
 			elog(LOG, "%s", g_eventStr);
 
-		elog(ERROR, "cannot find schema info for column %s in JSON change event", colval->name);
+		elog(ERROR, "cannot find schema info for column %s in JSON change event", colval->remoteColumnName);
 	}
 
 	switch (colval->datatype)
 	{
+
 		case NUMERICOID:
 		{
 			/* spcial numeric case: need to obtain scale and precision from json */
