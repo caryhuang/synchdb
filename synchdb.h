@@ -80,6 +80,7 @@ typedef enum _connectorState
 	STATE_OFFSET_UPDATE,/* in this state when user requests offset update */
 	STATE_RESTARTING,	/* connector is restarting with new snapshot mode */
 	STATE_MEMDUMP,		/* connector is dumping jvm heap memory info */
+	STATE_SCHEMA_SYNC_DONE /* connect has completed schema sync as requested */
 } ConnectorState;
 
 /**
@@ -90,6 +91,7 @@ typedef enum _connectorStage
 	STAGE_UNDEF = 0,
 	STAGE_INITIAL_SNAPSHOT,
 	STAGE_CHANGE_DATA_CAPTURE,
+	STAGE_SCHEMA_SYNC,
 } ConnectorStage;
 
 /**
@@ -162,6 +164,7 @@ typedef struct _ConnectionInfo
     char table[SYNCHDB_CONNINFO_TABLELIST_SIZE];
     bool active;
     char rulefile[SYNCHDB_CONNINFO_RULEFILENAME_SIZE];
+    bool isShcemaSync;
 } ConnectionInfo;
 
 /**
@@ -256,6 +259,7 @@ void set_shm_connector_state(int connectorId, ConnectorState state);
 const char * get_shm_connector_state(int connectorId);
 void set_shm_dbz_offset(int connectorId);
 const char * get_shm_dbz_offset(int connectorId);
+const char * get_shm_connector_name_by_id(int connectorId);
 ConnectorState get_shm_connector_state_enum(int connectorId);
 const char* connectorTypeToString(ConnectorType type);
 void set_shm_connector_stage(int connectorId, ConnectorStage stage);

@@ -127,7 +127,7 @@ PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
 static int dbz_engine_stop(void);
 static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
 static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal,
-		BatchInfo * batchinfo, SynchdbStatistics * myBatchStats);
+		BatchInfo * batchinfo, SynchdbStatistics * myBatchStats, bool schemasync);
 static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode);
 static char *dbz_engine_get_offset(int connectorId);
 static int dbz_mark_batch_complete(int batchid);
@@ -660,7 +660,8 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
  */
 static int
 dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId,
-		bool * dbzExitSignal, BatchInfo * batchinfo, SynchdbStatistics * myBatchStats)
+		bool * dbzExitSignal, BatchInfo * batchinfo, SynchdbStatistics * myBatchStats,
+		bool schemasync)
 {
 	jmethodID getChangeEvents, sizeMethod, getMethod;
 	jobject changeEventsList;
@@ -732,10 +733,16 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 
 	if (size == 0 || size < 0)
 	{
-		/* nothing to process, set current stage to CDC and return */
-		if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+		/* nothing to process, set proper stage and return */
+		if (schemasync)
 		{
-			set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+			if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
+				set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+		}
+		else
+		{
+			if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+				set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 		}
 		(*env)->DeleteLocalRef(env, changeEventsList);
 		(*env)->DeleteLocalRef(env, listClass);
@@ -819,7 +826,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 				g_eventStr = eventStr;
 
 			/* change event message, send to format converter */
-			if (fc_processDBZChangeEvent(eventStr, myBatchStats) != 0)
+			if (fc_processDBZChangeEvent(eventStr, myBatchStats, schemasync, get_shm_connector_name_by_id(myConnectorId)) != 0)
 			{
 				elog(DEBUG1, "dbz_engine_get_change: Failed to process event at index %d", i);
 			}
@@ -1295,6 +1302,8 @@ connectorStateAsString(ConnectorState state)
 		return "restarting";
 	case STATE_MEMDUMP:
 		return "dumping memory";
+	case STATE_SCHEMA_SYNC_DONE:
+		return "schema sync done";
 	}
 	return "UNKNOWN";
 }
@@ -1786,7 +1795,8 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 				myBatchInfo.batchSize = 0;
 				memset(&myBatchStats, 0, sizeof(myBatchStats));
 
-				dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal, &myBatchInfo, &myBatchStats);
+				dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
+						&myBatchInfo, &myBatchStats, connInfo->isShcemaSync);
 
 				/*
 				 * if a valid batchid is set by dbz_engine_get_change(), it means we have
@@ -1808,6 +1818,16 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 			case STATE_PAUSED:
 			{
 				/* Do nothing when paused */
+				break;
+			}
+			case STATE_SCHEMA_SYNC_DONE:
+			{
+				/* when schema sync is done, we need to exit the connector, so user
+				 * can review the schema translations before CDC or initial data
+				 * copy can begin
+				 */
+				elog(WARNING, "setting dbzexitsignal");
+				dbzExitSignal = true;
 				break;
 			}
 			default:
@@ -2232,6 +2252,11 @@ get_shm_connector_stage(int connectorId)
 			return "change data capture";
 			break;
 		}
+		case STAGE_SCHEMA_SYNC:
+		{
+			return "schema sync";
+			break;
+		}
 		case STAGE_UNDEF:
 		default:
 		{
@@ -2497,6 +2522,23 @@ get_shm_dbz_offset(int connectorId)
 
 	return (sdb_state->connectors[connectorId].dbzoffset[0] != '\0') ?
 			sdb_state->connectors[connectorId].dbzoffset : "no offset";
+}
+
+/*
+ * get_shm_connector_name - Get the unique connector name based on connectorId
+ *
+ * This method gets the name value of the given connector from shared memory
+ *
+ * @param connectorId: Connector ID of interest
+ */
+const char *
+get_shm_connector_name_by_id(int connectorId)
+{
+	if (!sdb_state)
+		return "n/a";
+
+	return (sdb_state->connectors[connectorId].conninfo.name[0] != '\0') ?
+			sdb_state->connectors[connectorId].conninfo.name : "no name";
 }
 
 /*
@@ -2864,6 +2906,11 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 				 errhint("use synchdb_add_conninfo to add one first")));
 
 	snapshotMode = text_to_cstring(snapshotmode_text);
+	if (!strcasecmp(snapshotMode, "schemasync"))
+	{
+		snapshotMode = "no_data";
+		connInfo.isShcemaSync = true;
+	}
 
 	/*
 	 * attach or initialize synchdb shared memory area so we can assign

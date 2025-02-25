@@ -4890,12 +4890,10 @@ init_sqlserver(void)
  * equivalent (pgddl).
  */
 static void
-updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
+updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype, const char * name)
 {
 	ListCell * cell, *cell2;
 	StringInfoData strinfo;
-	int j = 0;
-	Oid schemaoid, tableoid;
 
 	if (!pgddl || !dbzddl)
 		return;
@@ -4906,6 +4904,13 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
 			!strcmp(pgddl->type, "ALTER-ADD") ||
 			!strcmp(pgddl->type, "ALTER"))
 	{
+		int j = 0;
+		bool found = false;
+		Oid schemaoid, tableoid;
+		TransformExpressionHashEntry * entry = NULL;
+		TransformExpressionHashKey key = {0};
+		char * expression = NULL;
+
 		if (list_length(dbzddl->columns) <= 0 || list_length(pgddl->columns) <= 0)
 		{
 			elog(WARNING, "Invalid input column lists. Skipping attribute update");
@@ -4941,8 +4946,8 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
 			elog(ERROR, "%s", msg);
 		}
 
-		appendStringInfo(&strinfo, "INSERT INTO %s (connector, attrelid, attnum, "
-				"ext_tbname, ext_attname, ext_atttypename) VALUES ",
+		appendStringInfo(&strinfo, "INSERT INTO %s (name, type, attrelid, attnum, "
+				"ext_tbname, ext_attname, ext_atttypename, transform) VALUES ",
 				SYNCHDB_ATTRIBUTE_TABLE);
 
 		forboth(cell, dbzddl->columns, cell2, pgddl->columns)
@@ -4953,29 +4958,58 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
 			if (pgcol->attname == NULL || pgcol->atttype == NULL)
 				continue;
 
-			appendStringInfo(&strinfo, "(lower('%s'),%d,%d,'%s','%s','%s'),",
+			/* get the transform expression of this column data if exists */
+			if (transformExpressionHash)
+			{
+				snprintf(key.extObjName, sizeof(key.extObjName), "%s.%s", dbzddl->id, col->name);
+				entry = (TransformExpressionHashEntry *) hash_search(transformExpressionHash, &key, HASH_FIND, &found);
+				if (!found)
+				{
+					elog(DEBUG1, "no data transformation needed for %s", key.extObjName);
+					expression = NULL;
+				}
+				else
+				{
+					/* return the expression to run */
+					elog(DEBUG1, "%s needs data transformation with expression '%s'",
+							key.extObjName, entry->pgsqlTransExpress);
+					expression = escapeSingleQuote(entry->pgsqlTransExpress, true);
+				}
+			}
+			else
+				expression = NULL;
+
+			appendStringInfo(&strinfo, "(lower('%s'),lower('%s'),%d,%d,'%s','%s','%s', %s),",
+					name,
 					connectorTypeToString(conntype),
 					tableoid,
 					pgcol->position,
 					dbzddl->id,
 					col->name,
-					col->typeName);
+					col->typeName,
+					expression == NULL ? "null" : expression);
 		}
 		/* remove extra "," */
 		strinfo.data[strinfo.len - 1] = '\0';
 		strinfo.len = strinfo.len - 1;
 
-		appendStringInfo(&strinfo, " ON CONFLICT(connector, attrelid, attnum) "
+		appendStringInfo(&strinfo, " ON CONFLICT(name, type, attrelid, attnum) "
 				"DO UPDATE SET "
 				"ext_tbname = EXCLUDED.ext_tbname,"
 				"ext_attname = EXCLUDED.ext_attname,"
-				"ext_atttypename = EXCLUDED.ext_atttypename; ");
+				"ext_atttypename = EXCLUDED.ext_atttypename,"
+				"transform = EXCLUDED.transform; ");
 	}
 	else if (!strcmp(pgddl->type, "DROP"))
 	{
-		appendStringInfo(&strinfo, "DELETE FROM %s WHERE LOWER(ext_tbname) = LOWER('%s')",
+		appendStringInfo(&strinfo, "DELETE FROM %s "
+				"WHERE lower(ext_tbname) = lower('%s') AND "
+				"lower(name) = lower('%s') AND "
+				"lower(type) = lower('%s');",
 				SYNCHDB_ATTRIBUTE_TABLE,
-				dbzddl->id);
+				dbzddl->id,
+				name,
+				connectorTypeToString(conntype));
 	}
 	else if (!strcmp(pgddl->type, "ALTER-DROP"))
 	{
@@ -4990,10 +5024,14 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
 			appendStringInfo(&strinfo, "UPDATE %s SET "
 					"ext_attname = '........synchdb.dropped.%d........',"
 					"ext_atttypename = null WHERE "
-					"lower(ext_attname) = lower('%s');",
+					"lower(ext_attname) = lower('%s') AND "
+					"lower(name) = lower('%s') AND "
+					"lower(type) = lower('%s');",
 					SYNCHDB_ATTRIBUTE_TABLE,
 					pgcol->position,
-					pgcol->attname);
+					pgcol->attname,
+					name,
+					connectorTypeToString(conntype));
 		}
 	}
 	else
@@ -5545,7 +5583,7 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
  * Main function to process Debezium change event
  */
 int
-fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats)
+fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, bool schemasync, const char * name)
 {
 	Datum jsonb_datum;
 	Jsonb *jb;
@@ -5573,8 +5611,16 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats)
     getPathElementString(jb, "payload.source.snapshot", &strinfo, true);
     if (!strcmp(strinfo.data, "true") || !strcmp(strinfo.data, "last"))
     {
-    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
-    		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+    	if (schemasync)
+    	{
+        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
+        		set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+    	}
+    	else
+    	{
+        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+        		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+    	}
     }
     else
     {
@@ -5636,7 +5682,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats)
     		return -1;
     	}
 		/* (4) update attribute map table */
-    	updateSynchdbAttribute(dbzddl, pgddl, type);
+    	updateSynchdbAttribute(dbzddl, pgddl, type, name);
 
 		/* (5) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
