@@ -50,6 +50,8 @@
 #define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
 #define SYNCHDB_ATTRIBUTE_TABLE "synchdb_attribute"
+#define SYNCHDB_OBJECT_MAPPING_TABLE "synchdb_objmap"
+#define SYNCHDB_ATTRIBUTE_VIEW "synchdb_att_view"
 
 /* Enumerations */
 
@@ -80,7 +82,8 @@ typedef enum _connectorState
 	STATE_OFFSET_UPDATE,/* in this state when user requests offset update */
 	STATE_RESTARTING,	/* connector is restarting with new snapshot mode */
 	STATE_MEMDUMP,		/* connector is dumping jvm heap memory info */
-	STATE_SCHEMA_SYNC_DONE /* connect has completed schema sync as requested */
+	STATE_SCHEMA_SYNC_DONE, /* connect has completed schema sync as requested */
+	STATE_RELOAD_OBJMAP, /* connect is reloading object mapping */
 } ConnectorState;
 
 /**
@@ -248,6 +251,16 @@ typedef struct _SynchdbSharedState
 	LWLock		lock;		/* mutual exclusion */
 	ActiveConnectors * connectors;
 } SynchdbSharedState;
+
+typedef struct _ObjectMap
+{
+	char objtype[SYNCHDB_CONNINFO_NAME_SIZE];
+	char srcobj[SYNCHDB_CONNINFO_NAME_SIZE];
+	char dstobj[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
+	char curr_pg_tbname[SYNCHDB_CONNINFO_NAME_SIZE];
+	char curr_pg_attname[SYNCHDB_CONNINFO_NAME_SIZE];
+	char curr_pg_atttypename[SYNCHDB_CONNINFO_NAME_SIZE];
+} ObjectMap;
 
 /* Function prototypes */
 const char * get_shm_connector_name(ConnectorType type);

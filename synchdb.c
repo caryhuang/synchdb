@@ -57,6 +57,8 @@ PG_FUNCTION_INFO_V1(synchdb_restart_connector);
 PG_FUNCTION_INFO_V1(synchdb_log_jvm_meminfo);
 PG_FUNCTION_INFO_V1(synchdb_get_stats);
 PG_FUNCTION_INFO_V1(synchdb_reset_stats);
+PG_FUNCTION_INFO_V1(synchdb_add_objmap);
+PG_FUNCTION_INFO_V1(synchdb_reload_objmap);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -143,7 +145,7 @@ static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorTyp
 static void setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode);
 static void initialize_jvm(void);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
-static void main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
+static void main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
 static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass);
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
@@ -734,16 +736,9 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	if (size == 0 || size < 0)
 	{
 		/* nothing to process, set proper stage and return */
-		if (schemasync)
-		{
-			if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
-				set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
-		}
-		else
-		{
-			if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
-				set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
-		}
+		if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+			set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+
 		(*env)->DeleteLocalRef(env, changeEventsList);
 		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
@@ -1303,7 +1298,9 @@ connectorStateAsString(ConnectorState state)
 	case STATE_MEMDUMP:
 		return "dumping memory";
 	case STATE_SCHEMA_SYNC_DONE:
-		return "schema sync done";
+		return "schema sync";
+	case STATE_RELOAD_OBJMAP:
+		return "reloading objmap";
 	}
 	return "UNKNOWN";
 }
@@ -1564,17 +1561,21 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 	}
 	else if (reqcopy->reqstate == STATE_MEMDUMP)
 	{
-		/* Handle offset update request */
-		elog(LOG, "Requesting memdump for %s connector",
-				connInfo->name);
+		ConnectorState oldstate = get_shm_connector_state_enum(connectorId);
 
+		elog(LOG, "Requesting memdump for %s connector", connInfo->name);
 		set_shm_connector_state(connectorId, STATE_MEMDUMP);
-		/* todo: call the java routine to dump jvm heap memory summary in log */
-
 		dbz_engine_memory_dump();
+		set_shm_connector_state(connectorId, oldstate);
+	}
+	else if (reqcopy->reqstate == STATE_RELOAD_OBJMAP)
+	{
+		ConnectorState oldstate = get_shm_connector_state_enum(connectorId);
 
-		/* after new offset is set, change state back to STATE_PAUSED */
-		set_shm_connector_state(connectorId, STATE_SYNCING);
+		elog(LOG, "Reloading objmap for %s connector", connInfo->name);
+		set_shm_connector_state(connectorId, STATE_RELOAD_OBJMAP);
+		fc_load_objmap(connInfo->name, type);
+		set_shm_connector_state(connectorId, oldstate);
 	}
 	else
 	{
@@ -1761,7 +1762,7 @@ start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInf
  * @param snapshotMode: Snapshot mode requested
  */
 static void
-main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode)
+main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode)
 {
 	ConnectorState currstate;
 	bool dbzExitSignal = false;
@@ -1822,12 +1823,24 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 			}
 			case STATE_SCHEMA_SYNC_DONE:
 			{
-				/* when schema sync is done, we need to exit the connector, so user
-				 * can review the schema translations before CDC or initial data
-				 * copy can begin
+				/*
+				 * when schema sync is done, we will put connector into pause state so the user
+				 * can review the table schema and attribute mappings before proceeding.
 				 */
-				elog(WARNING, "setting dbzexitsignal");
-				dbzExitSignal = true;
+				elog(DEBUG1, "shut down dbz engine...");
+				if (dbz_engine_stop())
+				{
+					elog(WARNING, "failed to stop dbz engine...");
+				}
+				/* change snapshot mode back to normal */
+				if (snapshotMode)
+				{
+					pfree(snapshotMode);
+					snapshotMode = pstrdup("initial");
+				}
+				/* exit schema sync mode */
+				connInfo->isShcemaSync = false;
+				set_shm_connector_state(myConnectorId, STATE_PAUSED);
 				break;
 			}
 			default:
@@ -2835,6 +2848,8 @@ synchdb_engine_main(Datum main_arg)
 	if (connInfo.rulefile && strlen(connInfo.rulefile) > 0 && strcasecmp(connInfo.rulefile, "null"))
 		fc_load_rules(connectorType, connInfo.rulefile);
 
+	fc_load_objmap(connInfo.name, connectorType);
+
 	/* Initialize JVM */
 	initialize_jvm();
 
@@ -3616,7 +3631,11 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 				 errmsg("rule filename cannot be longer than %d",
 						 SYNCHDB_CONNINFO_RULEFILENAME_SIZE)));
 	else
-		strlcpy(connInfo.rulefile, text_to_cstring(rulefile_text), SYNCHDB_CONNINFO_RULEFILENAME_SIZE);
+	{
+		/* todo: remove rulefile parameter */
+		elog(WARNING, "nullify rulefile parameter as it is no longer used. To be removed later");
+		strlcpy(connInfo.rulefile, "null", SYNCHDB_CONNINFO_RULEFILENAME_SIZE);
+	}
 
 	appendStringInfo(&strinfo, "INSERT INTO %s (name, isactive, data)"
 			" VALUES ('%s', %s, jsonb_build_object('hostname', '%s', "
@@ -3790,5 +3809,98 @@ synchdb_log_jvm_meminfo(PG_FUNCTION_ARGS)
 
 	elog(WARNING, "sent memdump request interrupt to dbz connector %s (%d)",
 			text_to_cstring(name_text), connectorId);
+	PG_RETURN_INT32(0);
+}
+
+Datum
+synchdb_add_objmap(PG_FUNCTION_ARGS)
+{
+	/* Parse input arguments */
+	Name name = PG_GETARG_NAME(0);
+	Name objtype = PG_GETARG_NAME(1);
+	Name srcobj = PG_GETARG_NAME(2);
+	text * dstobj = PG_GETARG_TEXT_PP(3);
+
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	appendStringInfo(&strinfo, "INSERT INTO %s (name, objtype, srcobj, dstobj)"
+			" VALUES (trim(lower('%s')), trim(lower('%s')), trim(lower('%s')), '%s')",
+			SYNCHDB_OBJECT_MAPPING_TABLE,
+			NameStr(*name),
+			NameStr(*objtype),
+			NameStr(*srcobj),
+			escapeSingleQuote(text_to_cstring(dstobj), false));
+
+	appendStringInfo(&strinfo, " ON CONFLICT(name, objtype, srcobj) "
+			"DO UPDATE SET "
+			"dstobj = EXCLUDED.dstobj;");
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_reload_objmap
+ *
+ * This function forces a connector to reload objmap table entries
+ */
+Datum
+synchdb_reload_objmap(PG_FUNCTION_ARGS)
+{
+	int connectorId = -1;
+	pid_t pid;
+	SynchdbRequest *req;
+
+	/* Parse input arguments */
+	Name name = PG_GETARG_NAME(0);
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						NameStr(*name)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
+	pid = get_shm_connector_pid(connectorId);
+	if (pid == InvalidPid)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
+				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
+
+	/* point to the right construct based on type */
+	req = &(sdb_state->connectors[connectorId].req);
+
+	/* an active state change request is currently in progress */
+	if (req->reqstate != STATE_UNDEF)
+		ereport(ERROR,
+				(errmsg("an active request is currently active for connector %s",
+						NameStr(*name)),
+				 errhint("wait for it to finish and try again later")));
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	req->reqstate = STATE_RELOAD_OBJMAP;
+	LWLockRelease(&sdb_state->lock);
+
+	elog(WARNING, "sent reload objmap request interrupt to dbz connector %s (%d)",
+			NameStr(*name), connectorId);
 	PG_RETURN_INT32(0);
 }

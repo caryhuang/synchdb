@@ -8,8 +8,23 @@ CREATE TABLE IF NOT EXISTS synchdb_attribute (
     ext_tbname name,
     ext_attname name,
     ext_atttypename name,
-    transform text,
     PRIMARY KEY (name, type, attrelid, attnum)
+);
+
+CREATE OR REPLACE FUNCTION synchdb_add_objmap(name, name, name, text) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_reload_objmap(name) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE TABLE IF NOT EXISTS synchdb_objmap (
+    name name,
+    objtype name,
+    srcobj name,
+    dstobj text,
+    PRIMARY KEY (name, objtype, srcobj)
 );
 
 CREATE VIEW synchdb_att_view AS
@@ -22,11 +37,12 @@ CREATE VIEW synchdb_att_view AS
 		synchdb_attribute.ext_attname,
 		pg_attribute.attname AS pg_attname,
 		synchdb_attribute.ext_atttypename,
-		(SELECT typname FROM pg_type WHERE pg_type.oid = pg_attribute.atttypid) AS pg_atttypename,
-		synchdb_attribute.transform AS trasnform
+		format_type(pg_attribute.atttypid, NULL) AS pg_atttypename,
+		(SELECT dstobj FROM synchdb_objmap WHERE synchdb_objmap.objtype='transform' AND synchdb_objmap.srcobj = synchdb_attribute.ext_tbname || '.' || synchdb_attribute.ext_attname) AS transform
 	FROM synchdb_attribute
 	LEFT JOIN pg_attribute
 	ON synchdb_attribute.attrelid = pg_attribute.attrelid
 	AND synchdb_attribute.attnum = pg_attribute.attnum
 	ORDER BY (name, type, ext_tbname, synchdb_attribute.attnum);
+
 
