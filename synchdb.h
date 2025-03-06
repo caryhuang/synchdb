@@ -255,6 +255,7 @@ typedef struct _SynchdbSharedState
 typedef struct _ObjectMap
 {
 	char objtype[SYNCHDB_CONNINFO_NAME_SIZE];
+	bool enabled;
 	char srcobj[SYNCHDB_CONNINFO_NAME_SIZE];
 	char dstobj[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
 	char curr_pg_tbname[SYNCHDB_CONNINFO_NAME_SIZE];

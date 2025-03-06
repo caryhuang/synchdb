@@ -62,6 +62,7 @@ PG_FUNCTION_INFO_V1(synchdb_reload_objmap);
 PG_FUNCTION_INFO_V1(synchdb_add_extra_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_extra_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_del_objmap);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -3774,8 +3775,8 @@ synchdb_add_objmap(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	appendStringInfo(&strinfo, "INSERT INTO %s (name, objtype, srcobj, dstobj)"
-			" VALUES (trim(lower('%s')), trim(lower('%s')), trim(lower('%s')), '%s')",
+	appendStringInfo(&strinfo, "INSERT INTO %s (name, objtype, enabled, srcobj, dstobj)"
+			" VALUES (trim(lower('%s')), trim(lower('%s')), true, trim(lower('%s')), '%s')",
 			SYNCHDB_OBJECT_MAPPING_TABLE,
 			NameStr(*name),
 			NameStr(*objtype),
@@ -3784,6 +3785,7 @@ synchdb_add_objmap(PG_FUNCTION_ARGS)
 
 	appendStringInfo(&strinfo, " ON CONFLICT(name, objtype, srcobj) "
 			"DO UPDATE SET "
+			"enabled = EXCLUDED.enabled,"
 			"dstobj = EXCLUDED.dstobj;");
 
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
@@ -3990,5 +3992,33 @@ synchdb_del_conninfo(PG_FUNCTION_ARGS)
 	appendStringInfo(&strinfo, "DELETE FROM %s WHERE name = '%s'",
 			SYNCHDB_CONNINFO_TABLE,
 			NameStr(*name));
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_del_objmap
+ *
+ * This function marks a objmap rule as disabled
+ */
+Datum
+synchdb_del_objmap(PG_FUNCTION_ARGS)
+{
+	/* Parse input arguments */
+	Name name = PG_GETARG_NAME(0);
+	Name objtype = PG_GETARG_NAME(1);
+	Name srcobj = PG_GETARG_NAME(2);
+
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET "
+			"enabled = false WHERE "
+			"name = '%s' AND objtype = trim(lower('%s')) AND "
+			"srcobj = trim(lower('%s'));",
+			SYNCHDB_OBJECT_MAPPING_TABLE,
+			NameStr(*name),
+			NameStr(*objtype),
+			NameStr(*srcobj));
+
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
 }

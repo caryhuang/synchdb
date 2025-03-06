@@ -5660,8 +5660,8 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 
 	for (i = 0; i < numobjs; i++)
 	{
-		elog(DEBUG1, "type %s, src %s dst %s: (%s) (%s)", objs[i].objtype, objs[i].srcobj, objs[i].dstobj,
-				objs[i].curr_pg_tbname, objs[i].curr_pg_attname);
+		elog(DEBUG1, "type %s, src %s dst %s: (%s) (%s) enabled %d", objs[i].objtype, objs[i].srcobj, objs[i].dstobj,
+				objs[i].curr_pg_tbname, objs[i].curr_pg_attname, objs[i].enabled);
 		/* initialized objectMappingHash if not done yet */
 
 		if (!strcasecmp(objs[i].objtype, "table") || !strcasecmp(objs[i].objtype, "column") )
@@ -5683,55 +5683,68 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 			strlcpy(objmapentry.key.extObjName, objs[i].srcobj, SYNCHDB_OBJ_NAME_SIZE);
 			strlcpy(objmapentry.pgsqlObjName, objs[i].dstobj, SYNCHDB_OBJ_NAME_SIZE);
 
-			objmaplookup = (ObjMapHashEntry *) hash_search(objectMappingHash,
-					&(objmapentry.key), HASH_ENTER, &found);
-
-			/* found or not, just update or insert it */
-			memset(objmaplookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
-			strlcpy(objmaplookup->key.extObjName,
-					objmapentry.key.extObjName,
-					SYNCHDB_OBJ_NAME_SIZE);
-
-			memset(objmaplookup->pgsqlObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
-			strlcpy(objmaplookup->pgsqlObjName,
-					objmapentry.pgsqlObjName,
-					SYNCHDB_OBJ_NAME_SIZE);
-
-			elog(WARNING, "Inserted / updated object mapping '%s(%s)' <-> '%s'", objmaplookup->key.extObjName,
-					objmapentry.key.extObjType, objmaplookup->pgsqlObjName);
-
-			/*
-			 * if this is a table object mapping and that the connector has already created a matching table
-			 * in PostgreSQL, we need to check if the mapped table is the same as the one created. If not
-			 * then the user is requesting to rename the table.
-			 */
-			if (!strcasecmp(objs[i].objtype, "table") && objs[i].curr_pg_tbname[0] != '\0')
+			if (!objs[i].enabled)
 			{
-				/* if dstobj contains no dot(no schema info), we will default to public schema */
-				if (strchr(objs[i].dstobj, '.') == NULL)
-				{
-					char temp[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
-					strlcpy(temp, objs[i].dstobj, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+				/* disable this table or column name mapping rule by removing it from the hash table */
+				objmaplookup = hash_search(objectMappingHash, &(objmapentry.key),
+						HASH_REMOVE, NULL);
 
-					snprintf(&objs[i].dstobj[0], SYNCHDB_TRANSFORM_EXPRESSION_SIZE, "public.%s", temp);
-				}
-
-				if (strcasecmp(objs[i].dstobj, objs[i].curr_pg_tbname))
-				{
-					alter_tbname(objs[i].curr_pg_tbname, objs[i].dstobj);
-				}
+				if (objmaplookup)
+					elog(WARNING, "deleted object mapping '%s(%s)' <-> '%s'", objmaplookup->key.extObjName,
+							objmapentry.key.extObjType, objmaplookup->pgsqlObjName);
 			}
-
-			/*
-			 * if this is a column object mapping and that the connector has already created a matching table
-			 * in PostgreSQL, we need to check if the mapped column is the same as the one created. If not
-			 * then the user is requesting to rename the column.
-			 */
-			if (!strcasecmp(objs[i].objtype, "column") && objs[i].curr_pg_attname[0] != '\0' && objs[i].curr_pg_tbname[0] != '\0')
+			else
 			{
-				if (strcasecmp(objs[i].dstobj, objs[i].curr_pg_attname))
+				objmaplookup = (ObjMapHashEntry *) hash_search(objectMappingHash,
+						&(objmapentry.key), HASH_ENTER, &found);
+
+				/* found or not, just update or insert it */
+				memset(objmaplookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+				strlcpy(objmaplookup->key.extObjName,
+						objmapentry.key.extObjName,
+						SYNCHDB_OBJ_NAME_SIZE);
+
+				memset(objmaplookup->pgsqlObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+				strlcpy(objmaplookup->pgsqlObjName,
+						objmapentry.pgsqlObjName,
+						SYNCHDB_OBJ_NAME_SIZE);
+
+				elog(WARNING, "Inserted / updated object mapping '%s(%s)' <-> '%s'", objmaplookup->key.extObjName,
+						objmapentry.key.extObjType, objmaplookup->pgsqlObjName);
+
+				/*
+				 * if this is a table object mapping and that the connector has already created a matching table
+				 * in PostgreSQL, we need to check if the mapped table is the same as the one created. If not
+				 * then the user is requesting to rename the table.
+				 */
+				if (!strcasecmp(objs[i].objtype, "table") && objs[i].curr_pg_tbname[0] != '\0')
 				{
-					alter_attname(objs[i].curr_pg_tbname, objs[i].curr_pg_attname, objs[i].dstobj);
+					/* if dstobj contains no dot(no schema info), we will default to public schema */
+					if (strchr(objs[i].dstobj, '.') == NULL)
+					{
+						char temp[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
+						strlcpy(temp, objs[i].dstobj, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+
+						snprintf(&objs[i].dstobj[0], SYNCHDB_TRANSFORM_EXPRESSION_SIZE, "public.%s", temp);
+					}
+
+					if (strcasecmp(objs[i].dstobj, objs[i].curr_pg_tbname))
+					{
+						alter_tbname(objs[i].curr_pg_tbname, objs[i].dstobj);
+					}
+				}
+
+				/*
+				 * if this is a column object mapping and that the connector has already created a matching table
+				 * in PostgreSQL, we need to check if the mapped column is the same as the one created. If not
+				 * then the user is requesting to rename the column.
+				 */
+				if (!strcasecmp(objs[i].objtype, "column") && objs[i].curr_pg_attname[0] != '\0' && objs[i].curr_pg_tbname[0] != '\0')
+				{
+					if (strcasecmp(objs[i].dstobj, objs[i].curr_pg_attname))
+					{
+						alter_attname(objs[i].curr_pg_tbname, objs[i].curr_pg_attname, objs[i].dstobj);
+					}
 				}
 			}
 		}
@@ -5758,23 +5771,38 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 			strlcpy(expressentry.key.extObjName, objs[i].srcobj, SYNCHDB_OBJ_NAME_SIZE);
 			strlcpy(expressentry.pgsqlTransExpress, objs[i].dstobj, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
 
-			expressentrylookup = (TransformExpressionHashEntry *) hash_search(transformExpressionHash,
-					&(expressentry.key), HASH_ENTER, &found);
+			if (!objs[i].enabled)
+			{
+				/* disable this transform rule by removing it from the hash table */
+				expressentrylookup = hash_search(transformExpressionHash, &(expressentry.key),
+						HASH_REMOVE, NULL);
 
-			/* found or not, just update or insert it */
-			memset(expressentrylookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
-			strlcpy(expressentrylookup->key.extObjName,
-					expressentry.key.extObjName,
-					SYNCHDB_OBJ_NAME_SIZE);
+				if (expressentrylookup)
+					elog(WARNING, "deleted transform expression mapping '%s' <-> '%s'",
+							expressentrylookup->key.extObjName,
+							expressentrylookup->pgsqlTransExpress);
+			}
+			else
+			{
+				/* add this new transform rule */
+				expressentrylookup = (TransformExpressionHashEntry *) hash_search(transformExpressionHash,
+						&(expressentry.key), HASH_ENTER, &found);
 
-			memset(expressentrylookup->pgsqlTransExpress, 0, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
-			strlcpy(expressentrylookup->pgsqlTransExpress,
-					expressentry.pgsqlTransExpress,
-					SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+				/* found or not, just update or insert it */
+				memset(expressentrylookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+				strlcpy(expressentrylookup->key.extObjName,
+						expressentry.key.extObjName,
+						SYNCHDB_OBJ_NAME_SIZE);
 
-			elog(WARNING, "Inserted / updated transform expression mapping '%s' <-> '%s'",
-					expressentrylookup->key.extObjName,
-					expressentrylookup->pgsqlTransExpress);
+				memset(expressentrylookup->pgsqlTransExpress, 0, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+				strlcpy(expressentrylookup->pgsqlTransExpress,
+						expressentry.pgsqlTransExpress,
+						SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+
+				elog(WARNING, "Inserted / updated transform expression mapping '%s' <-> '%s'",
+						expressentrylookup->key.extObjName,
+						expressentrylookup->pgsqlTransExpress);
+			}
 		}
 		else if (!strcasecmp(objs[i].objtype, "datatype"))
 		{
@@ -5782,6 +5810,18 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 			char * dstcopy = pstrdup(objs[i].dstobj);
 			char * tmp = NULL;
 
+			if (!objs[i].enabled)
+			{
+				/*
+				 * ignore disabled data type rules. We will not attempt to delete data type hash
+				 * tables because it could contain overwritten default entries that we do not want
+				 * to remove
+				 */
+				elog(WARNING, "Ignored disabled data type mapping '%s' <-> '%s'", srccopy, dstcopy);
+				pfree(srccopy);
+				pfree(dstcopy);
+				continue;
+			}
 			memset(&hashentry, 0, sizeof(DatatypeHashEntry));
 
 			strlcpy(hashentry.key.extTypeName, strtok(srccopy, "|"), SYNCHDB_DATATYPE_NAME_SIZE);
@@ -5832,6 +5872,8 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 							entrylookup->pgsqlTypeLength, NULL);
 				}
 			}
+			pfree(srccopy);
+			pfree(dstcopy);
 		}
 	}
 	return true;

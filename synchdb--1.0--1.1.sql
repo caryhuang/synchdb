@@ -22,6 +22,7 @@ LANGUAGE C IMMUTABLE STRICT;
 CREATE TABLE IF NOT EXISTS synchdb_objmap (
     name name,
     objtype name,
+    enabled bool,
     srcobj name,
     dstobj text,
     PRIMARY KEY (name, objtype, srcobj)
@@ -38,7 +39,7 @@ CREATE VIEW synchdb_att_view AS
 		pg_attribute.attname AS pg_attname,
 		synchdb_attribute.ext_atttypename,
 		format_type(pg_attribute.atttypid, NULL) AS pg_atttypename,
-		(SELECT dstobj FROM synchdb_objmap WHERE synchdb_objmap.objtype='transform' AND synchdb_objmap.srcobj = synchdb_attribute.ext_tbname || '.' || synchdb_attribute.ext_attname) AS transform
+		(SELECT dstobj FROM synchdb_objmap WHERE synchdb_objmap.objtype='transform' AND synchdb_objmap.enabled=true AND synchdb_objmap.srcobj = synchdb_attribute.ext_tbname || '.' || synchdb_attribute.ext_attname) AS transform
 	FROM synchdb_attribute
 	LEFT JOIN pg_attribute
 	ON synchdb_attribute.attrelid = pg_attribute.attrelid
@@ -54,5 +55,9 @@ AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION synchdb_del_conninfo(name) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_del_objmap(name, name, name) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;

@@ -1126,7 +1126,7 @@ ra_listObjmaps(const char * name, ObjectMap ** out, int * numout)
 	bool skiptx = false;
 
 	initStringInfo(&strinfo);
-	appendStringInfo(&strinfo, "SELECT objtype, srcobj, dstobj, "
+	appendStringInfo(&strinfo, "SELECT objtype, enabled, srcobj, dstobj, "
 			"(SELECT pg_tbname FROM synchdB_att_view WHERE (ext_tbname=srcobj OR (ext_tbname || '.' || "
 			"ext_attname) = srcobj) AND (objtype='table' OR objtype='column' OR objtype='datatype') "
 			"AND %s.name=%s.name LIMIT 1), "
@@ -1192,21 +1192,32 @@ ra_listObjmaps(const char * name, ObjectMap ** out, int * numout)
 
 		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2);
 		if (value)
-			strlcpy((*out)[i].srcobj, value, SYNCHDB_CONNINFO_NAME_SIZE);
+		{
+			if (strcmp(value, "t") == 0)
+				(*out)[i].enabled = true;
+			else if (strcmp(value, "f") == 0)
+				(*out)[i].enabled = false;
+			else
+				(*out)[i].enabled = true;
+		}
 
 		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 3);
 		if (value)
-			strlcpy((*out)[i].dstobj, value, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+			strlcpy((*out)[i].srcobj, value, SYNCHDB_CONNINFO_NAME_SIZE);
 
 		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4);
 		if (value)
-			strlcpy((*out)[i].curr_pg_tbname, value, SYNCHDB_CONNINFO_NAME_SIZE);
+			strlcpy((*out)[i].dstobj, value, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
 
 		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5);
 		if (value)
-			strlcpy((*out)[i].curr_pg_attname, value, SYNCHDB_CONNINFO_NAME_SIZE);
+			strlcpy((*out)[i].curr_pg_tbname, value, SYNCHDB_CONNINFO_NAME_SIZE);
 
 		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 6);
+		if (value)
+			strlcpy((*out)[i].curr_pg_attname, value, SYNCHDB_CONNINFO_NAME_SIZE);
+
+		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 7);
 		if (value)
 			strlcpy((*out)[i].curr_pg_atttypename, value, SYNCHDB_CONNINFO_NAME_SIZE);
 	}
