@@ -28,6 +28,7 @@
 #define SYNCHDB_CONNINFO_TABLELIST_SIZE 256
 #define SYNCHDB_CONNINFO_RULEFILENAME_SIZE 64
 #define SYNCHDB_CONNINFO_DB_NAME_SIZE 64
+#define SYNCHDB_CONNINFO_KEYSTORE_SIZE 128
 
 #define DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC 100000
 
@@ -152,6 +153,19 @@ typedef struct _BatchInfo
 } BatchInfo;
 
 /**
+ * ExtraConnectionInfo - Extra DBZ Connector parameters are put here. Should
+ * all be optional
+ */
+typedef struct _ExtraConnectionInfo
+{
+	char ssl_mode[SYNCHDB_CONNINFO_NAME_SIZE];
+	char ssl_keystore[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char ssl_keystore_pass[SYNCHDB_CONNINFO_PASSWORD_SIZE];
+	char ssl_truststore[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char ssl_truststore_pass[SYNCHDB_CONNINFO_PASSWORD_SIZE];
+} ExtraConnectionInfo;
+
+/**
  * ConnectionInfo - DBZ Connection info. These are put in shared memory so
  * connector background workers can access when they are spawned.
  */
@@ -166,8 +180,8 @@ typedef struct _ConnectionInfo
 	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE];
     char table[SYNCHDB_CONNINFO_TABLELIST_SIZE];
     bool active;
-    char rulefile[SYNCHDB_CONNINFO_RULEFILENAME_SIZE];
     bool isShcemaSync;
+    ExtraConnectionInfo extra;
 } ConnectionInfo;
 
 /**
@@ -178,20 +192,6 @@ typedef struct _ConnectorName
 {
 	char name[SYNCHDB_CONNINFO_NAME_SIZE];
 } ConnectorName;
-
-/**
- * ExtraConnectionInfo - Extra DBZ Connection info parameters read from the
- * rule file (if specified). These won't be put in shared memory so they
- * are declared as pointers.
- */
-typedef struct _ExtraConnectionInfo
-{
-	char * ssl_mode;
-	char * ssl_keystore;
-	char * ssl_keystore_pass;
-	char * ssl_truststore;
-	char * ssl_truststore_pass;
-} ExtraConnectionInfo;
 
 /**
  * SynchdbRequest - Structure representing a request to change connector state

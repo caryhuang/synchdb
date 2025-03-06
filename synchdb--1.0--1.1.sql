@@ -45,4 +45,14 @@ CREATE VIEW synchdb_att_view AS
 	AND synchdb_attribute.attnum = pg_attribute.attnum
 	ORDER BY (name, type, ext_tbname, synchdb_attribute.attnum);
 
+CREATE OR REPLACE FUNCTION synchdb_add_extra_conninfo(name, name, text, text, text, text) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
 
+CREATE OR REPLACE FUNCTION synchdb_del_extra_conninfo(name) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_del_conninfo(name) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;

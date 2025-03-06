@@ -5204,7 +5204,6 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 	char * key = NULL;
 	char * value = NULL;
 	bool found = 0;
-	StringInfoData strinfo;
 
 	HTAB * rulehash = NULL;
 	DatatypeHashEntry hashentry;
@@ -5607,33 +5606,6 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 			value = NULL;
 		}
 	}
-
-	/* load extra per-connector parameters here if specified */
-	initStringInfo(&strinfo);
-
-	getPathElementString(jb, "ssl_rules.ssl_mode", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
-		extraConnInfo.ssl_mode = pstrdup(strinfo.data);
-
-	getPathElementString(jb, "ssl_rules.ssl_keystore", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
-		extraConnInfo.ssl_keystore = pstrdup(strinfo.data);
-
-	getPathElementString(jb, "ssl_rules.ssl_keystore_pass", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
-		extraConnInfo.ssl_keystore_pass = pstrdup(strinfo.data);
-
-	getPathElementString(jb, "ssl_rules.ssl_truststore", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
-		extraConnInfo.ssl_truststore = pstrdup(strinfo.data);
-
-	getPathElementString(jb, "ssl_rules.ssl_truststore_pass", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
-		extraConnInfo.ssl_truststore_pass = pstrdup(strinfo.data);
-
-	if (strinfo.data)
-		pfree(strinfo.data);
-
 	return true;
 }
 
