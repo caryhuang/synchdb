@@ -163,7 +163,7 @@ ldd synchdb.so
 ```
 
 ## Run SynchDB Test
-Refer to `testenv/README.md` or visit our documentation page [here](https://docs.synchdb.com/user-guide/prepare_tests_env/) to prepare a sample MySQL and SQLServer or Oracle database instances for testing.
+Refer to `testenv/README.md` or visit our documentation page [here](https://docs.synchdb.com/user-guide/prepare_tests_env/) to prepare a sample MySQL, SQL Server or Oracle database instances for testing.
 
 SynchDB extension requires pgcrypto to encrypt certain sensitive credential data. Please make sure it is installed prior to installing SynchDB. Alternatively, you can include `CASCADE` clause in `CREATE EXTENSION` to automatically install dependencies:
 
