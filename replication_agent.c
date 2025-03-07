@@ -924,7 +924,7 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	strlcpy(conninfo->extra.ssl_truststore, TextDatumGetCString(res[12]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
 	strlcpy(conninfo->extra.ssl_truststore_pass, TextDatumGetCString(res[13]) ,SYNCHDB_CONNINFO_PASSWORD_SIZE);
 
-	elog(WARNING, "name %s hostname %s, port %d, user %s pwd %s srcdb %s "
+	elog(DEBUG1, "name %s hostname %s, port %d, user %s pwd %s srcdb %s "
 			"dstdb %s table %s connector %s extras(%s %s %s %s %s)",
 			conninfo->name, conninfo->hostname, conninfo->port,
 			conninfo->user, conninfo->pwd, conninfo->srcdb,
