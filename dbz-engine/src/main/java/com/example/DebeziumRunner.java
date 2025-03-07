@@ -626,6 +626,7 @@ public class DebeziumRunner {
 		if (batchManager != null)
 		{
 			batchManager.shutdown();
+			batchManager = null;
 		}
 		if (engine != null)
 		{

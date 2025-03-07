@@ -70,5 +70,6 @@ int ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** c
 int ra_executeCommand(const char * query);
 int ra_listConnInfoNames(char ** out, int * numout);
 char * ra_transformDataExpression(char * data, char * wkb, char * srid, char * expression);
+int ra_listObjmaps(const char * name, ObjectMap ** out, int * numout);
 
 #endif /* SYNCHDB_REPLICATION_AGENT_H_ */

@@ -28,6 +28,7 @@
 #define SYNCHDB_CONNINFO_TABLELIST_SIZE 256
 #define SYNCHDB_CONNINFO_RULEFILENAME_SIZE 64
 #define SYNCHDB_CONNINFO_DB_NAME_SIZE 64
+#define SYNCHDB_CONNINFO_KEYSTORE_SIZE 128
 
 #define DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC 100000
 
@@ -50,6 +51,8 @@
 #define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
 #define SYNCHDB_ATTRIBUTE_TABLE "synchdb_attribute"
+#define SYNCHDB_OBJECT_MAPPING_TABLE "synchdb_objmap"
+#define SYNCHDB_ATTRIBUTE_VIEW "synchdb_att_view"
 
 /* Enumerations */
 
@@ -80,6 +83,8 @@ typedef enum _connectorState
 	STATE_OFFSET_UPDATE,/* in this state when user requests offset update */
 	STATE_RESTARTING,	/* connector is restarting with new snapshot mode */
 	STATE_MEMDUMP,		/* connector is dumping jvm heap memory info */
+	STATE_SCHEMA_SYNC_DONE, /* connect has completed schema sync as requested */
+	STATE_RELOAD_OBJMAP, /* connect is reloading object mapping */
 } ConnectorState;
 
 /**
@@ -90,6 +95,7 @@ typedef enum _connectorStage
 	STAGE_UNDEF = 0,
 	STAGE_INITIAL_SNAPSHOT,
 	STAGE_CHANGE_DATA_CAPTURE,
+	STAGE_SCHEMA_SYNC,
 } ConnectorStage;
 
 /**
@@ -147,6 +153,19 @@ typedef struct _BatchInfo
 } BatchInfo;
 
 /**
+ * ExtraConnectionInfo - Extra DBZ Connector parameters are put here. Should
+ * all be optional
+ */
+typedef struct _ExtraConnectionInfo
+{
+	char ssl_mode[SYNCHDB_CONNINFO_NAME_SIZE];
+	char ssl_keystore[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char ssl_keystore_pass[SYNCHDB_CONNINFO_PASSWORD_SIZE];
+	char ssl_truststore[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char ssl_truststore_pass[SYNCHDB_CONNINFO_PASSWORD_SIZE];
+} ExtraConnectionInfo;
+
+/**
  * ConnectionInfo - DBZ Connection info. These are put in shared memory so
  * connector background workers can access when they are spawned.
  */
@@ -161,7 +180,8 @@ typedef struct _ConnectionInfo
 	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE];
     char table[SYNCHDB_CONNINFO_TABLELIST_SIZE];
     bool active;
-    char rulefile[SYNCHDB_CONNINFO_RULEFILENAME_SIZE];
+    bool isShcemaSync;
+    ExtraConnectionInfo extra;
 } ConnectionInfo;
 
 /**
@@ -172,20 +192,6 @@ typedef struct _ConnectorName
 {
 	char name[SYNCHDB_CONNINFO_NAME_SIZE];
 } ConnectorName;
-
-/**
- * ExtraConnectionInfo - Extra DBZ Connection info parameters read from the
- * rule file (if specified). These won't be put in shared memory so they
- * are declared as pointers.
- */
-typedef struct _ExtraConnectionInfo
-{
-	char * ssl_mode;
-	char * ssl_keystore;
-	char * ssl_keystore_pass;
-	char * ssl_truststore;
-	char * ssl_truststore_pass;
-} ExtraConnectionInfo;
 
 /**
  * SynchdbRequest - Structure representing a request to change connector state
@@ -246,6 +252,17 @@ typedef struct _SynchdbSharedState
 	ActiveConnectors * connectors;
 } SynchdbSharedState;
 
+typedef struct _ObjectMap
+{
+	char objtype[SYNCHDB_CONNINFO_NAME_SIZE];
+	bool enabled;
+	char srcobj[SYNCHDB_CONNINFO_NAME_SIZE];
+	char dstobj[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
+	char curr_pg_tbname[SYNCHDB_CONNINFO_NAME_SIZE];
+	char curr_pg_attname[SYNCHDB_CONNINFO_NAME_SIZE];
+	char curr_pg_atttypename[SYNCHDB_CONNINFO_NAME_SIZE];
+} ObjectMap;
+
 /* Function prototypes */
 const char * get_shm_connector_name(ConnectorType type);
 pid_t get_shm_connector_pid(int connectorId);
@@ -256,6 +273,7 @@ void set_shm_connector_state(int connectorId, ConnectorState state);
 const char * get_shm_connector_state(int connectorId);
 void set_shm_dbz_offset(int connectorId);
 const char * get_shm_dbz_offset(int connectorId);
+const char * get_shm_connector_name_by_id(int connectorId);
 ConnectorState get_shm_connector_state_enum(int connectorId);
 const char* connectorTypeToString(ConnectorType type);
 void set_shm_connector_stage(int connectorId, ConnectorStage stage);

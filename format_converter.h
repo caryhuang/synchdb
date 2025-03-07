@@ -162,10 +162,12 @@ typedef struct transformExpressionHashEntry
 } TransformExpressionHashEntry;
 
 /* Function prototypes */
-int fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats);
+int fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, bool schemasync, const char * name);
 ConnectorType fc_get_connector_type(const char * connector);
 void fc_initFormatConverter(ConnectorType connectorType);
 void fc_deinitFormatConverter(ConnectorType connectorType);
 bool fc_load_rules(ConnectorType connectorType, const char * rulefile);
+bool fc_load_objmap(const char * name, ConnectorType connectorType);
+char * escapeSingleQuote(const char * in, bool addquote);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */

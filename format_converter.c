@@ -61,179 +61,179 @@ static HTAB * sqlserverDatatypeHash;
 
 DatatypeHashEntry mysql_defaultTypeMappings[] =
 {
-	{{"INT", true}, "SERIAL", 0},
-	{{"BIGINT", true}, "BIGSERIAL", 0},
-	{{"SMALLINT", true}, "SMALLSERIAL", 0},
-	{{"MEDIUMINT", true}, "SERIAL", 0},
-	{{"ENUM", false}, "TEXT", 0},
-	{{"SET", false}, "TEXT", 0},
-	{{"BIGINT", false}, "BIGINT", 0},
-	{{"BIGINT UNSIGNED", false}, "NUMERIC", -1},
-	{{"NUMERIC UNSIGNED", false}, "NUMERIC", -1},
-	{{"DEC", false}, "DECIMAL", -1},
-	{{"DEC UNSIGNED", false}, "DECIMAL", -1},
-	{{"DECIMAL UNSIGNED", false}, "DECIMAL", -1},
-	{{"FIXED", false}, "DECIMAL", -1},
-	{{"FIXED UNSIGNED", false}, "DECIMAL", -1},
-	{{"BIT(1)", false}, "BOOLEAN", 0},
-	{{"BIT", false}, "BIT", -1},
-	{{"BOOL", false}, "BOOLEAN", -1},
-	{{"DOUBLE", false}, "DOUBLE PRECISION", 0},
-	{{"DOUBLE PRECISION", false}, "DOUBLE PRECISION", 0},
-	{{"DOUBLE PRECISION UNSIGNED", false}, "DOUBLE PRECISION", 0},
-	{{"DOUBLE UNSIGNED", false}, "DOUBLE PRECISION", 0},
-	{{"REAL", false}, "REAL", 0},
-	{{"REAL UNSIGNED", false}, "REAL", 0},
-	{{"FLOAT", false}, "REAL", 0},
-	{{"FLOAT UNSIGNED", false}, "REAL", 0},
-	{{"INT", false}, "INT", 0},
-	{{"INT UNSIGNED", false}, "BIGINT", 0},
-	{{"INTEGER", false}, "INT", 0},
-	{{"INTEGER UNSIGNED", false}, "BIGINT", 0},
-	{{"MEDIUMINT", false}, "INT", 0},
-	{{"MEDIUMINT UNSIGNED", false}, "INT", 0},
-	{{"YEAR", false}, "INT", 0},
-	{{"SMALLINT", false}, "SMALLINT", 0},
-	{{"SMALLINT UNSIGNED", false}, "INT", 0},
-	{{"TINYINT", false}, "SMALLINT", 0},
-	{{"TINYINT UNSIGNED", false}, "SMALLINT", 0},
-	{{"DATETIME", false}, "TIMESTAMP", -1},
-	{{"TIMESTAMP", false}, "TIMESTAMPTZ", -1},
-	{{"BINARY", false}, "BYTEA", 0},
-	{{"VARBINARY", false}, "BYTEA", 0},
-	{{"BLOB", false}, "BYTEA", 0},
-	{{"MEDIUMBLOB", false}, "BYTEA", 0},
-	{{"LONGBLOB", false}, "BYTEA", 0},
-	{{"TINYBLOB", false}, "BYTEA", 0},
-	{{"LONG VARCHAR", false}, "TEXT", -1},
-	{{"LONGTEXT", false}, "TEXT", -1},
-	{{"MEDIUMTEXT", false}, "TEXT", -1},
-	{{"TINYTEXT", false}, "TEXT", -1},
-	{{"JSON", false}, "JSONB", -1},
-	/* spatial types - map to TEXT by default */
-	{{"GEOMETRY", false}, "TEXT", -1},
-	{{"GEOMETRYCOLLECTION", false}, "TEXT", -1},
-	{{"GEOMCOLLECTION", false}, "TEXT", -1},
-	{{"LINESTRING", false}, "TEXT", -1},
-	{{"MULTILINESTRING", false}, "TEXT", -1},
-	{{"MULTIPOINT", false}, "TEXT", -1},
-	{{"MULTIPOLYGON", false}, "TEXT", -1},
-	{{"POINT", false}, "TEXT", -1},
-	{{"POLYGON", false}, "TEXT", -1}
+	{{"int", true}, "serial", 0},
+	{{"bigint", true}, "bigserial", 0},
+	{{"smallint", true}, "smallserial", 0},
+	{{"mediumint", true}, "serial", 0},
+	{{"enum", false}, "text", 0},
+	{{"set", false}, "text", 0},
+	{{"bigint", false}, "bigint", 0},
+	{{"bigint unsigned", false}, "numeric", -1},
+	{{"numeric unsigned", false}, "numeric", -1},
+	{{"dec", false}, "decimal", -1},
+	{{"dec unsigned", false}, "decimal", -1},
+	{{"decimal unsigned", false}, "decimal", -1},
+	{{"fixed", false}, "decimal", -1},
+	{{"fixed unsigned", false}, "decimal", -1},
+	{{"bit(1)", false}, "boolean", 0},
+	{{"bit", false}, "bit", -1},
+	{{"bool", false}, "boolean", -1},
+	{{"double", false}, "double precision", 0},
+	{{"double precision", false}, "double precision", 0},
+	{{"double precision unsigned", false}, "double precision", 0},
+	{{"double unsigned", false}, "double precision", 0},
+	{{"real", false}, "real", 0},
+	{{"real unsigned", false}, "real", 0},
+	{{"float", false}, "real", 0},
+	{{"float unsigned", false}, "real", 0},
+	{{"int", false}, "int", 0},
+	{{"int unsigned", false}, "bigint", 0},
+	{{"integer", false}, "int", 0},
+	{{"integer unsigned", false}, "bigint", 0},
+	{{"mediumint", false}, "int", 0},
+	{{"mediumint unsigned", false}, "int", 0},
+	{{"year", false}, "int", 0},
+	{{"smallint", false}, "smallint", 0},
+	{{"smallint unsigned", false}, "int", 0},
+	{{"tinyint", false}, "smallint", 0},
+	{{"tinyint unsigned", false}, "smallint", 0},
+	{{"datetime", false}, "timestamp", -1},
+	{{"timestamp", false}, "timestamptz", -1},
+	{{"binary", false}, "bytea", 0},
+	{{"varbinary", false}, "bytea", 0},
+	{{"blob", false}, "bytea", 0},
+	{{"mediumblob", false}, "bytea", 0},
+	{{"longblob", false}, "bytea", 0},
+	{{"tinyblob", false}, "bytea", 0},
+	{{"long varchar", false}, "text", -1},
+	{{"longtext", false}, "text", -1},
+	{{"mediumtext", false}, "text", -1},
+	{{"tinytext", false}, "text", -1},
+	{{"json", false}, "jsonb", -1},
+	/* spatial types - map to text by default */
+	{{"geometry", false}, "text", -1},
+	{{"geometrycollection", false}, "text", -1},
+	{{"geomcollection", false}, "text", -1},
+	{{"linestring", false}, "text", -1},
+	{{"multilinestring", false}, "text", -1},
+	{{"multipoint", false}, "text", -1},
+	{{"multipolygon", false}, "text", -1},
+	{{"point", false}, "text", -1},
+	{{"polygon", false}, "text", -1}
 };
 #define SIZE_MYSQL_DATATYPE_MAPPING (sizeof(mysql_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
 DatatypeHashEntry oracle_defaultTypeMappings[] =
 {
-	{{"BINARY_DOUBLE", false}, "DOUBLE PRECISION", 0},
-	{{"BINARY_FLOAT", false}, "REAL", 0},
-	{{"FLOAT", false}, "REAL", 0},
-	{{"NUMBER(0,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(1,0)", false}, "SMALLINT", 0},
-	{{"NUMBER(2,0)", false}, "SMALLINT", 0},
-	{{"NUMBER(3,0)", false}, "SMALLINT", 0},
-	{{"NUMBER(4,0)", false}, "SMALLINT", 0},
-	{{"NUMBER(5,0)", false}, "INT", 0},
-	{{"NUMBER(6,0)", false}, "INT", 0},
-	{{"NUMBER(7,0)", false}, "INT", 0},
-	{{"NUMBER(8,0)", false}, "INT", 0},
-	{{"NUMBER(9,0)", false}, "INT", 0},
-	{{"NUMBER(10,0)", false}, "BIGINT", 0},
-	{{"NUMBER(11,0)", false}, "BIGINT", 0},
-	{{"NUMBER(12,0)", false}, "BIGINT", 0},
-	{{"NUMBER(13,0)", false}, "BIGINT", 0},
-	{{"NUMBER(14,0)", false}, "BIGINT", 0},
-	{{"NUMBER(15,0)", false}, "BIGINT", 0},
-	{{"NUMBER(16,0)", false}, "BIGINT", 0},
-	{{"NUMBER(17,0)", false}, "BIGINT", 0},
-	{{"NUMBER(18,0)", false}, "BIGINT", 0},
-	{{"NUMBER(19,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(20,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(21,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(22,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(23,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(24,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(25,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(26,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(27,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(28,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(29,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(30,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(31,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(32,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(33,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(34,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(35,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(36,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(37,0)", false}, "NUMERIC", -1},
-	{{"NUMBER(38,0)", false}, "NUMERIC", -1},
-	{{"NUMBER", false}, "NUMERIC", -1},
-	{{"NUMERIC", false}, "NUMERIC", -1},
-	{{"DATE", false}, "TIMESTAMP", -1},
-	{{"LONG", false}, "TEXT", -1},
-	{{"INTERVAL DAY TO SECOND", false}, "INTERVAL DAY TO SECOND", -1},
-	{{"INTERVAL YEAR TO MONTH", false}, "INTERVAL YEAR TO MONTH", 0},
-	{{"TIMESTAMP", false}, "TIMESTAMP", -1},
-	{{"TIMESTAMP WITH LOCAL TIME ZONE", false}, "TIMESTAMPTZ", -1},
-	{{"TIMESTAMP WITH TIME ZONE", false}, "TIMESTAMPTZ", -1},
-	{{"DATE", false}, "DATE", -1},
-	{{"CHAR", false}, "CHAR", -1},
-	{{"NCHAR", false}, "CHAR", -1},
-	{{"NVARCHAR2", false}, "VARCHAR", -1},
-	{{"VARCHAR", false}, "VARCHAR", -1},
-	{{"VARCHAR2", false}, "VARCHAR", -1},
-	{{"LONG RAW", false}, "BYTEA", 0},
-	{{"RAW", false}, "BYTEA", 0},
-	{{"DECIMAL", false}, "DECIMAL", -1},
-	{{"ROWID", false}, "TEXT", 0},
-	{{"UROWID", false}, "TEXT", 0},
-	{{"XMLTYPE", false}, "TEXT", 0},
-	/* Large objects */
-	{{"BFILE", false}, "TEXT", 0},
-	{{"BLOB", false}, "BYTEA", 0},
-	{{"CLOB", false}, "TEXT", 0},
-	{{"NCLOB", false}, "TEXT", 0}
+	{{"binary_double", false}, "double precision", 0},
+	{{"binary_float", false}, "real", 0},
+	{{"float", false}, "real", 0},
+	{{"number(0,0)", false}, "numeric", -1},
+	{{"number(1,0)", false}, "smallint", 0},
+	{{"number(2,0)", false}, "smallint", 0},
+	{{"number(3,0)", false}, "smallint", 0},
+	{{"number(4,0)", false}, "smallint", 0},
+	{{"number(5,0)", false}, "int", 0},
+	{{"number(6,0)", false}, "int", 0},
+	{{"number(7,0)", false}, "int", 0},
+	{{"number(8,0)", false}, "int", 0},
+	{{"number(9,0)", false}, "int", 0},
+	{{"number(10,0)", false}, "bigint", 0},
+	{{"number(11,0)", false}, "bigint", 0},
+	{{"number(12,0)", false}, "bigint", 0},
+	{{"number(13,0)", false}, "bigint", 0},
+	{{"number(14,0)", false}, "bigint", 0},
+	{{"number(15,0)", false}, "bigint", 0},
+	{{"number(16,0)", false}, "bigint", 0},
+	{{"number(17,0)", false}, "bigint", 0},
+	{{"number(18,0)", false}, "bigint", 0},
+	{{"number(19,0)", false}, "numeric", -1},
+	{{"number(20,0)", false}, "numeric", -1},
+	{{"number(21,0)", false}, "numeric", -1},
+	{{"number(22,0)", false}, "numeric", -1},
+	{{"number(23,0)", false}, "numeric", -1},
+	{{"number(24,0)", false}, "numeric", -1},
+	{{"number(25,0)", false}, "numeric", -1},
+	{{"number(26,0)", false}, "numeric", -1},
+	{{"number(27,0)", false}, "numeric", -1},
+	{{"number(28,0)", false}, "numeric", -1},
+	{{"number(29,0)", false}, "numeric", -1},
+	{{"number(30,0)", false}, "numeric", -1},
+	{{"number(31,0)", false}, "numeric", -1},
+	{{"number(32,0)", false}, "numeric", -1},
+	{{"number(33,0)", false}, "numeric", -1},
+	{{"number(34,0)", false}, "numeric", -1},
+	{{"number(35,0)", false}, "numeric", -1},
+	{{"number(36,0)", false}, "numeric", -1},
+	{{"number(37,0)", false}, "numeric", -1},
+	{{"number(38,0)", false}, "numeric", -1},
+	{{"number", false}, "numeric", -1},
+	{{"numeric", false}, "numeric", -1},
+	{{"date", false}, "timestamp", -1},
+	{{"long", false}, "text", -1},
+	{{"interval day to second", false}, "interval day to second", -1},
+	{{"interval year to month", false}, "interval year to month", 0},
+	{{"timestamp", false}, "timestamp", -1},
+	{{"timestamp with local time zone", false}, "timestamptz", -1},
+	{{"timestamp with time zone", false}, "timestamptz", -1},
+	{{"date", false}, "date", -1},
+	{{"char", false}, "char", -1},
+	{{"nchar", false}, "char", -1},
+	{{"nvarchar2", false}, "varchar", -1},
+	{{"varchar", false}, "varchar", -1},
+	{{"varchar2", false}, "varchar", -1},
+	{{"long raw", false}, "bytea", 0},
+	{{"raw", false}, "bytea", 0},
+	{{"decimal", false}, "decimal", -1},
+	{{"rowid", false}, "text", 0},
+	{{"urowid", false}, "text", 0},
+	{{"xmltype", false}, "text", 0},
+	/* large objects */
+	{{"bfile", false}, "text", 0},
+	{{"blob", false}, "bytea", 0},
+	{{"clob", false}, "text", 0},
+	{{"nclob", false}, "text", 0}
 };
 #define SIZE_ORACLE_DATATYPE_MAPPING (sizeof(oracle_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
 DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 {
-	{{"int identity", true}, "SERIAL", 0},
-	{{"bigint identity", true}, "BIGSERIAL", 0},
-	{{"smallint identity", true}, "SMALLSERIAL", 0},
-	{{"enum", false}, "TEXT", 0},
-	{{"int", false}, "INT", 0},
-	{{"bigint", false}, "BIGINT", 0},
-	{{"smallint", false}, "SMALLINT", 0},
-	{{"tinyint", false}, "SMALLINT", 0},
-	{{"numeric", false}, "NUMERIC", 0},
-	{{"decimal", false}, "NUMERIC", 0},
-	{{"bit(1)", false}, "BOOL", 0},
-	{{"bit", false}, "BIT", 0},
-	{{"money", false}, "MONEY", 0},
-	{{"smallmoney", false}, "MONEY", 0},
-	{{"real", false}, "REAL", 0},
-	{{"float", false}, "REAL", 0},
-	{{"date", false}, "DATE", 0},
-	{{"time", false}, "TIME", 0},
-	{{"datetime", false}, "TIMESTAMP", 0},
-	{{"datetime2", false}, "TIMESTAMP", 0},
-	{{"datetimeoffset", false}, "TIMESTAMPTZ", 0},
-	{{"smalldatetime", false}, "TIMESTAMP", 0},
-	{{"char", false}, "CHAR", -1},
-	{{"varchar", false}, "VARCHAR", -1},
-	{{"text", false}, "TEXT", 0},
-	{{"nchar", false}, "CHAR", 0},
-	{{"nvarchar", false}, "VARCHAR", -1},
-	{{"ntext", false}, "TEXT", 0},
-	{{"binary", false}, "BYTEA", 0},
-	{{"varbinary", false}, "BYTEA", 0},
-	{{"image", false}, "BYTEA", 0},
-	{{"uniqueidentifier", false}, "UUID", 0},
-	{{"xml", false}, "TEXT", 0},
-	/* spatial types - map to TEXT by default */
-	{{"geometry", false}, "TEXT", 0},
-	{{"geography", false}, "TEXT", 0},
+	{{"int identity", true}, "serial", 0},
+	{{"bigint identity", true}, "bigserial", 0},
+	{{"smallint identity", true}, "smallserial", 0},
+	{{"enum", false}, "text", 0},
+	{{"int", false}, "int", 0},
+	{{"bigint", false}, "bigint", 0},
+	{{"smallint", false}, "smallint", 0},
+	{{"tinyint", false}, "smallint", 0},
+	{{"numeric", false}, "numeric", 0},
+	{{"decimal", false}, "numeric", 0},
+	{{"bit(1)", false}, "bool", 0},
+	{{"bit", false}, "bit", 0},
+	{{"money", false}, "money", 0},
+	{{"smallmoney", false}, "money", 0},
+	{{"real", false}, "real", 0},
+	{{"float", false}, "real", 0},
+	{{"date", false}, "date", 0},
+	{{"time", false}, "time", 0},
+	{{"datetime", false}, "timestamp", 0},
+	{{"datetime2", false}, "timestamp", 0},
+	{{"datetimeoffset", false}, "timestamptz", 0},
+	{{"smalldatetime", false}, "timestamp", 0},
+	{{"char", false}, "char", -1},
+	{{"varchar", false}, "varchar", -1},
+	{{"text", false}, "text", 0},
+	{{"nchar", false}, "char", 0},
+	{{"nvarchar", false}, "varchar", -1},
+	{{"ntext", false}, "text", 0},
+	{{"binary", false}, "bytea", 0},
+	{{"varbinary", false}, "bytea", 0},
+	{{"image", false}, "bytea", 0},
+	{{"uniqueidentifier", false}, "uuid", 0},
+	{{"xml", false}, "text", 0},
+	/* spatial types - map to text by default */
+	{{"geometry", false}, "text", 0},
+	{{"geography", false}, "text", 0},
 };
 
 #define SIZE_SQLSERVER_DATATYPE_MAPPING (sizeof(sqlserver_defaultTypeMappings) / sizeof(DatatypeHashEntry))
@@ -494,7 +494,7 @@ remove_double_quotes(StringInfoData * str)
  *
  * escape the single quotes in the given input and returns a palloc-ed string
  */
-static char *
+char *
 escapeSingleQuote(const char * in, bool addquote)
 {
 	int i = 0, j = 0, outlen = 0;
@@ -1335,8 +1335,13 @@ parseDBZDDL(Jsonb * jb)
 				{
 					if (!strcmp(key, "name"))
 					{
+						int j = 0;
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->name = pstrdup(value);
+
+						/* convert typeName to lowercase for consistency */
+						for (j = 0; j < strlen(ddlcol->name); j++)
+							ddlcol->name[j] = (char) pg_tolower(ddlcol->name[j]);
 					}
 					if (!strcmp(key, "length"))
 					{
@@ -1355,8 +1360,13 @@ parseDBZDDL(Jsonb * jb)
 					}
 					if (!strcmp(key, "typeName"))
 					{
+						int j = 0;
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->typeName = pstrdup(value);
+
+						/* convert typeName to lowercase for consistency */
+						for (j = 0; j < strlen(ddlcol->typeName); j++)
+							ddlcol->typeName[j] = (char) pg_tolower(ddlcol->typeName[j]);
 					}
 					if (!strcmp(key, "enumValues"))
 					{
@@ -1512,22 +1522,10 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 
 			/*
 			 * check if there is a translation rule applied specifically for this column using
-			 * key format: [column object id].[data type]
+			 * key format: [column object id]
 			 */
-			if (!strcasecmp(col->typeName, "BIT") && col->length == 1)
-			{
-				/* special lookup case: BIT with length 1 */
-				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s(%d)",
-						colNameObjId.data, col->typeName, col->length);
-			}
-			else
-			{
-				/* all other cases - no special handling */
-				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s",
-						colNameObjId.data, col->typeName);
-			}
+			key.autoIncremented = col->autoIncremented;
+			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s", colNameObjId.data);
 
 			entry = (DatatypeHashEntry *) hash_search(mysqlDatatypeHash, &key, HASH_FIND, &found);
 			if (!found)
@@ -1537,7 +1535,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				 * Now, check if there is a global data type translation rule
 				 */
 				memset(&key, 0, sizeof(DatatypeHashKey));
-				if (!strcasecmp(col->typeName, "BIT") && col->length == 1)
+				if (!strcasecmp(col->typeName, "bit") && col->length == 1)
 				{
 					/* special lookup case: BIT with length 1 */
 					key.autoIncremented = col->autoIncremented;
@@ -1617,32 +1615,14 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 			 * we need to make size = scale, and empty the scale to maintain compatibility in
 			 * PostgreSQL.
 			 */
-			if ((!strcasecmp(col->typeName, "INTERVAL DAY TO SECOND") && col->scale > 0) || removed)
+			if ((!strcasecmp(col->typeName, "interval day to second") && col->scale > 0) || removed)
 			{
 				col->length = col->scale;
 				col->scale = 0;
 			}
 
-			if (!strcasecmp(col->typeName, "NUMBER") && col->scale == 0)
-			{
-				/*
-				 * special case: variable length NUMBER value - re-structure col->typeName so that
-				 * it includes length and precision information before we do any data type mapping
-				 * lookup. This ensures a more granular mappings. We only do this when col->scale
-				 * is zero because it indicates an integer type, and PostgreSQL has different int
-				 * types for different sizes.
-				 */
-				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s(%d,%d)",
-						colNameObjId.data, col->typeName, col->length, col->scale);
-			}
-			else
-			{
-				/* all other cases - no special handling */
-				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s",
-						colNameObjId.data, col->typeName);
-			}
+			key.autoIncremented = col->autoIncremented;
+			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s",colNameObjId.data);
 
 			entry = (DatatypeHashEntry *) hash_search(oracleDatatypeHash, &key, HASH_FIND, &found);
 			if (!found)
@@ -1652,7 +1632,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				 * Now, check if there is a global data type translation rule
 				 */
 				memset(&key, 0, sizeof(DatatypeHashKey));
-				if (!strcasecmp(col->typeName, "NUMBER") && col->scale == 0)
+				if (!strcasecmp(col->typeName, "number") && col->scale == 0)
 				{
 					/*
 					 * special case: variable length NUMBER value - re-structure col->typeName so that
@@ -1728,22 +1708,10 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 
 			/*
 			 * check if there is a translation rule applied specifically for this column using
-			 * key format: [column object id].[data type]
+			 * key format: [column object id]
 			 */
-			if (!strcasecmp(col->typeName, "bit") && col->length == 1)
-			{
-				/* special lookup case: BIT with length 1 */
-				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s(%d)",
-						colNameObjId.data, col->typeName, col->length);
-			}
-			else
-			{
-				/* all other cases - no special handling */
-				key.autoIncremented = col->autoIncremented;
-				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s.%s",
-						colNameObjId.data, col->typeName);
-			}
+			key.autoIncremented = col->autoIncremented;
+			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s", colNameObjId.data);
 
 			entry = (DatatypeHashEntry *) hash_search(sqlserverDatatypeHash, &key, HASH_FIND, &found);
 			if (!found)
@@ -1818,9 +1786,9 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 			 * and time date types are sent as "scale" not as "length" as in
 			 * mysql case. So we need to use the scale value here
 			 */
-			if (col->scale > 0 && (find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMP") ||
-					find_exact_string_match(entry->pgsqlTypeName, "TIME") ||
-					find_exact_string_match(entry->pgsqlTypeName, "TIMESTAMPTZ")))
+			if (col->scale > 0 && (find_exact_string_match(entry->pgsqlTypeName, "timestamp") ||
+					find_exact_string_match(entry->pgsqlTypeName, "time") ||
+					find_exact_string_match(entry->pgsqlTypeName, "timestamptz")))
 			{
 				/* postgresql can only support up to 6 */
 				if (col->scale > 6)
@@ -2123,7 +2091,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			}
 
 			/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
-			if (strstr(col->typeName, "UNSIGNED"))
+			if (strstr(col->typeName, "unsigned"))
 			{
 				appendStringInfo(&strinfo, "CHECK (%s >= 0) ", col->name);
 			}
@@ -2431,7 +2399,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					}
 
 					/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
-					if (strstr(col->typeName, "UNSIGNED"))
+					if (strstr(col->typeName, "unsigned"))
 					{
 						appendStringInfo(&strinfo, "CHECK (%s >= 0) ", pgcol->attname);
 					}
@@ -3313,9 +3281,6 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			 * is number-oriented, and with addquote=true, it will produce the number
 			 * in quotes which may not be desirable.
 			 */
-			elog(WARNING,"no special handling for data type %d, treat it as text",
-					colval->datatype);
-
 			if (addquote)
 			{
 				out = escapeSingleQuote(in, addquote);
@@ -4890,12 +4855,10 @@ init_sqlserver(void)
  * equivalent (pgddl).
  */
 static void
-updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
+updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype, const char * name)
 {
 	ListCell * cell, *cell2;
 	StringInfoData strinfo;
-	int j = 0;
-	Oid schemaoid, tableoid;
 
 	if (!pgddl || !dbzddl)
 		return;
@@ -4906,6 +4869,9 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
 			!strcmp(pgddl->type, "ALTER-ADD") ||
 			!strcmp(pgddl->type, "ALTER"))
 	{
+		int j = 0;
+		Oid schemaoid, tableoid;
+
 		if (list_length(dbzddl->columns) <= 0 || list_length(pgddl->columns) <= 0)
 		{
 			elog(WARNING, "Invalid input column lists. Skipping attribute update");
@@ -4941,7 +4907,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
 			elog(ERROR, "%s", msg);
 		}
 
-		appendStringInfo(&strinfo, "INSERT INTO %s (connector, attrelid, attnum, "
+		appendStringInfo(&strinfo, "INSERT INTO %s (name, type, attrelid, attnum, "
 				"ext_tbname, ext_attname, ext_atttypename) VALUES ",
 				SYNCHDB_ATTRIBUTE_TABLE);
 
@@ -4953,7 +4919,8 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
 			if (pgcol->attname == NULL || pgcol->atttype == NULL)
 				continue;
 
-			appendStringInfo(&strinfo, "(lower('%s'),%d,%d,'%s','%s','%s'),",
+			appendStringInfo(&strinfo, "(lower('%s'),lower('%s'),%d,%d,'%s','%s','%s'),",
+					name,
 					connectorTypeToString(conntype),
 					tableoid,
 					pgcol->position,
@@ -4965,17 +4932,22 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
 		strinfo.data[strinfo.len - 1] = '\0';
 		strinfo.len = strinfo.len - 1;
 
-		appendStringInfo(&strinfo, " ON CONFLICT(connector, attrelid, attnum) "
+		appendStringInfo(&strinfo, " ON CONFLICT(name, type, attrelid, attnum) "
 				"DO UPDATE SET "
 				"ext_tbname = EXCLUDED.ext_tbname,"
 				"ext_attname = EXCLUDED.ext_attname,"
-				"ext_atttypename = EXCLUDED.ext_atttypename; ");
+				"ext_atttypename = EXCLUDED.ext_atttypename;");
 	}
 	else if (!strcmp(pgddl->type, "DROP"))
 	{
-		appendStringInfo(&strinfo, "DELETE FROM %s WHERE LOWER(ext_tbname) = LOWER('%s')",
+		appendStringInfo(&strinfo, "DELETE FROM %s "
+				"WHERE lower(ext_tbname) = lower('%s') AND "
+				"lower(name) = lower('%s') AND "
+				"lower(type) = lower('%s');",
 				SYNCHDB_ATTRIBUTE_TABLE,
-				dbzddl->id);
+				dbzddl->id,
+				name,
+				connectorTypeToString(conntype));
 	}
 	else if (!strcmp(pgddl->type, "ALTER-DROP"))
 	{
@@ -4990,10 +4962,14 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
 			appendStringInfo(&strinfo, "UPDATE %s SET "
 					"ext_attname = '........synchdb.dropped.%d........',"
 					"ext_atttypename = null WHERE "
-					"lower(ext_attname) = lower('%s');",
+					"lower(ext_attname) = lower('%s') AND "
+					"lower(name) = lower('%s') AND "
+					"lower(type) = lower('%s');",
 					SYNCHDB_ATTRIBUTE_TABLE,
 					pgcol->position,
-					pgcol->attname);
+					pgcol->attname,
+					name,
+					connectorTypeToString(conntype));
 		}
 	}
 	else
@@ -5006,6 +4982,128 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype)
 	ra_executeCommand(strinfo.data);
 }
 
+static int
+alter_tbname(const char * from, const char * to)
+{
+	/* work on copies of the inputs */
+	char * fromcopy = pstrdup(from);
+	char * tocopy = pstrdup(to);
+	char * db = NULL, * schema = NULL, * table = NULL;
+	char * db2 = NULL, * schema2 = NULL, * table2 = NULL;
+	StringInfoData strinfo;
+	int ret = -1;
+
+	if (!from || !to)
+		return ret;
+
+	initStringInfo(&strinfo);
+	splitIdString(fromcopy, &db, &schema, &table, false);
+	if (table && schema)
+	{
+		/* 'from' expressed as schema.table */
+		splitIdString(tocopy, &db2, &schema2, &table2, false);
+		if (table2 && schema2)
+		{
+			/* 'to' expressed as schema.table */
+			appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; "
+					"ALTER TABLE %s RENAME TO %s; "
+					"ALTER TABLE %s.%s SET SCHEMA %s;",
+					schema2, from, table2, schema, table2, schema2);
+		}
+		else
+		{
+			/* 'to' expressed as table */
+			appendStringInfo(&strinfo, "ALTER TABLE %s RENAME TO %s;"
+					"ALTER TABLE %s.%s SET SCHEMA public;",
+					from, table2, schema, table2);
+		}
+	}
+	else
+	{
+		/* 'from' expressed as table */
+		splitIdString(tocopy, &db2, &schema2, &table2, false);
+		if (table2 && schema2)
+		{
+			/* 'to' expressed as schema.table */
+			appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; "
+					"ALTER TABLE %s RENAME TO %s; "
+					"ALTER TABLE %s SET SCHEMA %s;",
+					schema2, from, table2, table2, schema2);
+		}
+		else
+		{
+			/* 'to' expressed as table */
+			appendStringInfo(&strinfo, "ALTER TABLE %s RENAME TO %s;",
+					from, table2);
+		}
+	}
+
+	elog(WARNING, "renaming table from '%s' to '%s' with query: %s", from, to, strinfo.data);
+	ret = ra_executeCommand(strinfo.data);
+
+	pfree(fromcopy);
+	pfree(tocopy);
+	if (strinfo.data)
+		pfree(strinfo.data);
+
+	return ret;
+}
+
+static int
+alter_attname(const char * tbname, const char * from, const char * to)
+{
+	int ret = -1;
+	StringInfoData strinfo;
+
+	if (!tbname || !from || !to)
+		return ret;
+
+	initStringInfo(&strinfo);
+	appendStringInfo(&strinfo, "ALTER TABLE %s RENAME COLUMN %s TO %s;",
+			tbname, from, to);
+
+	elog(WARNING, "renaming table ('%s')'s column from '%s' to '%s' with query: %s",
+			tbname, from, to, strinfo.data);
+	ret = ra_executeCommand(strinfo.data);
+
+	if (strinfo.data)
+		pfree(strinfo.data);
+
+	return ret;
+}
+
+static int
+alter_atttype(const char * tbname, const char * from, const char * to, int typesz, const char * convertfunc)
+{
+	int ret = -1;
+	StringInfoData strinfo;
+
+	if (!tbname || !from || !to)
+		return ret;
+
+	initStringInfo(&strinfo);
+	appendStringInfo(&strinfo, "ALTER TABLE %s ALTER COLUMN %s SET DATA TYPE %s",
+			tbname, from, to);
+
+	if (typesz > 0)
+	{
+		appendStringInfo(&strinfo, "(%d)", typesz);
+	}
+
+	if (convertfunc)
+		appendStringInfo(&strinfo, " USING %s::%s;", tbname, convertfunc);
+	else
+		appendStringInfo(&strinfo, ";");
+
+	elog(WARNING, "alter data type for table ('%s') column ('%s') to '%s' with query: %s",
+			tbname, from, to, strinfo.data);
+	ret = ra_executeCommand(strinfo.data);
+
+	if (strinfo.data)
+		pfree(strinfo.data);
+
+	return ret;
+}
 /*
  * fc_initFormatConverter
  *
@@ -5106,7 +5204,6 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 	char * key = NULL;
 	char * value = NULL;
 	bool found = 0;
-	StringInfoData strinfo;
 
 	HTAB * rulehash = NULL;
 	DatatypeHashEntry hashentry;
@@ -5509,33 +5606,276 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 			value = NULL;
 		}
 	}
+	return true;
+}
 
-	/* load extra per-connector parameters here if specified */
-	initStringInfo(&strinfo);
+bool
+fc_load_objmap(const char * name, ConnectorType connectorType)
+{
+	ObjectMap * objs = NULL;
+	int numobjs = 0;
+	int ret = -1;
+	int i = 0;
+	bool found = false;
+	ObjMapHashEntry objmapentry = {0};
+	ObjMapHashEntry * objmaplookup;
+	HASHCTL	info;
+	HTAB * rulehash = NULL;
+	DatatypeHashEntry hashentry;
+	DatatypeHashEntry * entrylookup;
 
-	getPathElementString(jb, "ssl_rules.ssl_mode", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
-		extraConnInfo.ssl_mode = pstrdup(strinfo.data);
+	TransformExpressionHashEntry expressentry;
+	TransformExpressionHashEntry * expressentrylookup;
 
-	getPathElementString(jb, "ssl_rules.ssl_keystore", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
-		extraConnInfo.ssl_keystore = pstrdup(strinfo.data);
+	switch (connectorType)
+	{
+		case TYPE_MYSQL:
+			rulehash = mysqlDatatypeHash;
+			break;
+		case TYPE_ORACLE:
+			rulehash = oracleDatatypeHash;
+			break;
+		case TYPE_SQLSERVER:
+			rulehash = sqlserverDatatypeHash;
+			break;
+		default:
+		{
+			set_shm_connector_errmsg(myConnectorId, "unsupported connector type");
+			elog(ERROR, "unsupported connector type");
+		}
+	}
 
-	getPathElementString(jb, "ssl_rules.ssl_keystore_pass", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
-		extraConnInfo.ssl_keystore_pass = pstrdup(strinfo.data);
+	if (!rulehash)
+	{
+		set_shm_connector_errmsg(myConnectorId, "data type hash not initialized");
+		elog(ERROR, "data type hash not initialized");
+	}
 
-	getPathElementString(jb, "ssl_rules.ssl_truststore", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
-		extraConnInfo.ssl_truststore = pstrdup(strinfo.data);
+	ret = ra_listObjmaps(name, &objs, &numobjs);
+	if (ret)
+	{
+		elog(WARNING, "no object mapping rules found for connector '%s'", name);
+		return true;
+	}
 
-	getPathElementString(jb, "ssl_rules.ssl_truststore_pass", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
-		extraConnInfo.ssl_truststore_pass = pstrdup(strinfo.data);
+	for (i = 0; i < numobjs; i++)
+	{
+		elog(DEBUG1, "type %s, src %s dst %s: (%s) (%s) enabled %d", objs[i].objtype, objs[i].srcobj, objs[i].dstobj,
+				objs[i].curr_pg_tbname, objs[i].curr_pg_attname, objs[i].enabled);
+		/* initialized objectMappingHash if not done yet */
 
-	if (strinfo.data)
-		pfree(strinfo.data);
+		if (!strcasecmp(objs[i].objtype, "table") || !strcasecmp(objs[i].objtype, "column") )
+		{
+			if (!objectMappingHash)
+			{
+				info.keysize = sizeof(ObjMapHashKey);
+				info.entrysize = sizeof(ObjMapHashEntry);
+				info.hcxt = CurrentMemoryContext;
+				objectMappingHash = hash_create("object mapping hash",
+												 256,
+												 &info,
+												 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+			}
 
+			memset(&objmapentry, 0, sizeof(ObjMapHashEntry));
+
+			strlcpy(objmapentry.key.extObjType, objs[i].objtype, SYNCHDB_OBJ_TYPE_SIZE);
+			strlcpy(objmapentry.key.extObjName, objs[i].srcobj, SYNCHDB_OBJ_NAME_SIZE);
+			strlcpy(objmapentry.pgsqlObjName, objs[i].dstobj, SYNCHDB_OBJ_NAME_SIZE);
+
+			if (!objs[i].enabled)
+			{
+				/* disable this table or column name mapping rule by removing it from the hash table */
+				objmaplookup = hash_search(objectMappingHash, &(objmapentry.key),
+						HASH_REMOVE, NULL);
+
+				if (objmaplookup)
+					elog(WARNING, "deleted object mapping '%s(%s)' <-> '%s'", objmaplookup->key.extObjName,
+							objmapentry.key.extObjType, objmaplookup->pgsqlObjName);
+			}
+			else
+			{
+				objmaplookup = (ObjMapHashEntry *) hash_search(objectMappingHash,
+						&(objmapentry.key), HASH_ENTER, &found);
+
+				/* found or not, just update or insert it */
+				memset(objmaplookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+				strlcpy(objmaplookup->key.extObjName,
+						objmapentry.key.extObjName,
+						SYNCHDB_OBJ_NAME_SIZE);
+
+				memset(objmaplookup->pgsqlObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+				strlcpy(objmaplookup->pgsqlObjName,
+						objmapentry.pgsqlObjName,
+						SYNCHDB_OBJ_NAME_SIZE);
+
+				elog(WARNING, "Inserted / updated object mapping '%s(%s)' <-> '%s'", objmaplookup->key.extObjName,
+						objmapentry.key.extObjType, objmaplookup->pgsqlObjName);
+
+				/*
+				 * if this is a table object mapping and that the connector has already created a matching table
+				 * in PostgreSQL, we need to check if the mapped table is the same as the one created. If not
+				 * then the user is requesting to rename the table.
+				 */
+				if (!strcasecmp(objs[i].objtype, "table") && objs[i].curr_pg_tbname[0] != '\0')
+				{
+					/* if dstobj contains no dot(no schema info), we will default to public schema */
+					if (strchr(objs[i].dstobj, '.') == NULL)
+					{
+						char temp[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
+						strlcpy(temp, objs[i].dstobj, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+
+						snprintf(&objs[i].dstobj[0], SYNCHDB_TRANSFORM_EXPRESSION_SIZE, "public.%s", temp);
+					}
+
+					if (strcasecmp(objs[i].dstobj, objs[i].curr_pg_tbname))
+					{
+						alter_tbname(objs[i].curr_pg_tbname, objs[i].dstobj);
+					}
+				}
+
+				/*
+				 * if this is a column object mapping and that the connector has already created a matching table
+				 * in PostgreSQL, we need to check if the mapped column is the same as the one created. If not
+				 * then the user is requesting to rename the column.
+				 */
+				if (!strcasecmp(objs[i].objtype, "column") && objs[i].curr_pg_attname[0] != '\0' && objs[i].curr_pg_tbname[0] != '\0')
+				{
+					if (strcasecmp(objs[i].dstobj, objs[i].curr_pg_attname))
+					{
+						alter_attname(objs[i].curr_pg_tbname, objs[i].curr_pg_attname, objs[i].dstobj);
+					}
+				}
+			}
+		}
+		else if (!strcasecmp(objs[i].objtype, "transform"))
+		{
+			if (!transformExpressionHash)
+			{
+				info.keysize = sizeof(TransformExpressionHashKey);
+				info.entrysize = sizeof(TransformExpressionHashEntry);
+				info.hcxt = CurrentMemoryContext;
+
+				/* initialize transform expression hash common to all connector types */
+				transformExpressionHash = hash_create("transform expression hash",
+												 256,
+												 &info,
+												 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+			}
+			memset(&expressentry, 0, sizeof(TransformExpressionHashEntry));
+
+			/*
+			 * srcobj should be expressed in fully qualified column name: db.schema.table.col or
+			 * db.table.col. dstobj is the expression to execute on the column data before applying
+			 */
+			strlcpy(expressentry.key.extObjName, objs[i].srcobj, SYNCHDB_OBJ_NAME_SIZE);
+			strlcpy(expressentry.pgsqlTransExpress, objs[i].dstobj, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+
+			if (!objs[i].enabled)
+			{
+				/* disable this transform rule by removing it from the hash table */
+				expressentrylookup = hash_search(transformExpressionHash, &(expressentry.key),
+						HASH_REMOVE, NULL);
+
+				if (expressentrylookup)
+					elog(WARNING, "deleted transform expression mapping '%s' <-> '%s'",
+							expressentrylookup->key.extObjName,
+							expressentrylookup->pgsqlTransExpress);
+			}
+			else
+			{
+				/* add this new transform rule */
+				expressentrylookup = (TransformExpressionHashEntry *) hash_search(transformExpressionHash,
+						&(expressentry.key), HASH_ENTER, &found);
+
+				/* found or not, just update or insert it */
+				memset(expressentrylookup->key.extObjName, 0, SYNCHDB_OBJ_NAME_SIZE);
+				strlcpy(expressentrylookup->key.extObjName,
+						expressentry.key.extObjName,
+						SYNCHDB_OBJ_NAME_SIZE);
+
+				memset(expressentrylookup->pgsqlTransExpress, 0, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+				strlcpy(expressentrylookup->pgsqlTransExpress,
+						expressentry.pgsqlTransExpress,
+						SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+
+				elog(WARNING, "Inserted / updated transform expression mapping '%s' <-> '%s'",
+						expressentrylookup->key.extObjName,
+						expressentrylookup->pgsqlTransExpress);
+			}
+		}
+		else if (!strcasecmp(objs[i].objtype, "datatype"))
+		{
+			char * srccopy = pstrdup(objs[i].srcobj);
+			char * dstcopy = pstrdup(objs[i].dstobj);
+			char * tmp = NULL;
+
+			if (!objs[i].enabled)
+			{
+				/*
+				 * ignore disabled data type rules. We will not attempt to delete data type hash
+				 * tables because it could contain overwritten default entries that we do not want
+				 * to remove
+				 */
+				elog(WARNING, "Ignored disabled data type mapping '%s' <-> '%s'", srccopy, dstcopy);
+				pfree(srccopy);
+				pfree(dstcopy);
+				continue;
+			}
+			memset(&hashentry, 0, sizeof(DatatypeHashEntry));
+
+			strlcpy(hashentry.key.extTypeName, strtok(srccopy, "|"), SYNCHDB_DATATYPE_NAME_SIZE);
+
+			tmp = strtok(NULL, "|");
+			if (tmp && !strcasecmp(tmp, "true"))
+				hashentry.key.autoIncremented = true;
+			else
+				hashentry.key.autoIncremented = false;
+
+			strlcpy(hashentry.pgsqlTypeName, strtok(dstcopy, "|"), SYNCHDB_DATATYPE_NAME_SIZE);
+			tmp = strtok(NULL, "|");
+			if (tmp)
+				hashentry.pgsqlTypeLength = atoi(tmp);
+			else
+				hashentry.pgsqlTypeLength = -1;
+
+			entrylookup = (DatatypeHashEntry *) hash_search(rulehash,
+					&(hashentry.key), HASH_ENTER, &found);
+
+			entrylookup->key.autoIncremented = hashentry.key.autoIncremented;
+			memset(entrylookup->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+			strlcpy(entrylookup->key.extTypeName,
+					hashentry.key.extTypeName,
+					SYNCHDB_DATATYPE_NAME_SIZE);
+
+			entrylookup->pgsqlTypeLength = hashentry.pgsqlTypeLength;
+			memset(entrylookup->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+			strlcpy(entrylookup->pgsqlTypeName,
+					hashentry.pgsqlTypeName,
+					SYNCHDB_DATATYPE_NAME_SIZE);
+
+			elog(WARNING, "Inserted / updated data type mapping '%s' <-> '%s' %d - curr %s", entrylookup->key.extTypeName,
+					entrylookup->pgsqlTypeName, entrylookup->pgsqlTypeLength, objs[i].curr_pg_atttypename);
+
+			if (objs[i].curr_pg_atttypename[0] != '\0' && objs[i].curr_pg_tbname[0] != '\0' &&
+					objs[i].curr_pg_attname[0] != '\0')
+			{
+				elog(WARNING, "comparing data types consistency for %s.%s: '%s' vs '%s'",
+						objs[i].curr_pg_tbname,
+						objs[i].curr_pg_attname,
+						objs[i].curr_pg_atttypename,
+						hashentry.pgsqlTypeName);
+				if (strcasecmp(objs[i].curr_pg_atttypename, hashentry.pgsqlTypeName))
+				{
+					/* todo complex conversion with conversion func not supported yet */
+					alter_atttype(objs[i].curr_pg_tbname, objs[i].curr_pg_attname, hashentry.pgsqlTypeName,
+							entrylookup->pgsqlTypeLength, NULL);
+				}
+			}
+			pfree(srccopy);
+			pfree(dstcopy);
+		}
+	}
 	return true;
 }
 
@@ -5545,13 +5885,14 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
  * Main function to process Debezium change event
  */
 int
-fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats)
+fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, bool schemasync, const char * name)
 {
 	Datum jsonb_datum;
 	Jsonb *jb;
 	StringInfoData strinfo;
 	ConnectorType type;
 	MemoryContext tempContext, oldContext;
+	bool islastsnapshot = false;
 
 	tempContext = AllocSetContextCreate(TopMemoryContext,
 										"FORMAT_CONVERTER",
@@ -5573,8 +5914,18 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats)
     getPathElementString(jb, "payload.source.snapshot", &strinfo, true);
     if (!strcmp(strinfo.data, "true") || !strcmp(strinfo.data, "last"))
     {
-    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
-    		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+    	if (schemasync)
+    	{
+        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
+        		set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+    	}
+    	else
+    	{
+        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+        		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+    	}
+    	if (!strcmp(strinfo.data, "last"))
+    		islastsnapshot = true;
     }
     else
     {
@@ -5636,10 +5987,11 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats)
     		return -1;
     	}
 		/* (4) update attribute map table */
-    	updateSynchdbAttribute(dbzddl, pgddl, type);
+    	updateSynchdbAttribute(dbzddl, pgddl, type, name);
 
 		/* (5) clean up */
-    	set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    	set_shm_connector_state(myConnectorId, (islastsnapshot && schemasync ?
+    			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
     	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDDL(dbzddl);
     	destroyPGDDL(pgddl);

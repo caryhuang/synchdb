@@ -57,6 +57,12 @@ PG_FUNCTION_INFO_V1(synchdb_restart_connector);
 PG_FUNCTION_INFO_V1(synchdb_log_jvm_meminfo);
 PG_FUNCTION_INFO_V1(synchdb_get_stats);
 PG_FUNCTION_INFO_V1(synchdb_reset_stats);
+PG_FUNCTION_INFO_V1(synchdb_add_objmap);
+PG_FUNCTION_INFO_V1(synchdb_reload_objmap);
+PG_FUNCTION_INFO_V1(synchdb_add_extra_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_del_extra_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_del_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_del_objmap);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -67,7 +73,6 @@ PG_FUNCTION_INFO_V1(synchdb_reset_stats);
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
 int myConnectorId = -1;	/* Global index number to SynchdbSharedState in shared memory - global per worker */
-ExtraConnectionInfo extraConnInfo = {0}; /* global extra connector parameters read from rule file */
 const char * g_eventStr = NULL;	/* global pointer to the JSON event currently working on */
 
 /* GUC variables */
@@ -127,7 +132,7 @@ PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
 static int dbz_engine_stop(void);
 static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
 static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal,
-		BatchInfo * batchinfo, SynchdbStatistics * myBatchStats);
+		BatchInfo * batchinfo, SynchdbStatistics * myBatchStats, bool schemasync);
 static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode);
 static char *dbz_engine_get_offset(int connectorId);
 static int dbz_mark_batch_complete(int batchid);
@@ -143,9 +148,9 @@ static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorTyp
 static void setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode);
 static void initialize_jvm(void);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
-static void main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
+static void main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
-static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass);
+static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo);
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
 
 /*
@@ -176,7 +181,7 @@ count_active_connectors(void)
  *
  * @return: void
  */
-static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass)
+static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo)
 {
 	jmethodID setBatchSize, setQueueSize, setSkippedOperations, setConnectTimeout, setQueryTimeout;
 	jmethodID setSnapshotThreadNum, setSnapshotFetchSize, setSnapshotMinRowToStreamResults;
@@ -372,9 +377,9 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 	if (jdbz_watermarking_strategy)
 			(*env)->DeleteLocalRef(env, jdbz_watermarking_strategy);
 
-	if (extraConnInfo.ssl_mode != NULL)
+	if (strcasecmp(extraConnInfo->ssl_mode, "null"))
 	{
-		jdbz_sslmode = (*env)->NewStringUTF(env, extraConnInfo.ssl_mode);
+		jdbz_sslmode = (*env)->NewStringUTF(env, extraConnInfo->ssl_mode);
 
 		setSslmode = (*env)->GetMethodID(env, myParametersClass, "setSslmode",
 				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
@@ -393,9 +398,9 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 				(*env)->DeleteLocalRef(env, jdbz_sslmode);
 	}
 
-	if (extraConnInfo.ssl_keystore != NULL)
+	if (strcasecmp(extraConnInfo->ssl_keystore, "null"))
 	{
-		jdbz_sslkeystore = (*env)->NewStringUTF(env, extraConnInfo.ssl_keystore);
+		jdbz_sslkeystore = (*env)->NewStringUTF(env, extraConnInfo->ssl_keystore);
 
 		setSslKeystore = (*env)->GetMethodID(env, myParametersClass, "setSslKeystore",
 				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
@@ -414,9 +419,9 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 				(*env)->DeleteLocalRef(env, jdbz_sslkeystore);
 	}
 
-	if (extraConnInfo.ssl_keystore_pass != NULL)
+	if (strcasecmp(extraConnInfo->ssl_keystore_pass, "null"))
 	{
-		jdbz_sslkeystorepass = (*env)->NewStringUTF(env, extraConnInfo.ssl_keystore_pass);
+		jdbz_sslkeystorepass = (*env)->NewStringUTF(env, extraConnInfo->ssl_keystore_pass);
 
 		setSslKeystorePass = (*env)->GetMethodID(env, myParametersClass, "setSslKeystorePass",
 				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
@@ -435,9 +440,9 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 				(*env)->DeleteLocalRef(env, jdbz_sslkeystorepass);
 	}
 
-	if (extraConnInfo.ssl_truststore != NULL)
+	if (strcasecmp(extraConnInfo->ssl_truststore, "null"))
 	{
-		jdbz_ssltruststore = (*env)->NewStringUTF(env, extraConnInfo.ssl_truststore);
+		jdbz_ssltruststore = (*env)->NewStringUTF(env, extraConnInfo->ssl_truststore);
 
 		setSslTruststore = (*env)->GetMethodID(env, myParametersClass, "setSslTruststore",
 				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
@@ -456,9 +461,9 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 				(*env)->DeleteLocalRef(env, jdbz_ssltruststore);
 	}
 
-	if (extraConnInfo.ssl_truststore_pass != NULL)
+	if (strcasecmp(extraConnInfo->ssl_truststore_pass, "null"))
 	{
-		jdbz_ssltruststorepass = (*env)->NewStringUTF(env, extraConnInfo.ssl_truststore_pass);
+		jdbz_ssltruststorepass = (*env)->NewStringUTF(env, extraConnInfo->ssl_truststore_pass);
 
 		setSslTruststorePass = (*env)->GetMethodID(env, myParametersClass, "setSslTruststorePass",
 				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
@@ -660,7 +665,8 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
  */
 static int
 dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId,
-		bool * dbzExitSignal, BatchInfo * batchinfo, SynchdbStatistics * myBatchStats)
+		bool * dbzExitSignal, BatchInfo * batchinfo, SynchdbStatistics * myBatchStats,
+		bool schemasync)
 {
 	jmethodID getChangeEvents, sizeMethod, getMethod;
 	jobject changeEventsList;
@@ -732,11 +738,10 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 
 	if (size == 0 || size < 0)
 	{
-		/* nothing to process, set current stage to CDC and return */
+		/* nothing to process, set proper stage and return */
 		if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
-		{
 			set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
-		}
+
 		(*env)->DeleteLocalRef(env, changeEventsList);
 		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
@@ -819,7 +824,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 				g_eventStr = eventStr;
 
 			/* change event message, send to format converter */
-			if (fc_processDBZChangeEvent(eventStr, myBatchStats) != 0)
+			if (fc_processDBZChangeEvent(eventStr, myBatchStats, schemasync, get_shm_connector_name_by_id(myConnectorId)) != 0)
 			{
 				elog(DEBUG1, "dbz_engine_get_change: Failed to process event at index %d", i);
 			}
@@ -914,7 +919,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	}
 
 	/* set extra parameters */
-	set_extra_dbz_parameters(myParametersObj, myParametersClass);
+	set_extra_dbz_parameters(myParametersObj, myParametersClass, &(connInfo->extra));
 
 	/* Find the startEngine method */
 	mid = (*env)->GetMethodID(env, cls, "startEngine", "(Lcom/example/DebeziumRunner$MyParameters;)V");
@@ -1295,6 +1300,10 @@ connectorStateAsString(ConnectorState state)
 		return "restarting";
 	case STATE_MEMDUMP:
 		return "dumping memory";
+	case STATE_SCHEMA_SYNC_DONE:
+		return "schema sync";
+	case STATE_RELOAD_OBJMAP:
+		return "reloading objmap";
 	}
 	return "UNKNOWN";
 }
@@ -1533,12 +1542,12 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 		sleep(1);
 
 		elog(LOG, "resuimg dbz engine with host %s, port %u, user %s, src_db %s, "
-				"dst_db %s, table %s, rulefile %s snapshotMode %s",
+				"dst_db %s, table %s, snapshotMode %s",
 				newConnInfo.hostname, newConnInfo.port, newConnInfo.user,
 				newConnInfo.srcdb ? newConnInfo.srcdb : "N/A",
 				newConnInfo.dstdb,
 				newConnInfo.table ? newConnInfo.table : "N/A",
-				newConnInfo.rulefile, reqcopy->reqdata);
+				reqcopy->reqdata);
 
 		elog(WARNING, "resuimg dbz engine with snapshot_mode %s...", reqcopy->reqdata);
 		ret = dbz_engine_start(&newConnInfo, type, reqcopy->reqdata);
@@ -1555,17 +1564,21 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 	}
 	else if (reqcopy->reqstate == STATE_MEMDUMP)
 	{
-		/* Handle offset update request */
-		elog(LOG, "Requesting memdump for %s connector",
-				connInfo->name);
+		ConnectorState oldstate = get_shm_connector_state_enum(connectorId);
 
+		elog(LOG, "Requesting memdump for %s connector", connInfo->name);
 		set_shm_connector_state(connectorId, STATE_MEMDUMP);
-		/* todo: call the java routine to dump jvm heap memory summary in log */
-
 		dbz_engine_memory_dump();
+		set_shm_connector_state(connectorId, oldstate);
+	}
+	else if (reqcopy->reqstate == STATE_RELOAD_OBJMAP)
+	{
+		ConnectorState oldstate = get_shm_connector_state_enum(connectorId);
 
-		/* after new offset is set, change state back to STATE_PAUSED */
-		set_shm_connector_state(connectorId, STATE_SYNCING);
+		elog(LOG, "Reloading objmap for %s connector", connInfo->name);
+		set_shm_connector_state(connectorId, STATE_RELOAD_OBJMAP);
+		fc_load_objmap(connInfo->name, type);
+		set_shm_connector_state(connectorId, oldstate);
 	}
 	else
 	{
@@ -1629,14 +1642,14 @@ setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char 
 
 	elog(LOG, "obtained conninfo from shm: myConnectorId %d, name %s, host %s, port %u, "
 			"user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s), conninfo_name %s"
-			" rulefile %s snapshotMode %s",
+			" snapshotMode %s",
 			myConnectorId, conninfo->name,
 			conninfo->hostname, conninfo->port, conninfo->user,
 			conninfo->srcdb ? conninfo->srcdb : "N/A",
 			conninfo->dstdb,
 			conninfo->table ? conninfo->table : "N/A",
 			*connectorType, connectorTypeToString(*connectorType),
-			conninfo->name, conninfo->rulefile, *snapshotMode);
+			conninfo->name, *snapshotMode);
 
 	elog(LOG, "Environment setup completed for SynchDB %s worker (type %u)",
 		 connectorTypeToString(*connectorType), *connectorType);
@@ -1752,7 +1765,7 @@ start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInf
  * @param snapshotMode: Snapshot mode requested
  */
 static void
-main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode)
+main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode)
 {
 	ConnectorState currstate;
 	bool dbzExitSignal = false;
@@ -1786,7 +1799,8 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 				myBatchInfo.batchSize = 0;
 				memset(&myBatchStats, 0, sizeof(myBatchStats));
 
-				dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal, &myBatchInfo, &myBatchStats);
+				dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
+						&myBatchInfo, &myBatchStats, connInfo->isShcemaSync);
 
 				/*
 				 * if a valid batchid is set by dbz_engine_get_change(), it means we have
@@ -1808,6 +1822,28 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 			case STATE_PAUSED:
 			{
 				/* Do nothing when paused */
+				break;
+			}
+			case STATE_SCHEMA_SYNC_DONE:
+			{
+				/*
+				 * when schema sync is done, we will put connector into pause state so the user
+				 * can review the table schema and attribute mappings before proceeding.
+				 */
+				elog(DEBUG1, "shut down dbz engine...");
+				if (dbz_engine_stop())
+				{
+					elog(WARNING, "failed to stop dbz engine...");
+				}
+				/* change snapshot mode back to normal */
+				if (snapshotMode)
+				{
+					pfree(snapshotMode);
+					snapshotMode = pstrdup("initial");
+				}
+				/* exit schema sync mode */
+				connInfo->isShcemaSync = false;
+				set_shm_connector_state(myConnectorId, STATE_PAUSED);
 				break;
 			}
 			default:
@@ -2232,6 +2268,11 @@ get_shm_connector_stage(int connectorId)
 			return "change data capture";
 			break;
 		}
+		case STAGE_SCHEMA_SYNC:
+		{
+			return "schema sync";
+			break;
+		}
 		case STAGE_UNDEF:
 		default:
 		{
@@ -2497,6 +2538,23 @@ get_shm_dbz_offset(int connectorId)
 
 	return (sdb_state->connectors[connectorId].dbzoffset[0] != '\0') ?
 			sdb_state->connectors[connectorId].dbzoffset : "no offset";
+}
+
+/*
+ * get_shm_connector_name - Get the unique connector name based on connectorId
+ *
+ * This method gets the name value of the given connector from shared memory
+ *
+ * @param connectorId: Connector ID of interest
+ */
+const char *
+get_shm_connector_name_by_id(int connectorId)
+{
+	if (!sdb_state)
+		return "n/a";
+
+	return (sdb_state->connectors[connectorId].conninfo.name[0] != '\0') ?
+			sdb_state->connectors[connectorId].conninfo.name : "no name";
 }
 
 /*
@@ -2789,9 +2847,8 @@ synchdb_engine_main(Datum main_arg)
 	/* initialize format converter */
 	fc_initFormatConverter(connectorType);
 
-	/* load custom rules + additional connector parameters if applicable */
-	if (connInfo.rulefile && strlen(connInfo.rulefile) > 0 && strcasecmp(connInfo.rulefile, "null"))
-		fc_load_rules(connectorType, connInfo.rulefile);
+	/* load custom object mappings */
+	fc_load_objmap(connInfo.name, connectorType);
 
 	/* Initialize JVM */
 	initialize_jvm();
@@ -2830,40 +2887,25 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	char *connector = NULL;
 	int ret = -1, connectorid = -1;
 	StringInfoData strinfo;
-	char * snapshotMode = "initial";
+	char * _snapshotMode = "initial";
 
 	/* Parse input arguments */
-	text *name_text = PG_GETARG_TEXT_PP(0);
-	text *snapshotmode_text = PG_GETARG_TEXT_PP(1);
+	Name name = PG_GETARG_NAME(0);
+	Name snapshotmode = PG_GETARG_NAME(1);
 
-	/* Sanity check on input arguments */
-	if (VARSIZE(name_text) - VARHDRSZ == 0 ||
-			VARSIZE(name_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("connection name cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_NAME_SIZE)));
-	}
-
-
-	if (VARSIZE(snapshotmode_text) - VARHDRSZ == 0 ||
-			VARSIZE(snapshotmode_text) - VARHDRSZ > SYNCHDB_SNAPSHOT_MODE_SIZE)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("snapshot mode cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_NAME_SIZE)));
-	}
-
-	ret = ra_getConninfoByName(text_to_cstring(name_text), &connInfo, &connector);
+	ret = ra_getConninfoByName(NameStr(*name), &connInfo, &connector);
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("connection name does not exist"),
 				 errhint("use synchdb_add_conninfo to add one first")));
 
-	snapshotMode = text_to_cstring(snapshotmode_text);
+	_snapshotMode = NameStr(*snapshotmode);
+	if (!strcasecmp(_snapshotMode, "schemasync"))
+	{
+		_snapshotMode = "no_data";
+		connInfo.isShcemaSync = true;
+	}
 
 	/*
 	 * attach or initialize synchdb shared memory area so we can assign
@@ -2896,7 +2938,7 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	strcpy(worker.bgw_library_name, "synchdb");
 	strcpy(worker.bgw_function_name, "synchdb_engine_main");
 
-	prepare_bgw(&worker, &connInfo, connector, connectorid, snapshotMode);
+	prepare_bgw(&worker, &connInfo, connector, connectorid, _snapshotMode);
 
 	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
 		ereport(ERROR,
@@ -2918,7 +2960,7 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	 */
 	initStringInfo(&strinfo);
 	appendStringInfo(&strinfo, "UPDATE synchdb_conninfo set isactive = true "
-			"WHERE name = '%s'", text_to_cstring(name_text));
+			"WHERE name = '%s'", NameStr(*name));
 
 	ra_executeCommand(strinfo.data);
 
@@ -2945,19 +2987,9 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	char * snapshotMode = "initial";
 
 	/* Parse input arguments */
-	text *name_text = PG_GETARG_TEXT_PP(0);
+	Name name = PG_GETARG_NAME(0);
 
-	/* Sanity check on input arguments */
-	if (VARSIZE(name_text) - VARHDRSZ == 0 ||
-			VARSIZE(name_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("connection name cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_NAME_SIZE)));
-	}
-
-	ret = ra_getConninfoByName(text_to_cstring(name_text), &connInfo, &connector);
+	ret = ra_getConninfoByName(NameStr(*name), &connInfo, &connector);
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -3017,7 +3049,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	 */
 	initStringInfo(&strinfo);
 	appendStringInfo(&strinfo, "UPDATE synchdb_conninfo set isactive = true "
-			"WHERE name = '%s'", text_to_cstring(name_text));
+			"WHERE name = '%s'", NameStr(*name));
 
 	ra_executeCommand(strinfo.data);
 
@@ -3037,7 +3069,7 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	StringInfoData strinfo;
 
 	/* Parse input arguments */
-	text *name_text = PG_GETARG_TEXT_PP(0);
+	Name name = PG_GETARG_NAME(0);
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -3049,11 +3081,11 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to assign one first")));
 
 	/*
@@ -3063,7 +3095,7 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	 */
 	initStringInfo(&strinfo);
 	appendStringInfo(&strinfo, "UPDATE synchdb_conninfo set isactive = false "
-			"WHERE name = '%s'", text_to_cstring(name_text));
+			"WHERE name = '%s'", NameStr(*name));
 
 	ra_executeCommand(strinfo.data);
 
@@ -3071,7 +3103,7 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	if (pid != InvalidPid)
 	{
 		elog(WARNING, "terminating dbz connector (%s) with pid %d. Shutdown timeout: %d ms",
-				text_to_cstring(name_text), (int)pid, DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC);
+				NameStr(*name), (int)pid, DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC);
 		DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC));
 		set_shm_connector_pid(connectorId, InvalidPid);
 
@@ -3079,7 +3111,7 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	else
 	{
 		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not running", text_to_cstring(name_text)),
+				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
 	}
 	PG_RETURN_INT32(0);
@@ -3221,7 +3253,7 @@ synchdb_reset_stats(PG_FUNCTION_ARGS)
 	int connectorId;
 
 	/* Parse input arguments */
-	text *name_text = PG_GETARG_TEXT_PP(0);
+	Name name = PG_GETARG_NAME(0);
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -3233,11 +3265,11 @@ synchdb_reset_stats(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to assign one first")));
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
@@ -3260,7 +3292,7 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 	SynchdbRequest *req;
 
 	/* Parse input arguments */
-	text *name_text = PG_GETARG_TEXT_PP(0);
+	Name name = PG_GETARG_NAME(0);
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -3272,17 +3304,17 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to assign one first")));
 
 	pid = get_shm_connector_pid(connectorId);
 	if (pid == InvalidPid)
 		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not running", text_to_cstring(name_text)),
+				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
 
 	/* point to the right construct based on type */
@@ -3292,7 +3324,7 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 	if (req->reqstate != STATE_UNDEF)
 		ereport(ERROR,
 				(errmsg("an active request is currently active for connector %s",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("wait for it to finish and try again later")));
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
@@ -3300,7 +3332,7 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 	LWLockRelease(&sdb_state->lock);
 
 	elog(WARNING, "sent pause request interrupt to dbz connector %s (%d)",
-			text_to_cstring(name_text), connectorId);
+			NameStr(*name), connectorId);
 	PG_RETURN_INT32(0);
 }
 
@@ -3317,7 +3349,7 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 	SynchdbRequest *req;
 
 	/* Parse input arguments */
-	text *name_text = PG_GETARG_TEXT_PP(0);
+	Name name = PG_GETARG_NAME(0);
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -3329,17 +3361,17 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to assign one first")));
 
 	pid = get_shm_connector_pid(connectorId);
 	if (pid == InvalidPid)
 		ereport(ERROR,
-				(errmsg("dbz connector id (%s) is not running", text_to_cstring(name_text)),
+				(errmsg("dbz connector id (%s) is not running", NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
 
 	/* point to the right construct based on type */
@@ -3349,7 +3381,7 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 	if (req->reqstate != STATE_UNDEF)
 		ereport(ERROR,
 				(errmsg("an active request is currently active for connector id %s",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("wait for it to finish and try again later")));
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
@@ -3357,7 +3389,7 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 	LWLockRelease(&sdb_state->lock);
 
 	elog(WARNING, "sent resume request interrupt to dbz connector (%s)",
-			text_to_cstring(name_text));
+			NameStr(*name));
 	PG_RETURN_INT32(0);
 }
 
@@ -3376,7 +3408,7 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 	ConnectorState currstate;
 
 	/* Parse input arguments */
-	text *name_text = PG_GETARG_TEXT_PP(0);
+	Name name = PG_GETARG_NAME(0);
 	offsetstr = text_to_cstring(PG_GETARG_TEXT_P(1));
 
 	/*
@@ -3389,25 +3421,25 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to assign one first")));
 
 	pid = get_shm_connector_pid(connectorId);
 	if (pid == InvalidPid)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) is not running",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
 
 	currstate = get_shm_connector_state_enum(connectorId);
 	if (currstate != STATE_PAUSED)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) is not in paused state.",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("use synchdb_pause_engine() to pause the worker first")));
 
 	/* point to the right construct based on type */
@@ -3417,7 +3449,7 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 	if (req->reqstate != STATE_UNDEF)
 		ereport(ERROR,
 				(errmsg("an active request is currently active for connector %s",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("wait for it to finish and try again later")));
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
@@ -3426,7 +3458,7 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 	LWLockRelease(&sdb_state->lock);
 
 	elog(WARNING, "sent update offset request interrupt to dbz connector (%s)",
-			text_to_cstring(name_text));
+			NameStr(*name));
 	PG_RETURN_INT32(0);
 }
 
@@ -3438,7 +3470,7 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 Datum
 synchdb_add_conninfo(PG_FUNCTION_ARGS)
 {
-	text *name_text = PG_GETARG_TEXT_PP(0);
+	Name name = PG_GETARG_NAME(0);
 	text *hostname_text = PG_GETARG_TEXT_PP(1);
 	unsigned int port = PG_GETARG_UINT32(2);
 	text *user_text = PG_GETARG_TEXT_PP(3);
@@ -3447,23 +3479,13 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	text *dst_db_text = PG_GETARG_TEXT_PP(6);
 	text *table_text = PG_GETARG_TEXT_PP(7);
 	text *connector_text = PG_GETARG_TEXT_PP(8);
-	text *rulefile_text = PG_GETARG_TEXT_PP(9);
 	char *connector = NULL;
 
 	ConnectionInfo connInfo = {0};
 	StringInfoData strinfo;
 	initStringInfo(&strinfo);
 
-	/* Sanity check on input arguments */
-	if (VARSIZE(name_text) - VARHDRSZ == 0 ||
-			VARSIZE(name_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("name cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_NAME_SIZE)));
-	}
-	strlcpy(connInfo.name, text_to_cstring(name_text), SYNCHDB_CONNINFO_NAME_SIZE);
+	strlcpy(connInfo.name, NameStr(*name), SYNCHDB_CONNINFO_NAME_SIZE);
 
 	/* Sanity check on input arguments */
 	if (VARSIZE(hostname_text) - VARHDRSZ == 0 ||
@@ -3553,29 +3575,16 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	}
 	connector = text_to_cstring(connector_text);
 
-	/* todo: check more */
 	if (strcasecmp(connector, "mysql") && strcasecmp(connector, "sqlserver")
 			&& strcasecmp(connector, "oracle"))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unsupported connector")));
 
-	/* rulefile can be empty or NULL */
-	if (VARSIZE(rulefile_text) - VARHDRSZ == 0)
-		strlcpy(connInfo.rulefile, "null", SYNCHDB_CONNINFO_RULEFILENAME_SIZE);
-	else if (VARSIZE(rulefile_text) - VARHDRSZ > SYNCHDB_CONNINFO_RULEFILENAME_SIZE)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("rule filename cannot be longer than %d",
-						 SYNCHDB_CONNINFO_RULEFILENAME_SIZE)));
-	else
-		strlcpy(connInfo.rulefile, text_to_cstring(rulefile_text), SYNCHDB_CONNINFO_RULEFILENAME_SIZE);
-
 	appendStringInfo(&strinfo, "INSERT INTO %s (name, isactive, data)"
 			" VALUES ('%s', %s, jsonb_build_object('hostname', '%s', "
 			"'port', %d, 'user', '%s', 'pwd', pgp_sym_encrypt('%s', '%s'), "
-			"'srcdb', '%s', 'dstdb', '%s', 'table', '%s', 'connector', '%s',"
-			"'rule_file', '%s') );",
+			"'srcdb', '%s', 'dstdb', '%s', 'table', '%s', 'connector', '%s') );",
 			SYNCHDB_CONNINFO_TABLE,
 			connInfo.name,
 			"false",
@@ -3587,8 +3596,7 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 			connInfo.srcdb,
 			connInfo.dstdb,
 			connInfo.table,
-			connector,
-			connInfo.rulefile);
+			connector);
 
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
 }
@@ -3601,12 +3609,12 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 Datum
 synchdb_restart_connector(PG_FUNCTION_ARGS)
 {
-	text *name_text = PG_GETARG_TEXT_PP(0);
-	text *snapshot_mode_text = PG_GETARG_TEXT_PP(1);
+	Name name = PG_GETARG_NAME(0);
+	Name snapshot_mode = PG_GETARG_NAME(1);
 	ConnectionInfo connInfo;
 	int ret = -1, connectorId = -1;
 	pid_t pid;
-	char * snapshot_mode;
+	char * _snapshot_mode;
 	char *connector = NULL;
 
 	SynchdbRequest *req;
@@ -3620,12 +3628,12 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 	}
 
 	/* snapshot_mode can be empty or NULL */
-	if (VARSIZE(snapshot_mode_text) - VARHDRSZ == 0)
-		snapshot_mode = "null";
+	if (strlen(NameStr(*snapshot_mode)) == 0)
+		_snapshot_mode = "null";
 	else
-		snapshot_mode = text_to_cstring(snapshot_mode_text);
+		_snapshot_mode = NameStr(*snapshot_mode);
 
-	ret = ra_getConninfoByName(text_to_cstring(name_text), &connInfo, &connector);
+	ret = ra_getConninfoByName(NameStr(*name), &connInfo, &connector);
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -3642,18 +3650,18 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to assign one first")));
 
 	pid = get_shm_connector_pid(connectorId);
 	if (pid == InvalidPid)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) is not running",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
 
 	/* point to the right construct based on type */
@@ -3663,7 +3671,7 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 	if (req->reqstate != STATE_UNDEF)
 		ereport(ERROR,
 				(errmsg("an active request is currently active for connector %s",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("wait for it to finish and try again later")));
 
 	/*
@@ -3675,7 +3683,7 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 
 	/* reqdata contains snapshot mode */
 	memset(req->reqdata, 0, SYNCHDB_ERRMSG_SIZE);
-	snprintf(req->reqdata, SYNCHDB_ERRMSG_SIZE,"%s", snapshot_mode);
+	snprintf(req->reqdata, SYNCHDB_ERRMSG_SIZE,"%s", _snapshot_mode);
 
 	/*
 	 * reqconninfo contains a copy of conninfo recently read in case it has been
@@ -3685,7 +3693,7 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 	LWLockRelease(&sdb_state->lock);
 
 	elog(WARNING, "sent restart request interrupt to dbz connector (%s)",
-			text_to_cstring(name_text));
+			NameStr(*name));
 	PG_RETURN_INT32(0);
 }
 
@@ -3702,7 +3710,7 @@ synchdb_log_jvm_meminfo(PG_FUNCTION_ARGS)
 	SynchdbRequest *req;
 
 	/* Parse input arguments */
-	text *name_text = PG_GETARG_TEXT_PP(0);
+	Name name = PG_GETARG_NAME(0);
 
 	/*
 	 * attach or initialize synchdb shared memory area so we know what is
@@ -3714,17 +3722,17 @@ synchdb_log_jvm_meminfo(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to assign one first")));
 
 	pid = get_shm_connector_pid(connectorId);
 	if (pid == InvalidPid)
 		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not running", text_to_cstring(name_text)),
+				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
 				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
 
 	/* point to the right construct based on type */
@@ -3734,7 +3742,7 @@ synchdb_log_jvm_meminfo(PG_FUNCTION_ARGS)
 	if (req->reqstate != STATE_UNDEF)
 		ereport(ERROR,
 				(errmsg("an active request is currently active for connector %s",
-						text_to_cstring(name_text)),
+						NameStr(*name)),
 				 errhint("wait for it to finish and try again later")));
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
@@ -3742,6 +3750,275 @@ synchdb_log_jvm_meminfo(PG_FUNCTION_ARGS)
 	LWLockRelease(&sdb_state->lock);
 
 	elog(WARNING, "sent memdump request interrupt to dbz connector %s (%d)",
-			text_to_cstring(name_text), connectorId);
+			NameStr(*name), connectorId);
 	PG_RETURN_INT32(0);
+}
+
+Datum
+synchdb_add_objmap(PG_FUNCTION_ARGS)
+{
+	/* Parse input arguments */
+	Name name = PG_GETARG_NAME(0);
+	Name objtype = PG_GETARG_NAME(1);
+	Name srcobj = PG_GETARG_NAME(2);
+	text * dstobj = PG_GETARG_TEXT_PP(3);
+
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	appendStringInfo(&strinfo, "INSERT INTO %s (name, objtype, enabled, srcobj, dstobj)"
+			" VALUES (trim(lower('%s')), trim(lower('%s')), true, trim(lower('%s')), '%s')",
+			SYNCHDB_OBJECT_MAPPING_TABLE,
+			NameStr(*name),
+			NameStr(*objtype),
+			NameStr(*srcobj),
+			escapeSingleQuote(text_to_cstring(dstobj), false));
+
+	appendStringInfo(&strinfo, " ON CONFLICT(name, objtype, srcobj) "
+			"DO UPDATE SET "
+			"enabled = EXCLUDED.enabled,"
+			"dstobj = EXCLUDED.dstobj;");
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_reload_objmap
+ *
+ * This function forces a connector to reload objmap table entries
+ */
+Datum
+synchdb_reload_objmap(PG_FUNCTION_ARGS)
+{
+	int connectorId = -1;
+	pid_t pid;
+	SynchdbRequest *req;
+
+	/* Parse input arguments */
+	Name name = PG_GETARG_NAME(0);
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						NameStr(*name)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
+	pid = get_shm_connector_pid(connectorId);
+	if (pid == InvalidPid)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
+				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
+
+	/* point to the right construct based on type */
+	req = &(sdb_state->connectors[connectorId].req);
+
+	/* an active state change request is currently in progress */
+	if (req->reqstate != STATE_UNDEF)
+		ereport(ERROR,
+				(errmsg("an active request is currently active for connector %s",
+						NameStr(*name)),
+				 errhint("wait for it to finish and try again later")));
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	req->reqstate = STATE_RELOAD_OBJMAP;
+	LWLockRelease(&sdb_state->lock);
+
+	elog(WARNING, "sent reload objmap request interrupt to dbz connector %s (%d)",
+			NameStr(*name), connectorId);
+	PG_RETURN_INT32(0);
+}
+
+/*
+ * synchdb_add_extra_conninfo
+ *
+ * This function configures extra connector parameters and stores them to synchdb_conninfo table
+ */
+Datum
+synchdb_add_extra_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	Name sslmode = PG_GETARG_NAME(1);
+	text * ssl_keystore_text = PG_GETARG_TEXT_PP(2);
+	text * ssl_keystore_pass_text = PG_GETARG_TEXT_PP(3);
+	text * ssl_truststore_text = PG_GETARG_TEXT_PP(4);
+	text * ssl_truststore_pass_text = PG_GETARG_TEXT_PP(5);
+
+	ExtraConnectionInfo extraconninfo = {0};
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	strlcpy(extraconninfo.ssl_mode, NameStr(*sslmode), SYNCHDB_CONNINFO_NAME_SIZE);
+
+	if (VARSIZE(ssl_keystore_text) - VARHDRSZ == 0)
+		strlcpy(extraconninfo.ssl_keystore, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	else if (VARSIZE(ssl_keystore_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ssl_keystore cannot be longer than %d",
+						 SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+	else
+		strlcpy(extraconninfo.ssl_keystore, text_to_cstring(ssl_keystore_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+
+	if (VARSIZE(ssl_keystore_pass_text) - VARHDRSZ == 0)
+		strlcpy(extraconninfo.ssl_keystore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
+	else if (VARSIZE(ssl_keystore_pass_text) - VARHDRSZ > SYNCHDB_CONNINFO_PASSWORD_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ssl_keystore_pass cannot be longer than %d",
+						 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
+	else
+		strlcpy(extraconninfo.ssl_keystore_pass, text_to_cstring(ssl_keystore_pass_text), SYNCHDB_CONNINFO_PASSWORD_SIZE);
+
+	if (VARSIZE(ssl_truststore_text) - VARHDRSZ == 0)
+		strlcpy(extraconninfo.ssl_truststore, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	else if (VARSIZE(ssl_truststore_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ssl_truststore cannot be longer than %d",
+						 SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+	else
+		strlcpy(extraconninfo.ssl_truststore, text_to_cstring(ssl_truststore_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+
+	if (VARSIZE(ssl_truststore_pass_text) - VARHDRSZ == 0)
+		strlcpy(extraconninfo.ssl_truststore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
+	else if (VARSIZE(ssl_truststore_pass_text) - VARHDRSZ > SYNCHDB_CONNINFO_PASSWORD_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ssl_truststore_pass cannot be longer than %d",
+						 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
+	else
+		strlcpy(extraconninfo.ssl_truststore_pass, text_to_cstring(ssl_truststore_pass_text), SYNCHDB_CONNINFO_PASSWORD_SIZE);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
+			"'ssl_mode', '%s', "
+			"'ssl_keystore', '%s', "
+			"'ssl_keystore_pass', pgp_sym_encrypt('%s', '%s'), "
+			"'ssl_truststore', '%s', "
+			"'ssl_truststore_pass', pgp_sym_encrypt('%s', '%s') )::jsonb "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			extraconninfo.ssl_mode,
+			extraconninfo.ssl_keystore,
+			extraconninfo.ssl_keystore_pass,
+			SYNCHDB_SECRET,
+			extraconninfo.ssl_truststore,
+			extraconninfo.ssl_truststore_pass,
+			SYNCHDB_SECRET,
+			NameStr(*name));
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_del_extra_conninfo
+ *
+ * This function deletes all extra connector parameters created by synchdb_add_extra_conninfo()
+ */
+Datum
+synchdb_del_extra_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
+			"'ssl_mode', "
+			"'ssl_keystore', "
+			"'ssl_keystore_pass', "
+			"'ssl_truststore', "
+			"'ssl_truststore_pass'] "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			NameStr(*name));
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_del_extra_conninfo
+ *
+ * This function deletes a connector info record created by synchdb_add_conninfo()
+ */
+Datum
+synchdb_del_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	int connectorId = -1;
+	pid_t pid = InvalidPid;
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+	synchdb_init_shmem();
+
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	/* if connector is running, we will attemppt to shut it down */
+	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	if (connectorId >= 0)
+	{
+		pid = get_shm_connector_pid(connectorId);
+		if (pid != InvalidPid)
+		{
+			elog(WARNING, "terminating dbz connector (%s) with pid %d. Shutdown timeout: %d ms",
+					NameStr(*name), (int)pid, DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC);
+			DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC));
+			set_shm_connector_pid(connectorId, InvalidPid);
+
+		}
+	}
+
+	/* then, we remove the connector info record */
+	appendStringInfo(&strinfo, "DELETE FROM %s WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			NameStr(*name));
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_del_objmap
+ *
+ * This function marks a objmap rule as disabled
+ */
+Datum
+synchdb_del_objmap(PG_FUNCTION_ARGS)
+{
+	/* Parse input arguments */
+	Name name = PG_GETARG_NAME(0);
+	Name objtype = PG_GETARG_NAME(1);
+	Name srcobj = PG_GETARG_NAME(2);
+
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET "
+			"enabled = false WHERE "
+			"name = '%s' AND objtype = trim(lower('%s')) AND "
+			"srcobj = trim(lower('%s'));",
+			SYNCHDB_OBJECT_MAPPING_TABLE,
+			NameStr(*name),
+			NameStr(*objtype),
+			NameStr(*srcobj));
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
 }
