@@ -19,6 +19,7 @@
 #ifndef SYNCHDB_FORMAT_CONVERTER_H_
 #define SYNCHDB_FORMAT_CONVERTER_H_
 
+#include "utils/hsearch.h"
 #include "nodes/pg_list.h"
 #include "replication_agent.h"
 #include "synchdb.h"
@@ -100,6 +101,20 @@ typedef struct dbz_dml
 	List * columnValuesAfter;	/* list of DBZ_DML_COLUMN_VALUE */
 } DBZ_DML;
 
+/* dml cache structure */
+typedef struct dataCacheKey
+{
+	char schema[SYNCHDB_CONNINFO_DB_NAME_SIZE];
+	char table[SYNCHDB_CONNINFO_DB_NAME_SIZE];
+} DataCacheKey;
+typedef struct dataCacheEntry
+{
+	DataCacheKey key;
+	TupleDesc tupdesc;
+	Oid tableoid;
+	HTAB * typeidhash;
+} DataCacheEntry;
+
 typedef struct datatypeHashKey
 {
 	char extTypeName[SYNCHDB_DATATYPE_NAME_SIZE];
@@ -137,7 +152,7 @@ typedef struct transformExpressionHashEntry
 } TransformExpressionHashEntry;
 
 /* Function prototypes */
-int fc_processDBZChangeEvent(const char * event);
+int fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats);
 ConnectorType fc_get_connector_type(const char * connector);
 void fc_initFormatConverter(ConnectorType connectorType);
 void fc_deinitFormatConverter(ConnectorType connectorType);

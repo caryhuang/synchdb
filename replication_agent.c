@@ -31,10 +31,16 @@
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 
+/* external global variables */
 extern bool synchdb_dml_use_spi;
 extern uint64 SPI_processed;
 extern int myConnectorId;
 
+/*
+ * swap_tokens
+ *
+ * helper function to swap specific token strings with the given data
+ */
 static char *
 swap_tokens(const char * expression, const char * data, const char * wkb, const char * srid)
 {
@@ -98,6 +104,8 @@ swap_tokens(const char * expression, const char * data, const char * wkb, const 
 	return pstrdup(filledexpression);
 }
 /*
+ * spi_execute_select_one
+ *
  * This function performs SPI_execute SELECT and returns an array of
  * Datums that represent each column, Caller is expected to know exactly
  * how to process this array of Datums
@@ -194,7 +202,7 @@ spi_execute(const char * query, ConnectorType type)
 {
 	int ret = -1;
 	bool skiptx = false;
-
+	MemoryContext oldContext, execContext;
 	/*
 	 * if we are already in transaction or transaction block, we can skip
 	 * the transaction and snapshot acquisition code below
@@ -210,6 +218,14 @@ spi_execute(const char * query, ConnectorType type)
 			StartTransactionCommand();
 			PushActiveSnapshot(GetTransactionSnapshot());
 		}
+
+		/* Create a temporary memory context for query execution */
+		execContext = AllocSetContextCreate(CurrentMemoryContext,
+											"synchdb_spi_exec_context",
+											ALLOCSET_DEFAULT_SIZES);
+
+		/* Switch to the temporary memory context */
+		oldContext = MemoryContextSwitchTo(execContext);
 
 		if (SPI_connect() != SPI_OK_CONNECT)
 		{
@@ -238,12 +254,19 @@ spi_execute(const char * query, ConnectorType type)
 			elog(ERROR, "SPI_finish failed");
 		}
 
+		/* Switch back to the original memory context and reset the temporary one */
+		MemoryContextSwitchTo(oldContext);
+		MemoryContextReset(execContext);
+
 		if (!skiptx)
 		{
 			/* Commit the transaction */
 			PopActiveSnapshot();
 			CommitTransactionCommand();
 		}
+
+		/* Delete the temporary context */
+		MemoryContextDelete(execContext);
 	}
 	PG_CATCH();
 	{
@@ -255,6 +278,12 @@ spi_execute(const char * query, ConnectorType type)
 		FreeErrorData(errdata);
 		SPI_finish();
 		ret = -1;
+		/* Ensure the temporary memory context is cleaned up */
+		if (execContext)
+		{
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(execContext);
+		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -289,9 +318,6 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 	 */
 	PG_TRY();
 	{
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		rel = table_open(tableoid, NoLock);
 
 		/* initialize estate */
@@ -351,6 +377,9 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 		/* Do the insert. */
 		ExecSimpleRelationInsert(resultRelInfo, estate, slot);
 
+		/* increment command ID */
+		CommandCounterIncrement();
+
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
 
@@ -358,9 +387,6 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{
@@ -412,9 +438,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 	 */
 	PG_TRY();
 	{
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		rel = table_open(tableoid, NoLock);
 
 		/* initialize estate */
@@ -542,15 +565,15 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			ret = -1;
 		}
 
+		/* increment command ID */
+		CommandCounterIncrement();
+
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
 		EvalPlanQualEnd(&epqstate);
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
 		table_close(rel, NoLock);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{
@@ -568,7 +591,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-
 	return ret;
 }
 
@@ -602,9 +624,6 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 	 */
 	PG_TRY();
 	{
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		rel = table_open(tableoid, NoLock);
 
 		/* initialize estate */
@@ -701,15 +720,15 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 			ret = -1;
 		}
 
+		/* increment command ID */
+		CommandCounterIncrement();
+
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
 		EvalPlanQualEnd(&epqstate);
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
 		table_close(rel, NoLock);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{
@@ -755,8 +774,9 @@ ra_executePGDDL(PG_DDL * pgddl, ConnectorType type)
  * or calls a custom handler function.
  */
 int
-ra_executePGDML(PG_DML * pgdml, ConnectorType type)
+ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats)
 {
+	int ret = -1;
 	if (!pgdml)
     {
         elog(WARNING, "Invalid DML operation");
@@ -766,29 +786,46 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type)
 	switch (pgdml->op)
 	{
 		case 'r':  // Read operation
+		{
+			if (synchdb_dml_use_spi)
+				ret = spi_execute(pgdml->dmlquery, type);
+			else
+				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type);
+
+			increment_connector_statistics(myBatchStats, STATS_READ, 1);
+			break;
+		}
 		case 'c':  // Create operation
 		{
 			if (synchdb_dml_use_spi)
-				return spi_execute(pgdml->dmlquery, type);
+				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				return synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type);
+				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type);
+
+			increment_connector_statistics(myBatchStats, STATS_CREATE, 1);
+			break;
 		}
 		case 'u':  // Update operation
 		{
 			if (synchdb_dml_use_spi)
-				return spi_execute(pgdml->dmlquery, type);
+				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				return synchdb_handle_update(pgdml->columnValuesBefore,
+				ret = synchdb_handle_update(pgdml->columnValuesBefore,
 											 pgdml->columnValuesAfter,
 											 pgdml->tableoid,
 											 type);
+			increment_connector_statistics(myBatchStats, STATS_UPDATE, 1);
+			break;
 		}
 		case 'd':  // Delete operation
 		{
 			if (synchdb_dml_use_spi)
-				return spi_execute(pgdml->dmlquery, type);
+				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				return synchdb_handle_delete(pgdml->columnValuesBefore, pgdml->tableoid, type);
+				ret = synchdb_handle_delete(pgdml->columnValuesBefore, pgdml->tableoid, type);
+
+			increment_connector_statistics(myBatchStats, STATS_DELETE, 1);
+			break;
 		}
 		default:
 		{
@@ -796,9 +833,15 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type)
 			return spi_execute(pgdml->dmlquery, type);
 		}
 	}
-	return -1;
+	return ret;
 }
 
+/*
+ * ra_getConninfoByName
+ *
+ * This function executes a SELECT query on synchdb_conninfo table with the given
+ * connector name as filter and returns a ConnectionInfo structure
+ */
 int
 ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** connector)
 {
@@ -850,12 +893,23 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	return 0;
 }
 
+/*
+ * ra_executeCommand
+ *
+ * Main entry to execute a query with SPI
+ */
 int
 ra_executeCommand(const char * query)
 {
 	return spi_execute(query, TYPE_UNDEF);
 }
 
+/*
+ * ra_listConnInfoNames
+ *
+ * This function executes a query on synchdb_conninfo and returns a list of connector
+ * names
+ */
 int
 ra_listConnInfoNames(char ** out, int * numout)
 {
@@ -925,6 +979,11 @@ ra_listConnInfoNames(char ** out, int * numout)
 	return 0;
 }
 
+/*
+ * ra_transformDataExpression
+ *
+ * Main entry to perform data transformation on the given data using SPI
+ */
 char *
 ra_transformDataExpression(char * data, char * wkb, char * srid, char * expression)
 {

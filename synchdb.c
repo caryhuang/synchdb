@@ -38,34 +38,54 @@
 #include "funcapi.h"
 #include "synchdb.h"
 #include "replication_agent.h"
+#include "access/xact.h"
+#include "utils/snapmgr.h"
 
 PG_MODULE_MAGIC;
 
 /* Function declarations for user-facing functions */
 PG_FUNCTION_INFO_V1(synchdb_stop_engine_bgw);
 PG_FUNCTION_INFO_V1(synchdb_start_engine_bgw);
+PG_FUNCTION_INFO_V1(synchdb_start_engine_bgw_snapshot_mode);
 PG_FUNCTION_INFO_V1(synchdb_get_state);
 PG_FUNCTION_INFO_V1(synchdb_pause_engine);
 PG_FUNCTION_INFO_V1(synchdb_resume_engine);
 PG_FUNCTION_INFO_V1(synchdb_set_offset);
 PG_FUNCTION_INFO_V1(synchdb_add_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_restart_connector);
+PG_FUNCTION_INFO_V1(synchdb_log_jvm_meminfo);
+PG_FUNCTION_INFO_V1(synchdb_get_stats);
+PG_FUNCTION_INFO_V1(synchdb_reset_stats);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
 #define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
 #define MAX_PATH_LENGTH 1024
-#define MAX_JAVA_OPTION_LENGTH 512
+#define MAX_JAVA_OPTION_LENGTH 256
 
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
 int myConnectorId = -1;	/* Global index number to SynchdbSharedState in shared memory - global per worker */
-BatchInfo myBatchInfo;
+ExtraConnectionInfo extraConnInfo = {0}; /* global extra connector parameters read from rule file */
 
 /* GUC variables */
 int synchdb_worker_naptime = 500;
 bool synchdb_dml_use_spi = false;
 bool synchdb_auto_launcher = true;
+int dbz_batch_size = 2048;
+int dbz_queue_size = 8192;
+char * dbz_skipped_operations = "t";
+int dbz_connect_timeout_ms = 30000;
+int dbz_query_timeout_ms = 600000;
+int jvm_max_heap_size = 0;
+int dbz_snapshot_thread_num = 2;
+int dbz_snapshot_fetch_size = 0; /* 0: auto */
+int dbz_snapshot_min_row_to_stream_results = 0; /* 0: always stream */
+int dbz_incremental_snapshot_chunk_size = 2048;
+char * dbz_incremental_snapshot_watermarking_strategy = "insert_insert";
+int dbz_offset_flush_interval_ms = 60000;
+bool dbz_capture_only_selected_table_ddl = true;
+int synchdb_max_connector_workers = 30;
 
 /* JNI-related variables */
 static JavaVM *jvm = NULL; /* represents java vm instance */
@@ -80,11 +100,13 @@ PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
 /* Static function prototypes */
 static int dbz_engine_stop(void);
 static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
-static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal, BatchInfo * batchinfo);
+static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal,
+		BatchInfo * batchinfo, SynchdbStatistics * myBatchStats);
 static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode);
 static char *dbz_engine_get_offset(int connectorId);
-static int dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto);
+static int dbz_mark_batch_complete(int batchid);
 static TupleDesc synchdb_state_tupdesc(void);
+static TupleDesc synchdb_stats_tupdesc(void);
 static void synchdb_init_shmem(void);
 static void synchdb_detach_shmem(int code, Datum arg);
 static void prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid, const char * snapshotMode);
@@ -97,6 +119,342 @@ static void initialize_jvm(void);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
 static void main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
+static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass);
+static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
+
+/*
+ * count_active_connectors
+ *
+ * helper function to count number of active connectors
+ *
+ * @return: number of active connectors
+ */
+static int
+count_active_connectors(void)
+{
+	int i = 0;
+
+	for (i = 0; i < synchdb_max_connector_workers; i++)
+	{
+		/* if an empty name is found, there is no need to continue counting */
+		if (strlen(sdb_state->connectors[i].conninfo.name) == 0)
+			break;
+	}
+	return i;
+}
+/*
+ * set_extra_dbz_parameters - configures extra paramters for Debezium runner
+ *
+ * This function builds myParametersObj with extra parameters to be passed
+ * to the Debezium Java side.
+ *
+ * @return: void
+ */
+static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass)
+{
+	jmethodID setBatchSize, setQueueSize, setSkippedOperations, setConnectTimeout, setQueryTimeout;
+	jmethodID setSnapshotThreadNum, setSnapshotFetchSize, setSnapshotMinRowToStreamResults;
+	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
+	jmethodID setOffsetFlushIntervalMs, setCaptureOnlySelectedTableDDL;
+	jmethodID setSslmode, setSslKeystore, setSslKeystorePass, setSslTruststore, setSslTruststorePass;
+	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
+	jstring jdbz_sslmode, jdbz_sslkeystore, jdbz_sslkeystorepass, jdbz_ssltruststore, jdbz_ssltruststorepass;
+
+	setBatchSize = (*env)->GetMethodID(env, myParametersClass, "setBatchSize",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setBatchSize)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setBatchSize, dbz_batch_size);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setBatchSize method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setBatchSize method");
+
+	setQueueSize = (*env)->GetMethodID(env, myParametersClass, "setQueueSize",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setQueueSize)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setQueueSize, dbz_queue_size);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setQueueSize method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setQueueSize method");
+
+	setConnectTimeout = (*env)->GetMethodID(env, myParametersClass, "setConnectTimeout",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setConnectTimeout)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setConnectTimeout, dbz_connect_timeout_ms);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setConnectTimeout method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setConnectTimeout method");
+
+	setQueryTimeout = (*env)->GetMethodID(env, myParametersClass, "setQueryTimeout",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setQueryTimeout)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setQueryTimeout, dbz_query_timeout_ms);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setQueryTimeout method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setQueryTimeout method");
+
+	jdbz_skipped_operations = (*env)->NewStringUTF(env, dbz_skipped_operations);
+
+	setSkippedOperations = (*env)->GetMethodID(env, myParametersClass, "setSkippedOperations",
+			"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setSkippedOperations)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSkippedOperations, jdbz_skipped_operations);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setSkippedOperations method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setSkippedOperations method");
+
+	if (jdbz_skipped_operations)
+			(*env)->DeleteLocalRef(env, jdbz_skipped_operations);
+
+	setSnapshotThreadNum = (*env)->GetMethodID(env, myParametersClass, "setSnapshotThreadNum",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setSnapshotThreadNum)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSnapshotThreadNum, dbz_snapshot_thread_num);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setSnapshotThreadNum method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setSnapshotThreadNum method");
+
+	setSnapshotFetchSize = (*env)->GetMethodID(env, myParametersClass, "setSnapshotFetchSize",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setSnapshotFetchSize)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSnapshotFetchSize, dbz_snapshot_fetch_size);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setSnapshotFetchSize method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setSnapshotFetchSize method");
+
+	setSnapshotMinRowToStreamResults = (*env)->GetMethodID(env, myParametersClass, "setSnapshotMinRowToStreamResults",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setSnapshotMinRowToStreamResults)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSnapshotMinRowToStreamResults, dbz_snapshot_min_row_to_stream_results);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setSnapshotMinRowToStreamResults method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setSnapshotMinRowToStreamResults method");
+
+	setIncrementalSnapshotChunkSize = (*env)->GetMethodID(env, myParametersClass, "setIncrementalSnapshotChunkSize",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setIncrementalSnapshotChunkSize)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIncrementalSnapshotChunkSize, dbz_incremental_snapshot_chunk_size);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setIncrementalSnapshotChunkSize method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setIncrementalSnapshotChunkSize method");
+
+	jdbz_watermarking_strategy = (*env)->NewStringUTF(env, dbz_incremental_snapshot_watermarking_strategy);
+
+	setIncrementalSnapshotWatermarkingStrategy = (*env)->GetMethodID(env, myParametersClass, "setIncrementalSnapshotWatermarkingStrategy",
+			"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setIncrementalSnapshotWatermarkingStrategy)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIncrementalSnapshotWatermarkingStrategy, jdbz_watermarking_strategy);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setIncrementalSnapshotWatermarkingStrategy method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setIncrementalSnapshotWatermarkingStrategy method");
+
+	if (jdbz_watermarking_strategy)
+			(*env)->DeleteLocalRef(env, jdbz_watermarking_strategy);
+
+	setOffsetFlushIntervalMs = (*env)->GetMethodID(env, myParametersClass, "setOffsetFlushIntervalMs",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setOffsetFlushIntervalMs)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setOffsetFlushIntervalMs, dbz_offset_flush_interval_ms);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setOffsetFlushIntervalMs method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setOffsetFlushIntervalMs method");
+
+	setCaptureOnlySelectedTableDDL = (*env)->GetMethodID(env, myParametersClass, "setCaptureOnlySelectedTableDDL",
+			"(Z)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setCaptureOnlySelectedTableDDL)
+	{
+		jboolean bval = dbz_capture_only_selected_table_ddl ? JNI_TRUE : JNI_FALSE;
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setCaptureOnlySelectedTableDDL, bval);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setCaptureOnlySelectedTableDDL method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setCaptureOnlySelectedTableDDL method");
+
+	jdbz_watermarking_strategy = (*env)->NewStringUTF(env, dbz_incremental_snapshot_watermarking_strategy);
+
+	setIncrementalSnapshotWatermarkingStrategy = (*env)->GetMethodID(env, myParametersClass, "setIncrementalSnapshotWatermarkingStrategy",
+			"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setIncrementalSnapshotWatermarkingStrategy)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIncrementalSnapshotWatermarkingStrategy, jdbz_watermarking_strategy);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setIncrementalSnapshotWatermarkingStrategy method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setIncrementalSnapshotWatermarkingStrategy method");
+
+	if (jdbz_watermarking_strategy)
+			(*env)->DeleteLocalRef(env, jdbz_watermarking_strategy);
+
+	if (extraConnInfo.ssl_mode != NULL)
+	{
+		jdbz_sslmode = (*env)->NewStringUTF(env, extraConnInfo.ssl_mode);
+
+		setSslmode = (*env)->GetMethodID(env, myParametersClass, "setSslmode",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setSslmode)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslmode, jdbz_sslmode);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setSslmode method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setSslmode method");
+
+		if (jdbz_sslmode)
+				(*env)->DeleteLocalRef(env, jdbz_sslmode);
+	}
+
+	if (extraConnInfo.ssl_keystore != NULL)
+	{
+		jdbz_sslkeystore = (*env)->NewStringUTF(env, extraConnInfo.ssl_keystore);
+
+		setSslKeystore = (*env)->GetMethodID(env, myParametersClass, "setSslKeystore",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setSslKeystore)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslKeystore, jdbz_sslkeystore);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setSslKeystore method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setSslKeystore method");
+
+		if (jdbz_sslkeystore)
+				(*env)->DeleteLocalRef(env, jdbz_sslkeystore);
+	}
+
+	if (extraConnInfo.ssl_keystore_pass != NULL)
+	{
+		jdbz_sslkeystorepass = (*env)->NewStringUTF(env, extraConnInfo.ssl_keystore_pass);
+
+		setSslKeystorePass = (*env)->GetMethodID(env, myParametersClass, "setSslKeystorePass",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setSslKeystorePass)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslKeystorePass, jdbz_sslkeystorepass);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setSslKeystorePass method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setSslKeystorePass method");
+
+		if (jdbz_sslkeystorepass)
+				(*env)->DeleteLocalRef(env, jdbz_sslkeystorepass);
+	}
+
+	if (extraConnInfo.ssl_truststore != NULL)
+	{
+		jdbz_ssltruststore = (*env)->NewStringUTF(env, extraConnInfo.ssl_truststore);
+
+		setSslTruststore = (*env)->GetMethodID(env, myParametersClass, "setSslTruststore",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setSslTruststore)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslTruststore, jdbz_ssltruststore);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setSslTruststore method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setSslTruststore method");
+
+		if (jdbz_ssltruststore)
+				(*env)->DeleteLocalRef(env, jdbz_ssltruststore);
+	}
+
+	if (extraConnInfo.ssl_truststore_pass != NULL)
+	{
+		jdbz_ssltruststorepass = (*env)->NewStringUTF(env, extraConnInfo.ssl_truststore_pass);
+
+		setSslTruststorePass = (*env)->GetMethodID(env, myParametersClass, "setSslTruststorePass",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setSslTruststorePass)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslTruststorePass, jdbz_ssltruststorepass);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setSslTruststorePass method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setSslTruststorePass method");
+
+		if (jdbz_ssltruststorepass)
+				(*env)->DeleteLocalRef(env, jdbz_ssltruststorepass);
+	}
+	/*
+	 * additional parameters that we want to pass to Debezium on the java side
+	 * will be added here, Make sure to add the matching methods in the MyParameters
+	 * inner class inside DebeziumRunner class.
+	 */
+}
 
 /*
  * dbz_engine_stop - Stop the Debezium engine
@@ -197,6 +555,18 @@ dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj)
 	return 0;
 }
 
+/*
+ * processCompletionMessage - completion message processor
+ *
+ * This function processes the completion message sent from the Debezium runner
+ * in the event of an connector exit
+ *
+ * @param eventStr: the completion message string
+ * @param myConnectorId: Connector ID of interest
+ * @param dbzExitSignal: Set by the function to indicate connector has exited
+ *
+ * @return: void
+ */
 static void
 processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExitSignal)
 {
@@ -220,7 +590,8 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
 		*dbzExitSignal = true;
 	}
 
-	/* message is the last error or exit message the connector produced before
+	/*
+	 * message is the last error or exit message the connector produced before
 	 * it exited
 	 */
 	message = strtok(NULL, ";");
@@ -230,6 +601,7 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
 		set_shm_connector_errmsg(myConnectorId, message);
 	}
 }
+
 /*
  * dbz_engine_get_change - Retrieve and process change events from the Debezium engine
  *
@@ -239,11 +611,16 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
  * @param env: Pointer to the JNI environment
  * @param cls: Pointer to the DebeziumRunner class
  * @param obj: Pointer to the DebeziumRunner object
+ * @param myConnectorId: The connector ID of interest
+ * @param dbzExitSignal: Set by this function to indicate the connector has exited
+ * @param batchinfo: Set by this function to indicate a valid batch is in progress
+ * @param myBatchStats: update connector statistics to this struct
  *
  * @return: 0 on success, -1 on failure
  */
 static int
-dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal, BatchInfo * batchinfo)
+dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId,
+		bool * dbzExitSignal, BatchInfo * batchinfo, SynchdbStatistics * myBatchStats)
 {
 	jmethodID getChangeEvents, sizeMethod, getMethod;
 	jobject changeEventsList;
@@ -289,6 +666,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	if (listClass == NULL)
 	{
 		elog(WARNING, "Failed to find java list class");
+		(*env)->DeleteLocalRef(env, changeEventsList);
 		return -1;
 	}
 
@@ -296,6 +674,8 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	if (sizeMethod == NULL)
 	{
 		elog(WARNING, "Failed to find java list.size method");
+		(*env)->DeleteLocalRef(env, changeEventsList);
+		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
 	}
 
@@ -312,7 +692,13 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 
 	if (size == 0 || size < 0)
 	{
-		/* nothing to process. Return */
+		/* nothing to process, set current stage to CDC and return */
+		if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+		{
+			set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+		}
+		(*env)->DeleteLocalRef(env, changeEventsList);
+		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
 	}
 	batchinfo->batchSize = size - 1;	/* minus the metadata record */
@@ -345,6 +731,10 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		 * has exited and we may need to exit later as well.
 		 */
 		processCompletionMessage(eventStr, myConnectorId, dbzExitSignal);
+        (*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
+        (*env)->DeleteLocalRef(env, event);
+        (*env)->DeleteLocalRef(env, changeEventsList);
+        (*env)->DeleteLocalRef(env, listClass);
 		return 0;
 	}
 	/* check if it is a batch change request */
@@ -355,9 +745,14 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		 * as we process the batch
 		 */
 		batchinfo->batchId = atoi(&eventStr[2]);
-		elog(WARNING, "Synchdb received batchid(%d) with size(%d)", batchinfo->batchId, size-1);
+		elog(DEBUG1, "Synchdb received batchid(%d) with size(%d)", batchinfo->batchId, size-1);
 
-		batchinfo->currRecordIndex = -1;
+		/* free reference to metadata element at index 0 */
+		(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
+		(*env)->DeleteLocalRef(env, event);
+
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
 
 		/* now process the rest of the changes in the batch */
 		for (int i = 1; i < size; i++)
@@ -366,34 +761,37 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			if (event == NULL)
 			{
 				elog(DEBUG1, "dbz_engine_get_change: Received NULL event at index %d", i);
+				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 				continue;
 			}
 
 			eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
 			if (eventStr == NULL)
 			{
-				elog(DEBUG1, "dbz_engine_get_change: Failed to get string for event at index %d", i);
+				elog(WARNING, "dbz_engine_get_change: Failed to get string for event at index %d", i);
 				(*env)->DeleteLocalRef(env, event);
+				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 				continue;
 			}
 
 			elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
 			/* change event message, send to format converter */
-			if (fc_processDBZChangeEvent(eventStr) != 0)
+			if (fc_processDBZChangeEvent(eventStr, myBatchStats) != 0)
 			{
 				elog(DEBUG1, "dbz_engine_get_change: Failed to process event at index %d", i);
 			}
 
 			(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
 			(*env)->DeleteLocalRef(env, event);
-
-			/*
-			 * if we are still here (not long jump to error handler in case of elog(ERROR)),
-			 * we consider the record as processed though it may have been skipped in
-			 * fc_processDBZChangeEvent()
-			 */
-			batchinfo->currRecordIndex++;
 		}
+
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+
+		increment_connector_statistics(myBatchStats, STATS_TOTAL_CHANGE_EVENT, size-1);
+
+		/* read offset currently flushed to file for displaying to user */
+		set_shm_dbz_offset(myConnectorId);
 	}
 	else
 	{
@@ -412,15 +810,18 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
  *
  * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
  * @param connectorType: The type of connector to start
+ * @param snapshotMode: Snapshot mode to start the connector with
  *
  * @return: 0 on success, -1 on failure
  */
 static int
 dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode)
 {
-	jmethodID mid;
+	jmethodID mid, paramConstruct;
 	jstring jHostname, jUser, jPassword, jDatabase, jTable, jName, jSnapshot;
 	jthrowable exception;
+	jclass myParametersClass;
+	jobject myParametersObj;
 
 	elog(LOG, "dbz_engine_start: Starting dbz engine %s:%d ", connInfo->hostname, connInfo->port);
 	if (!jvm)
@@ -435,16 +836,23 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 		return -1;
 	}
 
-	/* Find the startEngine method */
-	mid = (*env)->GetMethodID(env, cls, "startEngine",
-							  "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
-	if (mid == NULL)
+	myParametersClass = (*env)->FindClass(env, "com/example/DebeziumRunner$MyParameters");
+	if (!myParametersClass)
 	{
-		elog(WARNING, "Failed to find startEngine method");
+		elog(WARNING, "failed to find MyParameters class");
 		return -1;
 	}
 
-	/* Create Java strings from C strings */
+	paramConstruct = (*env)->GetMethodID(env, myParametersClass, "<init>",
+			"(Lcom/example/DebeziumRunner;Ljava/lang/String;ILjava/lang/String;ILjava/lang/String;"
+			"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+	if (paramConstruct == NULL)
+	{
+		elog(WARNING, "failed to find myParameters Constructor");
+		return -1;
+	}
+
+	/* prepare required parameters */
 	jHostname = (*env)->NewStringUTF(env, connInfo->hostname);
 	jUser = (*env)->NewStringUTF(env, connInfo->user);
 	jPassword = (*env)->NewStringUTF(env, connInfo->pwd);
@@ -453,8 +861,28 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	jName = (*env)->NewStringUTF(env, connInfo->name);
 	jSnapshot = (*env)->NewStringUTF(env, snapshotMode);
 
+	myParametersObj = (*env)->NewObject(env, myParametersClass, paramConstruct, obj,
+			jName, connectorType, jHostname, connInfo->port, jUser, jPassword,
+			jDatabase, jTable, jSnapshot);
+	if (!myParametersObj)
+	{
+		elog(WARNING, "failed to create MyParameters object");
+		return -1;
+	}
+
+	/* set extra parameters */
+	set_extra_dbz_parameters(myParametersObj, myParametersClass);
+
+	/* Find the startEngine method */
+	mid = (*env)->GetMethodID(env, cls, "startEngine", "(Lcom/example/DebeziumRunner$MyParameters;)V");
+	if (mid == NULL)
+	{
+		elog(WARNING, "Failed to find startEngine method");
+		return -1;
+	}
+
 	/* Call the Java method */
-	(*env)->CallVoidMethod(env, obj, mid, jHostname, connInfo->port, jUser, jPassword, jDatabase, jTable, connectorType, jName, jSnapshot);
+	(*env)->CallVoidMethod(env, obj, mid, myParametersObj);
 
 	/* Check for exceptions */
 	exception = (*env)->ExceptionOccurred(env);
@@ -494,7 +922,7 @@ cleanup:
  * This function retrieves the current offset for a specific connector type
  * from the Debezium engine.
  *
- * @param connectorType: The type of connector to get the offset for
+ * @param connectorId: The connector ID of interest
  *
  * @return: The offset as a string (caller must free), or NULL on failure
  */
@@ -583,13 +1011,46 @@ dbz_engine_get_offset(int connectorId)
 }
 
 /*
+ * dbz_engine_memory_dump - Logs memory summary of JVM
+ *
+ * This function prints current heap and non-heap memory allocated
+ * and used by the connector JVM.
+ */
+static void
+dbz_engine_memory_dump(void)
+{
+	jmethodID jvmMemDump;
+
+	if (!jvm)
+	{
+		elog(WARNING, "jvm not initialized");
+		return;
+	}
+
+	if (!env)
+	{
+		elog(WARNING, "jvm env not initialized");
+		return;
+	}
+
+	jvmMemDump = (*env)->GetMethodID(env, cls, "jvmMemDump", "()V");
+	if (jvmMemDump == NULL)
+	{
+		elog(WARNING, "Failed to find jvmMemDump method");
+		return;
+	}
+
+	(*env)->CallVoidMethod(env, obj, jvmMemDump);
+}
+
+/*
  * synchdb_state_tupdesc - Create a TupleDesc for SynchDB state information
  *
  * This function constructs a TupleDesc that describes the structure of
  * the tuple returned by SynchDB state queries. It defines the columns
  * that will be present in the result set.
  *
- * Returns: A blessed TupleDesc, or NULL on failure
+ * @return: A blessed TupleDesc, or NULL on failure
  */
 static TupleDesc
 synchdb_state_tupdesc(void)
@@ -601,13 +1062,48 @@ synchdb_state_tupdesc(void)
 	tupdesc = CreateTemplateTupleDesc(attrnum);
 
 	/* todo: add more columns here per connector if needed */
-	TupleDescInitEntry(tupdesc, ++a, "id", INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "connector", TEXTOID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "conninfo_name", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "name", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "connector type", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "pid", INT4OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "stage", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "state", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "err", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "last_dbz_offset", TEXTOID, -1, 0);
+
+	Assert(a == maxattr);
+	return BlessTupleDesc(tupdesc);
+}
+
+/*
+ * synchdb_stats_tupdesc - Create a TupleDesc for SynchDB statistic information
+ *
+ * This function constructs a TupleDesc that describes the structure of
+ * the tuple returned by SynchDB statistic queries. It defines the columns
+ * that will be present in the result set.
+ *
+ * @return: A blessed TupleDesc, or NULL on failure
+ */
+static TupleDesc
+synchdb_stats_tupdesc(void)
+{
+	TupleDesc tupdesc;
+	AttrNumber attrnum = 11;
+	AttrNumber a = 0;
+
+	tupdesc = CreateTemplateTupleDesc(attrnum);
+
+	/* todo: add more columns here per connector if needed */
+	TupleDescInitEntry(tupdesc, ++a, "name", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "ddls", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "dmls", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "reads", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "creates", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "updates", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "deletes", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "bad_events", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "total_events", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "batches_done", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "average_batch_size", INT8OID, -1, 0);
 
 	Assert(a == maxattr);
 	return BlessTupleDesc(tupdesc);
@@ -618,7 +1114,6 @@ synchdb_state_tupdesc(void)
  *
  * Allocate and initialize synchdb related shared memory, if not already
  * done, and set up backend-local pointer to that state.
- *
  */
 static void
 synchdb_init_shmem(void)
@@ -634,7 +1129,14 @@ synchdb_init_shmem(void)
 	{
 		/* First time through ... */
 		LWLockInitialize(&sdb_state->lock, LWLockNewTrancheId());
-		for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	}
+	sdb_state->connectors =
+			ShmemInitStruct("synchdb_connectors",
+							sizeof(ActiveConnectors) * synchdb_max_connector_workers,
+							&found);
+	if (!found)
+	{
+		for (i = 0; i < synchdb_max_connector_workers; i++)
 		{
 			sdb_state->connectors[i].pid = InvalidPid;
 			sdb_state->connectors[i].state = STATE_UNDEF;
@@ -660,42 +1162,14 @@ synchdb_detach_shmem(int code, Datum arg)
 {
 	pid_t enginepid;
 
-	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d, myBatchId %d, "
-			"currRecordId %d", DatumGetUInt32(arg), code, myBatchInfo.batchId,
-			myBatchInfo.currRecordIndex);
+	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d",
+			DatumGetUInt32(arg), code);
 
 	enginepid = get_shm_connector_pid(DatumGetUInt32(arg));
 	if (enginepid == MyProcPid)
 	{
 		set_shm_connector_pid(DatumGetUInt32(arg), InvalidPid);
 		set_shm_connector_state(DatumGetUInt32(arg), STATE_UNDEF);
-	}
-
-	/*
-	 * check if we are in the middle of processing a batch. If yes, we need to
-	 * notify dbz the records that we have processed to prevent receiving duplicate
-	 * records upon restart. myBatchInfo.currRecordIndex == -1 means we have not even
-	 * successfully processed at least 1 record in batch, so don't bother marking
-	 * completion.
-	 */
-	if (myBatchInfo.batchId  != SYNCHDB_INVALID_BATCH_ID && myBatchInfo.currRecordIndex != -1)
-	{
-		if (myBatchInfo.batchSize == myBatchInfo.currRecordIndex + 1)
-		{
-			/*
-			 * this means that the every record in current batch has already been
-			 * completed and that we could mark this entire batch as complete
-			 */
-			elog(WARNING, "batch already completed. mark it all done before shutdown...");
-			dbz_mark_batch_complete(myBatchInfo.batchId, true, 0, 0);
-		}
-		else
-		{
-			/* a partially completed batch, we report the ones already completed */
-			elog(WARNING, "partially completed batch. mark records done until record index %d, size of batch %d",
-					myBatchInfo.currRecordIndex, myBatchInfo.batchSize);
-			dbz_mark_batch_complete(myBatchInfo.batchId, false, 0, myBatchInfo.currRecordIndex);
-		}
 	}
 
 	cleanup(sdb_state->connectors[DatumGetUInt32(arg)].type);
@@ -710,6 +1184,7 @@ synchdb_detach_shmem(int code, Datum arg)
  * @param worker: Pointer to the BackgroundWorker structure to be prepared
  * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
  * @param connector: String representing the connector type
+ * @param connectorid: Connector ID of interest
  * @param snapshotMode: Snapshot mode to use to start Debezium engine
  */
 static void
@@ -743,6 +1218,13 @@ prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char
 
 /*
  * connectorStateAsString - Convert ConnectorState to string representation
+ *
+ * This function sets up a BackgroundWorker structure with the appropriate
+ * information based on the connector type and connection details.
+ *
+ * @param state: Connector state enum
+ *
+ * @return connector state in string
  */
 static const char *
 connectorStateAsString(ConnectorState state)
@@ -757,7 +1239,7 @@ connectorStateAsString(ConnectorState state)
 	case STATE_PAUSED:
 		return "paused";
 	case STATE_SYNCING:
-		return "syncing";
+		return "polling";
 	case STATE_PARSING:
 		return "parsing";
 	case STATE_CONVERTING:
@@ -768,6 +1250,8 @@ connectorStateAsString(ConnectorState state)
 		return "updating offset";
 	case STATE_RESTARTING:
 		return "restarting";
+	case STATE_MEMDUMP:
+		return "dumping memory";
 	}
 	return "UNKNOWN";
 }
@@ -778,7 +1262,7 @@ connectorStateAsString(ConnectorState state)
  * This function resets the request state and clears the request data for a
  * specific connector type in shared memory.
  *
- * @param type: The type of connector whose request state should be reset
+ * @param connectorId: The connector ID of interest
  */
 static void
 reset_shm_request_state(int connectorId)
@@ -860,7 +1344,7 @@ dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char 
 	return 0;
 }
 
-/**
+/*
  * processRequestInterrupt - Handles state transition requests for SynchDB connectors
  *
  * This function processes requests to change the state of a SynchDB connector,
@@ -868,6 +1352,8 @@ dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char 
  *
  * @param connInfo: Pointer to the connection information
  * @param type: The type of connector being processed
+ * @param connectorId: Connector ID of interest
+ * @param snapshotMode: The new snapshot mode requested
  */
 static void
 processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId, const char * snapshotMode)
@@ -1024,6 +1510,20 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 		}
 		set_shm_connector_state(connectorId, STATE_SYNCING);
 	}
+	else if (reqcopy->reqstate == STATE_MEMDUMP)
+	{
+		/* Handle offset update request */
+		elog(LOG, "Requesting memdump for %s connector",
+				connInfo->name);
+
+		set_shm_connector_state(connectorId, STATE_MEMDUMP);
+		/* todo: call the java routine to dump jvm heap memory summary in log */
+
+		dbz_engine_memory_dump();
+
+		/* after new offset is set, change state back to STATE_PAUSED */
+		set_shm_connector_state(connectorId, STATE_SYNCING);
+	}
 	else
 	{
 		/* unsupported request state combinations */
@@ -1039,7 +1539,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 	pfree(currstatecopy);
 }
 
-/**
+/*
  * setup_environment - Prepares the environment for the SynchDB background worker
  *
  * This function sets up signal handlers, initializes the database connection,
@@ -1047,6 +1547,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
  *
  * @param connectorType: The type of connector being set up
  * @param dst_db: The name of the destination database to connect to
+ * @param snapshotMode: The snapshot mode requested
  */
 static void
 setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode)
@@ -1098,20 +1599,19 @@ setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char 
 		 connectorTypeToString(*connectorType), *connectorType);
 }
 
-/**
+/*
  * initialize_jvm - Initialize the Java Virtual Machine and Debezium engine
  *
  * This function sets up the Java environment, locates the Debezium engine JAR file,
  * creates a Java VM, and initializes the Debezium engine.
- *
- * @param connectorType: The type of connector being initialized
  */
 static void
 initialize_jvm(void)
 {
 	JavaVMInitArgs vm_args;
-	JavaVMOption options[2];
+	JavaVMOption options[3];
 	char javaopt[MAX_JAVA_OPTION_LENGTH] = {0};
+	char jvmheapmax[MAX_JAVA_OPTION_LENGTH] = {0};
 	char jar_path[MAX_PATH_LENGTH] = {0};
 	const char *dbzpath = getenv("DBZ_ENGINE_DIR");
 	int ret;
@@ -1133,15 +1633,21 @@ initialize_jvm(void)
 		elog(ERROR, "Cannot find DBZ engine jar file at %s", jar_path);
 	}
 
-	/* Set up Java classpath */
+	/* Set up Java classpath and heap size */
 	snprintf(javaopt, sizeof(javaopt), "-Djava.class.path=%s", jar_path);
-	elog(INFO, "Initializing DBZ engine with JAR file: %s", jar_path);
+	if (jvm_max_heap_size == 0)
+		snprintf(jvmheapmax, sizeof(javaopt), "-Xmx0");
+	else
+		snprintf(jvmheapmax, sizeof(javaopt), "-Xmx%dm", jvm_max_heap_size);
+
+	elog(WARNING, "Initializing JVM with options: -Xrs %s %s", javaopt, jvmheapmax);
 
 	/* Configure JVM options */
 	options[0].optionString = javaopt;
 	options[1].optionString = "-Xrs"; // Reduce use of OS signals by JVM
+	options[2].optionString = jvmheapmax;
 	vm_args.version = JNI_VERSION_10;
-	vm_args.nOptions = 2;
+	vm_args.nOptions = 3;
 	vm_args.options = options;
 	vm_args.ignoreUnrecognized = JNI_FALSE;
 
@@ -1166,7 +1672,7 @@ initialize_jvm(void)
 	elog(INFO, "Debezium engine initialized successfully");
 }
 
-/**
+/*
  * start_debezium_engine - Starts the Debezium engine for a given connector
  *
  * This function initiates the Debezium engine using the provided connection
@@ -1174,6 +1680,7 @@ initialize_jvm(void)
  *
  * @param connectorType: The type of connector being started
  * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
+ * @param snapshotMode: Snapshot mode requested
  */
 static void
 start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode)
@@ -1191,11 +1698,23 @@ start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInf
 		 connInfo->hostname, connInfo->port, connectorType);
 }
 
+/*
+ * main_loop - Main processor of SynchDB connector worker
+ *
+ * This function continuously fetches change requests from Debezium runner and
+ * process them until exit signal is received.
+ *
+ * @param connectorType: The type of connector being started
+ * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
+ * @param snapshotMode: Snapshot mode requested
+ */
 static void
 main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode)
 {
 	ConnectorState currstate;
 	bool dbzExitSignal = false;
+	BatchInfo myBatchInfo = {0};
+	SynchdbStatistics myBatchStats = {0};
 
 	elog(LOG, "Main LOOP ENTER ");
 	while (!ShutdownRequestPending)
@@ -1217,26 +1736,40 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 		currstate = get_shm_connector_state_enum(myConnectorId);
 		switch (currstate)
 		{
-		case STATE_SYNCING:
-			dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal, &myBatchInfo);
+			case STATE_SYNCING:
+			{
+				/* reset batchinfo and batchStats*/
+				myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
+				myBatchInfo.batchSize = 0;
+				memset(&myBatchStats, 0, sizeof(myBatchStats));
 
-			/*
-			 * if a valid batchid is set by dbz_engine_get_change(), it means we have
-			 * successfully completed a batch change request and we shall notify dbz
-			 * that it's been completed.
-			 */
-			if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
-				dbz_mark_batch_complete(myBatchInfo.batchId, true, -1, -1);
+				dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal, &myBatchInfo, &myBatchStats);
 
-			/* we are done with a batch, make it invalid */
-			myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
-			break;
-		case STATE_PAUSED:
-			/* Do nothing when paused */
-			break;
-		default:
-			/* Handle other states if necessary */
-			break;
+				/*
+				 * if a valid batchid is set by dbz_engine_get_change(), it means we have
+				 * successfully completed a batch change request and we shall notify dbz
+				 * that it's been completed.
+				 */
+				if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
+				{
+					dbz_mark_batch_complete(myBatchInfo.batchId);
+
+					/* increment batch connector statistics */
+					increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+
+					/* update the batch statistics to shared memory */
+					set_shm_connector_statistics(myConnectorId, &myBatchStats);
+				}
+				break;
+			}
+			case STATE_PAUSED:
+			{
+				/* Do nothing when paused */
+				break;
+			}
+			default:
+				/* Handle other states if necessary */
+				break;
 		}
 
 		(void)WaitLatch(MyLatch,
@@ -1249,6 +1782,14 @@ main_loop(ConnectorType connectorType, const ConnectionInfo *connInfo, const cha
 	elog(LOG, "Main LOOP QUIT");
 }
 
+/*
+ * cleanup - Cleanup routine
+ *
+ * This function shuts down Debezium runner, JVM and cleans up format converter
+ * resources
+ *
+ * @param connectorType: The type of connector being started
+ */
 static void
 cleanup(ConnectorType connectorType)
 {
@@ -1272,6 +1813,16 @@ cleanup(ConnectorType connectorType)
 	fc_deinitFormatConverter(connectorType);
 }
 
+/*
+ * assign_connector_id - Requests a new connector ID
+ *
+ * This function returns a free connector ID associated with the given name
+ *
+ * @param name: The name of the connector to request a connector ID
+ *
+ * @return the connector ID associated with the given name, -1 if
+ * no free connector ID is available.
+ */
 static int
 assign_connector_id(char * name)
 {
@@ -1281,7 +1832,7 @@ assign_connector_id(char * name)
 	 * first, check if "name" has been used in one of the connector slots.
 	 * If yes, return its index
 	 */
-	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
 		if (!strcasecmp(sdb_state->connectors[i].conninfo.name, name))
 		{
@@ -1290,7 +1841,7 @@ assign_connector_id(char * name)
 	}
 
 	/* if not, find the next unnamed free slot */
-	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
 		if (sdb_state->connectors[i].state == STATE_UNDEF &&
 				strlen(sdb_state->connectors[i].conninfo.name) == 0)
@@ -1300,7 +1851,7 @@ assign_connector_id(char * name)
 	}
 
 	/* if not, find the next free slot */
-	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
 		if (sdb_state->connectors[i].state == STATE_UNDEF)
 		{
@@ -1310,6 +1861,16 @@ assign_connector_id(char * name)
 	return -1;
 }
 
+/*
+ * get_shm_connector_id_by_name - get connector ID from given name
+ *
+ * This function returns a connector ID associated with the given name
+ *
+ * @param name: The name of the connector to request a connector ID
+ *
+ * @return: The connector ID associated with the given name, -1 if
+ * no free connector ID is available.
+ */
 static int
 get_shm_connector_id_by_name(const char * name)
 {
@@ -1318,7 +1879,7 @@ get_shm_connector_id_by_name(const char * name)
 	if (!sdb_state)
 		return -1;
 
-	for (i = 0; i < SYNCHDB_MAX_ACTIVE_CONNECTORS; i++)
+	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
 		if (!strcmp(sdb_state->connectors[i].conninfo.name, name))
 		{
@@ -1328,13 +1889,26 @@ get_shm_connector_id_by_name(const char * name)
 	return -1;
 }
 
+/*
+ * dbz_mark_batch_complete - notify Debezium a completed batch
+ *
+ * This function notifies Debezium runner that a batch has been successfully completed
+ *
+ * @param batchid: The unique batch ID that has been completed successfully
+ *
+ * @return: 0 on success, -1 on failure
+ */
 static int
-dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
+dbz_mark_batch_complete(int batchid)
 {
 	jmethodID markBatchComplete;
 	jthrowable exception;
-	jboolean jmarkall;
+	jboolean jmarkall = JNI_TRUE;
 
+	/*
+	 * todo: markfrom and markto are no longer supported because we no longer
+	 * support partial batch completion. To be deleted later.
+	 */
 	if (!jvm)
 	{
 		elog(WARNING, "jvm not initialized");
@@ -1347,11 +1921,6 @@ dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
 		return -1;
 	}
 
-	if (markall)
-		jmarkall = JNI_TRUE;
-	else
-		jmarkall = JNI_FALSE;
-
 	/* Find the markBatchComplete method */
 	markBatchComplete = (*env)->GetMethodID(env, cls, "markBatchComplete",
 									 "(IZII)V");
@@ -1362,7 +1931,7 @@ dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
 	}
 
 	/* Call the Java method */
-	(*env)->CallVoidMethod(env, obj, markBatchComplete, batchid, jmarkall, markfrom, markto);
+	(*env)->CallVoidMethod(env, obj, markBatchComplete, batchid, jmarkall, -1, -1);
 
 	/* Check for exceptions */
 	exception = (*env)->ExceptionOccurred(env);
@@ -1377,11 +1946,18 @@ dbz_mark_batch_complete(int batchid, bool markall, int markfrom, int markto)
 	return 0;
 }
 
+/*
+ * synchdb_auto_launcher_main - auto connector launcher main routine
+ *
+ * This is the main routine of auto connector launcher
+ *
+ * @param main_arg: not used
+ */
 void
 synchdb_auto_launcher_main(Datum main_arg)
 {
 	int ret = -1, numout = 0, i = 0;
-	char * out[SYNCHDB_MAX_ACTIVE_CONNECTORS];
+	char ** out;
 
 	/* Establish signal handlers; once that's done, unblock signals. */
 	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
@@ -1400,20 +1976,34 @@ synchdb_auto_launcher_main(Datum main_arg)
 	 * it would fail to look up the retries, thus not starting any connector
 	 * workers.
 	 */
+
+	out = palloc0(sizeof(char *) * synchdb_max_connector_workers);
 	ret = ra_listConnInfoNames(out, &numout);
 	if (ret == 0)
 	{
-		for (i = 0; i < (numout > SYNCHDB_MAX_ACTIVE_CONNECTORS ?
-				SYNCHDB_MAX_ACTIVE_CONNECTORS : numout); i++)
+		for (i = 0; i < (numout > synchdb_max_connector_workers ?
+				synchdb_max_connector_workers : numout); i++)
 		{
 			elog(WARNING, "launching %s...", out[i]);
+			StartTransactionCommand();
+			PushActiveSnapshot(GetTransactionSnapshot());
+
 			DirectFunctionCall1(synchdb_start_engine_bgw, CStringGetTextDatum(out[i]));
+
+			PopActiveSnapshot();
+			CommitTransactionCommand();
 			sleep(2);
 		}
 	}
+	pfree(out);
 	elog(DEBUG1, "stop synchdb_auto_launcher_main");
 }
 
+/*
+ * synchdb_start_leader_worker
+ *
+ * Helper function to start a auto connector launcher background worker
+ */
 static void
 synchdb_start_leader_worker(void)
 {
@@ -1432,6 +2022,15 @@ synchdb_start_leader_worker(void)
 	RegisterBackgroundWorker(&worker);
 }
 
+/*
+ * connectorTypeToString
+ *
+ * This function converts connector type from enum to string
+ *
+ * @param type: Connector type in enum
+ *
+ * @return connector type in string
+ */
 const char *
 connectorTypeToString(ConnectorType type)
 {
@@ -1450,7 +2049,16 @@ connectorTypeToString(ConnectorType type)
 	}
 }
 
-/* public functions to access / change synchdb parameters in shared memory */
+/*
+ * get_shm_connector_name
+ *
+ * This function converts connector type from enum to string in lowercase
+ *
+ * @param type: Connector type in enum
+ *
+ * @return connector type in string
+ * todo: potential duplicate
+ */
 const char *
 get_shm_connector_name(ConnectorType type)
 {
@@ -1468,6 +2076,15 @@ get_shm_connector_name(ConnectorType type)
 	}
 }
 
+/*
+ * get_shm_connector_pid
+ *
+ * This function gets pid of the given connectorID
+ *
+ * @param connectorId: Connector ID of interest
+ *
+ * @return pid of the connector, -1 if connector is not running
+ */
 pid_t
 get_shm_connector_pid(int connectorId)
 {
@@ -1477,6 +2094,14 @@ get_shm_connector_pid(int connectorId)
 	return sdb_state->connectors[connectorId].pid;
 }
 
+/*
+ * set_shm_connector_pid
+ *
+ * This function sets pid of the given connectorID
+ *
+ * @param connectorId: Connector ID of interest
+ * @param pid: New pid value
+ */
 void
 set_shm_connector_pid(int connectorId, pid_t pid)
 {
@@ -1488,18 +2113,15 @@ set_shm_connector_pid(int connectorId, pid_t pid)
 	LWLockRelease(&sdb_state->lock);
 }
 
-void
-set_shm_connector_dbs(int connectorId, char *srcdb, char *dstdb)
-{
-	if (!sdb_state)
-		return;
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	strlcpy(sdb_state->connectors[connectorId].conninfo.srcdb, srcdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
-	strlcpy(sdb_state->connectors[connectorId].conninfo.dstdb, dstdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
-	LWLockRelease(&sdb_state->lock);
-}
-
+/*
+ * get_shm_connector_errmsg
+ *
+ * This function gets the last error message of the given connectorID
+ *
+ * @param connectorId: Connector ID of interest
+ *
+ * @return the error message in string
+ */
 const char *
 get_shm_connector_errmsg(int connectorId)
 {
@@ -1516,7 +2138,7 @@ get_shm_connector_errmsg(int connectorId)
  * This function sets the error message for a given connector type in the shared
  * memory state. It ensures thread-safety by using a lock when accessing shared memory.
  *
- * @param type: The type of connector for which to set the error message
+ * @param connectorId: Connector ID of interest
  * @param err: The error message to set. If NULL, an empty string will be set.
  */
 void
@@ -1531,12 +2153,187 @@ set_shm_connector_errmsg(int connectorId, const char *err)
 }
 
 /*
+ * get_shm_connector_stage - Get the current connector stage
+ *
+ * This function gets current connector stage based on the change request received.
+ *
+ * @param connectorId: Connector ID of interest
+ *
+ * @return connector stage in string
+ */
+static const char *
+get_shm_connector_stage(int connectorId)
+{
+	ConnectorStage stage;
+
+	if (!sdb_state)
+		return STATE_UNDEF;
+
+	/*
+	 * We're only reading, so shared lock is sufficient.
+	 * This ensures thread-safety without blocking other readers.
+	 */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	stage = sdb_state->connectors[connectorId].stage;
+	LWLockRelease(&sdb_state->lock);
+
+	switch(stage)
+	{
+		case STAGE_INITIAL_SNAPSHOT:
+		{
+			return "initial snapshot";
+			break;
+		}
+		case STAGE_CHANGE_DATA_CAPTURE:
+		{
+			return "change data capture";
+			break;
+		}
+		case STAGE_UNDEF:
+		default:
+		{
+			break;
+		}
+	}
+	return "unknown";
+}
+
+/*
+ * set_shm_connector_statistics - adds the give stats
+ *
+ * This function adds the given stats info to the one in shared memory so user
+ * can see updated stats
+ *
+ * @param connectorId: Connector ID of interest
+ * @param stats: connector statistics struct
+ */
+static void
+set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats)
+{
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	sdb_state->connectors[connectorId].stats.stats_create +=
+			stats->stats_create;
+	sdb_state->connectors[connectorId].stats.stats_ddl +=
+			stats->stats_ddl;
+	sdb_state->connectors[connectorId].stats.stats_delete +=
+			stats->stats_delete;
+	sdb_state->connectors[connectorId].stats.stats_dml +=
+			stats->stats_dml;
+	sdb_state->connectors[connectorId].stats.stats_read +=
+			stats->stats_read;
+	sdb_state->connectors[connectorId].stats.stats_update +=
+			stats->stats_update;
+	sdb_state->connectors[connectorId].stats.stats_bad_change_event +=
+			stats->stats_bad_change_event;
+	sdb_state->connectors[connectorId].stats.stats_total_change_event +=
+			stats->stats_total_change_event;
+	sdb_state->connectors[connectorId].stats.stats_batch_completion +=
+			stats->stats_batch_completion;
+	LWLockRelease(&sdb_state->lock);
+}
+
+/*
+ * increment_connector_statistics - increment statistics
+ *
+ * This function increments statistic counter for specified type
+ *
+ * @param which: type of statistic to increment
+ */
+void
+increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics which, int incby)
+{
+	if (!myStats)
+		return;
+
+	switch(which)
+	{
+		case STATS_DDL:
+			myStats->stats_ddl += incby;
+			break;
+		case STATS_DML:
+			myStats->stats_dml += incby;
+			break;
+		case STATS_READ:
+			myStats->stats_read += incby;
+			break;
+		case STATS_CREATE:
+			myStats->stats_create += incby;
+			break;
+		case STATS_UPDATE:
+			myStats->stats_update += incby;
+			break;
+		case STATS_DELETE:
+			myStats->stats_delete += incby;
+			break;
+		case STATS_BAD_CHANGE_EVENT:
+			myStats->stats_bad_change_event += incby;
+			break;
+		case STATS_TOTAL_CHANGE_EVENT:
+			myStats->stats_total_change_event += incby;
+			break;
+		case STATS_BATCH_COMPLETION:
+			myStats->stats_batch_completion += incby;
+			break;
+		default:
+			break;
+	}
+}
+
+
+/*
+ * get_shm_connector_stage_enum - Get the current connector stage in enum
+ *
+ * This function gets current connector stage based on the change request received.
+ *
+ * @param connectorId: Connector ID of interest
+ *
+ * @return connector stage in enum
+ */
+ConnectorStage
+get_shm_connector_stage_enum(int connectorId)
+{
+	ConnectorStage stage;
+
+	if (!sdb_state)
+		return STATE_UNDEF;
+
+	/*
+	 * We're only reading, so shared lock is sufficient.
+	 * This ensures thread-safety without blocking other readers.
+	 */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	stage = sdb_state->connectors[connectorId].stage;
+	LWLockRelease(&sdb_state->lock);
+
+	return stage;
+}
+
+/*
+ * set_shm_connector_stage - Set the current connector stage in enum
+ *
+ * This function sets current connector stage
+ *
+ * @param connectorId: Connector ID of interest
+ * @param stage: new connector stage
+ */
+void
+set_shm_connector_stage(int connectorId, ConnectorStage stage)
+{
+	if (!sdb_state)
+		return;
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	sdb_state->connectors[connectorId].stage = stage;
+	LWLockRelease(&sdb_state->lock);
+}
+
+/*
  * get_shm_connector_state - Get the current state of a specific connector from shared memory
  *
  * This function retrieves the current state of a given connector type from the shared
  * memory state. It returns the state as a string representation.
  *
- * @param type: The type of connector for which to get the state
+ * @param connectorId: Connector ID of interest
  *
  * @return: A string representation of the connector's state. If the shared memory
  *          is not initialized or the connector type is unknown, it returns "stopped"
@@ -1567,7 +2364,7 @@ get_shm_connector_state(int connectorId)
  * This function retrieves the current state of a given connector type from the shared
  * memory state as a ConnectorState enum value.
  *
- * @param type: The type of connector for which to get the state
+ * @param connectorId: Connector ID of interest
  *
  * @return: A ConnectorState enum representing the connector's state. If the shared memory
  *          is not initialized or the connector type is unknown, it returns STATE_UNDEF.
@@ -1597,7 +2394,7 @@ get_shm_connector_state_enum(int connectorId)
  * This function sets the state of a given connector type in the shared memory.
  * It ensures thread-safety by using an exclusive lock when accessing shared memory.
  *
- * @param type: The type of connector for which to set the state
+ * @param connectorId: Connector ID of interest
  * @param state: The new state to set for the connector
  */
 void
@@ -1611,13 +2408,17 @@ set_shm_connector_state(int connectorId, ConnectorState state)
 	LWLockRelease(&sdb_state->lock);
 }
 
-/* TODO: set_shm_dbz_offset:
+/*
+ * set_shm_dbz_offset - Set the offset of a paused connector
+ *
  * This method reads from dbz's offset file per connector type, which does not
  * reflect the real-time offset of dbz engine. If we were to resume from this point
  * due to an error, there may be duplicate values after the resume in which we must
  * handle. In the future, we will need to explore a more accurate way to find out
  * the offset managed within dbz so we could freely resume from any reference not
- * just at the flushed locations
+ * just at the flushed locations. todo
+ *
+ * @param connectorId: Connector ID of interest
  */
 void
 set_shm_dbz_offset(int connectorId)
@@ -1638,6 +2439,13 @@ set_shm_dbz_offset(int connectorId)
 	pfree(offset);
 }
 
+/*
+ * get_shm_dbz_offset - Get the offset from a connector
+ *
+ * This method gets the offset value of the given connector from shared memory
+ *
+ * @param connectorId: Connector ID of interest
+ */
 const char *
 get_shm_dbz_offset(int connectorId)
 {
@@ -1658,14 +2466,12 @@ _PG_init(void)
 							"Duration between each data polling (in milliseconds).",
 							NULL,
 							&synchdb_worker_naptime,
-							5,
+							100,
 							1,
-							INT_MAX,
+							30000,
 							PGC_SIGHUP,
 							0,
-							NULL,
-							NULL,
-							NULL);
+							NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("synchdb.dml_use_spi",
 							 "option to use SPI to handle DML operations. Default false",
@@ -1674,9 +2480,159 @@ _PG_init(void)
 							 false,
 							 PGC_SIGHUP,
 							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_batch_size",
+							"the maximum number of change events in a batch",
+							NULL,
+							&dbz_batch_size,
+							2048,
+							1,
+							65535,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_queue_size",
+							"the maximum size of Debezium's change event queue",
+							NULL,
+							&dbz_queue_size,
+							8192,
+							64,
+							65535,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_connect_timeout_ms",
+							"Debezium's connection timeout value in milliseconds",
+							NULL,
+							&dbz_connect_timeout_ms,
+							30000,
+							1000,
+							3600000,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_query_timeout_ms",
+							"Debezium's query timeout value in milliseconds",
+							NULL,
+							&dbz_query_timeout_ms,
+							600000,
+							1000,
+							3600000,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomStringVariable("synchdb.dbz_skipped_oeprations",
+							   "a comma-separated list of operations Debezium shall skip: "
+							   "c for inserts, u for updates, d for deletes, t for truncates",
+							   NULL,
+							   &dbz_skipped_operations,
+							   "t",
+							   PGC_SIGHUP,
+							   0,
+							   NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.jvm_max_heap_size",
+							"max heap size allocated to JVM",
+							NULL,
+							&jvm_max_heap_size,
+							1024,
+							0,
+							65536,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_snapshot_thread_num",
+							"number of threads to perform Debezium initial snapshot",
+							NULL,
+							&dbz_snapshot_thread_num,
+							2,
+							1,
+							16,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_snapshot_fetch_size",
+							"number of rows Debezium fetches at a time during a snapshot",
+							NULL,
+							&dbz_snapshot_fetch_size,
+							0,
+							0,
+							65535,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_snapshot_min_row_to_stream_results",
+							"minimum row in a remote table before switching to streaming mode",
+							NULL,
+							&dbz_snapshot_min_row_to_stream_results,
+							0,
+							0,
+							65535,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_incremental_snapshot_chunk_size",
+							"batch size of incremental snapshot process",
+							NULL,
+							&dbz_incremental_snapshot_chunk_size,
+							2048,
+							1,
+							65535,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomStringVariable("synchdb.dbz_incremental_snapshot_watermarking_strategy",
+							   "watermarking strategy of incremental snapshot",
+							   NULL,
+							   &dbz_incremental_snapshot_watermarking_strategy,
+							   "insert_insert",
+							   PGC_SIGHUP,
+							   0,
+							   NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.dbz_offset_flush_interval_ms",
+							"time in milliseconds to flush offset file to disk",
+							NULL,
+							&dbz_offset_flush_interval_ms,
+							60000,
+							1000,
+							3600000,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("synchdb.dbz_capture_only_selected_table_ddl",
+							 "whether or not debezium should capture the schema or all tables(false) or selected tables(true).",
+							 NULL,
+							 &dbz_capture_only_selected_table_ddl,
+							 true,
+							 PGC_SIGHUP,
+							 0,
 							 NULL,
 							 NULL,
 							 NULL);
+
+	DefineCustomIntVariable("synchdb.max_connector_workers",
+							"max number of connector workers that can be run at any time. Higher number would occupy more"
+							"shared memory space",
+							NULL,
+							&synchdb_max_connector_workers,
+							30,
+							1,
+							65535,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
 
 	if (process_shared_preload_libraries_in_progress)
 	{
@@ -1741,22 +2697,23 @@ synchdb_engine_main(Datum main_arg)
 	/* extract connectorId from main_arg */
 	myConnectorId = DatumGetUInt32(main_arg);
 
-	/* initialize batchinfo */
-	myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
-	myBatchInfo.batchSize = 0;
-	myBatchInfo.currRecordIndex = -1;
-
 	/* Set up signal handlers, initialize shared memory and obtain connInfo*/
 	setup_environment(&connectorType, &connInfo, &snapshotMode);
 
 	/* Initialize the connector state */
 	set_shm_connector_state(myConnectorId, STATE_INITIALIZING);
+
+	/*
+	 * Initialize the stage to be CDC and it may get changed when the connector
+	 * detects that it is in initial snapshot or other stages
+	 */
+	set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 	set_shm_connector_errmsg(myConnectorId, NULL);
 
 	/* initialize format converter */
 	fc_initFormatConverter(connectorType);
 
-	/* load custom rules if applicable */
+	/* load custom rules + additional connector parameters if applicable */
 	if (connInfo.rulefile && strlen(connInfo.rulefile) > 0 && strcasecmp(connInfo.rulefile, "null"))
 		fc_load_rules(connectorType, connInfo.rulefile);
 
@@ -1781,6 +2738,119 @@ synchdb_engine_main(Datum main_arg)
 	proc_exit(0);
 }
 
+/*
+ * synchdb_start_engine_bgw_snapshot_mode
+ *
+ * This function starts a connector with a custom snapshot mode
+ */
+Datum
+synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
+{
+	BackgroundWorker worker;
+	BackgroundWorkerHandle *handle;
+	BgwHandleStatus status;
+	pid_t pid;
+	ConnectionInfo connInfo;
+	char *connector = NULL;
+	int ret = -1, connectorid = -1;
+	StringInfoData strinfo;
+	char * snapshotMode = "initial";
+
+	/* Parse input arguments */
+	text *name_text = PG_GETARG_TEXT_PP(0);
+	text *snapshotmode_text = PG_GETARG_TEXT_PP(1);
+
+	/* Sanity check on input arguments */
+	if (VARSIZE(name_text) - VARHDRSZ == 0 ||
+			VARSIZE(name_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("connection name cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_NAME_SIZE)));
+	}
+
+
+	if (VARSIZE(snapshotmode_text) - VARHDRSZ == 0 ||
+			VARSIZE(snapshotmode_text) - VARHDRSZ > SYNCHDB_SNAPSHOT_MODE_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("snapshot mode cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_NAME_SIZE)));
+	}
+
+	ret = ra_getConninfoByName(text_to_cstring(name_text), &connInfo, &connector);
+	if (ret)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("connection name does not exist"),
+				 errhint("use synchdb_add_conninfo to add one first")));
+
+	snapshotMode = text_to_cstring(snapshotmode_text);
+
+	/*
+	 * attach or initialize synchdb shared memory area so we can assign
+	 * a connector ID for this worker
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorid = assign_connector_id(connInfo.name);
+	if (connectorid == -1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("max number of connectors reached"),
+				 errhint("use synchdb_stop_engine_bgw to stop some active connectors")));
+
+	/* prepare background worker */
+	MemSet(&worker, 0, sizeof(BackgroundWorker));
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+					   BGWORKER_BACKEND_DATABASE_CONNECTION;
+	worker.bgw_start_time = BgWorkerStart_ConsistentState;
+	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	worker.bgw_notify_pid = MyProcPid;
+
+	strcpy(worker.bgw_library_name, "synchdb");
+	strcpy(worker.bgw_function_name, "synchdb_engine_main");
+
+	prepare_bgw(&worker, &connInfo, connector, connectorid, snapshotMode);
+
+	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+				 errmsg("could not register background process"),
+				 errhint("You may need to increase max_worker_processes.")));
+
+	status = WaitForBackgroundWorkerStartup(handle, &pid);
+	if (status != BGWH_STARTED)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+				 errmsg("could not start background process"),
+				 errhint("More details may be available in the server log.")));
+
+	/*
+	 * mark this conninfo as active so it can automatically resume running at
+	 * postgresql server restarts given that synchdb is included in
+	 * shared_preload_library GUC
+	 */
+	initStringInfo(&strinfo);
+	appendStringInfo(&strinfo, "UPDATE synchdb_conninfo set isactive = true "
+			"WHERE name = '%s'", text_to_cstring(name_text));
+
+	ra_executeCommand(strinfo.data);
+
+	PG_RETURN_INT32(0);
+}
+
+/*
+ * synchdb_start_engine_bgw
+ *
+ * This function starts a connector with the default initial snapshot mode
+ */
 Datum
 synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 {
@@ -1792,15 +2862,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	char *connector = NULL;
 	int ret = -1, connectorid = -1;
 	StringInfoData strinfo;
-
-	/*
-	 * By default, we use snapshot mode = initial when starting
-	 * a connector, which means the connector will synchronize
-	 * all selected table schemas and proceed with CDC. We currently
-	 * do not allow user to specify a different snapshot mode during
-	 * 'synchdb_start_engine_bgw'. However, a different snapshot mode
-	 * can be specified in the 'synchdb_restart_connector' sql function
-	 */
+	/* By default, we use snapshot mode = initial */
 	char * snapshotMode = "initial";
 
 	/* Parse input arguments */
@@ -1880,6 +2942,11 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_stop_engine_bgw
+ *
+ * This function stops a running connector
+ */
 Datum
 synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 {
@@ -1921,8 +2988,9 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	pid = get_shm_connector_pid(connectorId);
 	if (pid != InvalidPid)
 	{
-		elog(WARNING, "terminating dbz connector (%s) with pid %d", text_to_cstring(name_text), (int)pid);
-		DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(5000));
+		elog(WARNING, "terminating dbz connector (%s) with pid %d. Shutdown timeout: %d ms",
+				text_to_cstring(name_text), (int)pid, DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC);
+		DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC));
 		set_shm_connector_pid(connectorId, InvalidPid);
 
 	}
@@ -1935,6 +3003,11 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_get_state
+ *
+ * This function dumps the states of all connectors
+ */
 Datum
 synchdb_get_state(PG_FUNCTION_ARGS)
 {
@@ -1965,21 +3038,17 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	funcctx = SRF_PERCALL_SETUP();
 	idx = (int *)funcctx->user_fctx;
 
-	/*
-	 * todo: put 3 to a dynamic MACRO as the number of connector synchdb currently
-	 * can support
-	 */
-	if (*idx < SYNCHDB_MAX_ACTIVE_CONNECTORS)
+	if (*idx < count_active_connectors())
 	{
 		Datum values[7];
 		bool nulls[7] = {0};
 		HeapTuple tuple;
 
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
-		values[0] = Int32GetDatum(*idx);
+		values[0] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
 		values[1] = CStringGetTextDatum(get_shm_connector_name(sdb_state->connectors[*idx].type));
-		values[2] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
-		values[3] = Int32GetDatum((int)get_shm_connector_pid(*idx));
+		values[2] = Int32GetDatum((int)get_shm_connector_pid(*idx));
+		values[3] = CStringGetTextDatum(get_shm_connector_stage(*idx));
 		values[4] = CStringGetTextDatum(get_shm_connector_state(*idx));
 		values[5] = CStringGetTextDatum(get_shm_connector_errmsg(*idx));
 		values[6] = CStringGetTextDatum(get_shm_dbz_offset(*idx));
@@ -1993,6 +3062,114 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	SRF_RETURN_DONE(funcctx);
 }
 
+/*
+ * synchdb_get_stats
+ *
+ * This function dumps the statistics of all connectors
+ */
+Datum
+synchdb_get_stats(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	int *idx = NULL;
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		funcctx->tuple_desc = synchdb_stats_tupdesc();
+		funcctx->user_fctx = palloc0(sizeof(int));
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	idx = (int *)funcctx->user_fctx;
+
+	if (*idx < count_active_connectors())
+	{
+		Datum values[11];
+		bool nulls[11] = {0};
+		HeapTuple tuple;
+
+		LWLockAcquire(&sdb_state->lock, LW_SHARED);
+		values[0] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
+		values[1] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_ddl);
+		values[2] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_dml);
+		values[3] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_read);
+		values[4] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_create);
+		values[5] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_update);
+		values[6] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_delete);
+		values[7] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_bad_change_event);
+		values[8] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_total_change_event);
+		values[9] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_batch_completion);
+		values[10] = sdb_state->connectors[*idx].stats.stats_batch_completion > 0?
+					Int64GetDatum(sdb_state->connectors[*idx].stats.stats_total_change_event /
+							sdb_state->connectors[*idx].stats.stats_batch_completion) :
+					Int64GetDatum(0);
+		LWLockRelease(&sdb_state->lock);
+
+		*idx += 1;
+
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+	SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * synchdb_reset_stats
+ *
+ * This function resets the statistics information of specified connector
+ */
+Datum
+synchdb_reset_stats(PG_FUNCTION_ARGS)
+{
+	int connectorId;
+
+	/* Parse input arguments */
+	text *name_text = PG_GETARG_TEXT_PP(0);
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	memset(&sdb_state->connectors[connectorId].stats, 0, sizeof(SynchdbStatistics));
+	LWLockRelease(&sdb_state->lock);
+
+	PG_RETURN_INT32(0);
+}
+
+/*
+ * synchdb_pause_engine
+ *
+ * This function pauses a running connector
+ */
 Datum
 synchdb_pause_engine(PG_FUNCTION_ARGS)
 {
@@ -2045,6 +3222,11 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_resume_engine
+ *
+ * This function resumes a paused connector
+ */
 Datum
 synchdb_resume_engine(PG_FUNCTION_ARGS)
 {
@@ -2097,6 +3279,11 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_set_offset
+ *
+ * This function sets the given offset to debezium's offset file
+ */
 Datum
 synchdb_set_offset(PG_FUNCTION_ARGS)
 {
@@ -2161,6 +3348,11 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/*
+ * synchdb_add_conninfo
+ *
+ * This function adds a connector info to system
+ */
 Datum
 synchdb_add_conninfo(PG_FUNCTION_ARGS)
 {
@@ -2309,6 +3501,11 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
 }
 
+/*
+ * synchdb_restart_connector
+ *
+ * This function restarts a connector with given snapshot mode
+ */
 Datum
 synchdb_restart_connector(PG_FUNCTION_ARGS)
 {
@@ -2397,5 +3594,62 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 
 	elog(WARNING, "sent restart request interrupt to dbz connector (%s)",
 			text_to_cstring(name_text));
+	PG_RETURN_INT32(0);
+}
+
+/*
+ * synchdb_log_jvm_meminfo
+ *
+ * This function dumps JVM memory usage info in PostgreSQL log
+ */
+Datum
+synchdb_log_jvm_meminfo(PG_FUNCTION_ARGS)
+{
+	int connectorId = -1;
+	pid_t pid;
+	SynchdbRequest *req;
+
+	/* Parse input arguments */
+	text *name_text = PG_GETARG_TEXT_PP(0);
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorId = get_shm_connector_id_by_name(text_to_cstring(name_text));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
+	pid = get_shm_connector_pid(connectorId);
+	if (pid == InvalidPid)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) is not running", text_to_cstring(name_text)),
+				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
+
+	/* point to the right construct based on type */
+	req = &(sdb_state->connectors[connectorId].req);
+
+	/* an active state change request is currently in progress */
+	if (req->reqstate != STATE_UNDEF)
+		ereport(ERROR,
+				(errmsg("an active request is currently active for connector %s",
+						text_to_cstring(name_text)),
+				 errhint("wait for it to finish and try again later")));
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	req->reqstate = STATE_MEMDUMP;
+	LWLockRelease(&sdb_state->lock);
+
+	elog(WARNING, "sent memdump request interrupt to dbz connector %s (%d)",
+			text_to_cstring(name_text), connectorId);
 	PG_RETURN_INT32(0);
 }

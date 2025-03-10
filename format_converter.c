@@ -34,20 +34,24 @@
 #include "catalog/namespace.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/memutils.h"
 #include "access/table.h"
 #include <time.h>
-#include "access/xact.h"
-#include "utils/snapmgr.h"
 #include "synchdb.h"
 #include "common/base64.h"
 #include "port/pg_bswap.h"
 
+/* global external variables */
 extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
+extern ExtraConnectionInfo extraConnInfo;
 
+/* data transformation related hash tables */
+static HTAB * dataCacheHash;
 static HTAB * objectMappingHash;
 static HTAB * transformExpressionHash;
 
+/* data type mapping related hash tables */
 static HTAB * mysqlDatatypeHash;
 static HTAB * sqlserverDatatypeHash;
 
@@ -139,7 +143,7 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 	{{"datetime2", false}, "TIMESTAMP", 0},
 	{{"datetimeoffset", false}, "TIMESTAMPTZ", 0},
 	{{"smalldatetime", false}, "TIMESTAMP", 0},
-	{{"char", false}, "CHAR", 0},
+	{{"char", false}, "CHAR", -1},
 	{{"varchar", false}, "VARCHAR", -1},
 	{{"text", false}, "TEXT", 0},
 	{{"nchar", false}, "CHAR", 0},
@@ -157,7 +161,11 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 
 #define SIZE_SQLSERVER_DATATYPE_MAPPING (sizeof(sqlserver_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
-/* this helper function counts the number of active (not dropped) columns */
+/*
+ * count_active_columns
+ *
+ * this helper function counts the number of active (not dropped) columns from given tupdesc
+ */
 static int
 count_active_columns(TupleDesc tupdesc)
 {
@@ -171,6 +179,11 @@ count_active_columns(TupleDesc tupdesc)
 	return count;
 }
 
+/*
+ * bytearray_to_escaped_string
+ *
+ * converts byte array to escaped string
+ */
 static void
 bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char *output_string)
 {
@@ -192,6 +205,11 @@ bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char
 	strcat(ptr, "'");
 }
 
+/*
+ * derive_value_from_byte
+ *
+ * computes the int value from given byte
+ */
 static long
 derive_value_from_byte(const unsigned char * bytes, int len)
 {
@@ -215,6 +233,11 @@ derive_value_from_byte(const unsigned char * bytes, int len)
 	return value;
 }
 
+/*
+ * reverse_byte_array
+ *
+ * reverse the given byte array
+ */
 static void
 reverse_byte_array(unsigned char * array, int length)
 {
@@ -230,6 +253,11 @@ reverse_byte_array(unsigned char * array, int length)
 	}
 }
 
+/*
+ * trim_leading_zeros
+ *
+ * trim the leading zeros from the given string
+ */
 static void
 trim_leading_zeros(char *str)
 {
@@ -253,6 +281,11 @@ trim_leading_zeros(char *str)
 	str[j] = '\0';
 }
 
+/*
+ * prepend_zeros
+ *
+ * prepend zeros to the given string
+ */
 static void
 prepend_zeros(char *str, int num_zeros)
 {
@@ -274,7 +307,11 @@ prepend_zeros(char *str, int num_zeros)
     pfree(temp);
 }
 
-
+/*
+ * byte_to_binary
+ *
+ * convert the given byte to a binary string with 1s and 0s
+ */
 static void
 byte_to_binary(unsigned char byte, char * binary_str)
 {
@@ -285,6 +322,11 @@ byte_to_binary(unsigned char byte, char * binary_str)
 	binary_str[8] = '\0';
 }
 
+/*
+ * bytes_to_binary_string
+ *
+ * convert the given bytes to a binary string with 1s and 0s
+ */
 static void
 bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_str)
 {
@@ -299,7 +341,11 @@ bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_st
 	}
 }
 
-/* Function to find exact match from given line */
+/*
+ * find_exact_string_match
+ *
+ * Function to find exact match from given line
+ */
 static bool
 find_exact_string_match(char * line, char * wordtofind)
 {
@@ -315,7 +361,11 @@ find_exact_string_match(char * line, char * wordtofind)
 	return false;
 }
 
-/* Function to remove double quotes from a string */
+/*
+ * remove_double_quotes
+ *
+ * Function to remove double quotes from a string
+ */
 static void
 remove_double_quotes(StringInfoData * str)
 {
@@ -335,6 +385,11 @@ remove_double_quotes(StringInfoData * str)
 	str->len = newlen;
 }
 
+/*
+ * escapeSingleQuote
+ *
+ * escape the single quotes in the given input and returns a palloc-ed string
+ */
 static char *
 escapeSingleQuote(const char * in, bool addquote)
 {
@@ -381,6 +436,12 @@ escapeSingleQuote(const char * in, bool addquote)
 	return out;
 }
 
+/*
+ * transform_data_expression
+ *
+ * return the expression to run on the given column name based on the transform
+ * object rule definitions
+ */
 static char *
 transform_data_expression(const char * remoteObjid, const char * colname)
 {
@@ -420,6 +481,11 @@ transform_data_expression(const char * remoteObjid, const char * colname)
 	return res;
 }
 
+/*
+ * transform_object_name
+ *
+ * transform the remote object name based on the object name rule file definitions
+ */
 static char *
 transform_object_name(const char * objid, const char * objtype)
 {
@@ -456,6 +522,8 @@ transform_object_name(const char * objid, const char * objtype)
 }
 
 /*
+ * populate_primary_keys
+ *
  * this function constructs primary key clauses based on jsonin. jsonin
  * is expected to be a json array with string element, for example:
  * ["col1","col2"]
@@ -574,7 +642,12 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 		}
 	}
 }
-/* Function to get a string element from a JSONB path */
+
+/*
+ * getPathElementString
+ *
+ * Function to get a string element from a JSONB path
+ */
 static int
 getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool removequotes)
 {
@@ -652,6 +725,9 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 		 */
 		if (removequotes)
 			remove_double_quotes(strinfoout);
+
+		if (resjb)
+			pfree(resjb);
 		elog(DEBUG1, "%s = %s", path, strinfoout->data);
     }
 
@@ -660,7 +736,11 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 	return 0;
 }
 
-/* Function to get a JSONB element from a path */
+/*
+ * getPathElementJsonb
+ *
+ * Function to get a JSONB element from a path
+ */
 static Jsonb *
 getPathElementJsonb(Jsonb * jb, char * path)
 {
@@ -730,7 +810,11 @@ getPathElementJsonb(Jsonb * jb, char * path)
 	return out;
 }
 
-/* Functions to destroy various structures */
+/*
+ * destroyDBZDDL
+ *
+ * Function to destroy DBZ_DDL structure
+ */
 static void
 destroyDBZDDL(DBZ_DDL * ddlinfo)
 {
@@ -751,6 +835,11 @@ destroyDBZDDL(DBZ_DDL * ddlinfo)
 	}
 }
 
+/*
+ * destroyPGDDL
+ *
+ * Function to destroy PG_DDL structure
+ */
 static void
 destroyPGDDL(PG_DDL * ddlinfo)
 {
@@ -762,6 +851,11 @@ destroyPGDDL(PG_DDL * ddlinfo)
 	}
 }
 
+/*
+ * destroyPGDML
+ *
+ * Function to destroy PG_DML structure
+ */
 static void
 destroyPGDML(PG_DML * dmlinfo)
 {
@@ -779,6 +873,11 @@ destroyPGDML(PG_DML * dmlinfo)
 	}
 }
 
+/*
+ * destroyDBZDML
+ *
+ * Function to destroy DBZ_DML structure
+ */
 static void
 destroyDBZDML(DBZ_DML * dmlinfo)
 {
@@ -806,7 +905,13 @@ destroyDBZDML(DBZ_DML * dmlinfo)
 	}
 }
 
-/* Function to parse Debezium DDL */
+/*
+ * parseDBZDDL
+ *
+ * Function to parse Debezium DDL expressed in Jsonb
+ *
+ * @return DBZ_DDL structure
+ */
 static DBZ_DDL *
 parseDBZDDL(Jsonb * jb)
 {
@@ -1057,6 +1162,8 @@ parseDBZDDL(Jsonb * jb)
 }
 
 /*
+ * splitIdString
+ *
  * Function to split ID string into database, schema, and table.
  *
  * This function breaks down a fully qualified id string (database.
@@ -1115,7 +1222,11 @@ splitIdString(char * id, char ** db, char ** schema, char ** table, bool usedb)
 	}
 }
 
-/* Function to transform DDL columns */
+/*
+ * transformDDLColumns
+ *
+ * Function to transform DDL columns
+ */
 static void
 transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntype, bool datatypeonly, StringInfoData * strinfo)
 {
@@ -1352,6 +1463,11 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 		pfree(colNameObjId.data);
 }
 
+/*
+ * composeAlterColumnClauses
+ *
+ * This functions build the ALTER COLUM SQL clauses based on given inputs
+ */
 static char *
 composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols, TupleDesc tupdesc)
 {
@@ -1476,7 +1592,11 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 	return ret;
 }
 
-/* Function to convert Debezium DDL to PostgreSQL DDL */
+/*
+ * convert2PGDDL
+ *
+ * This functions converts DBZ_DDL to PG_DDL structure
+ */
 static PG_DDL *
 convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 {
@@ -1625,6 +1745,9 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 	}
 	else if (!strcmp(dbzddl->type, "DROP"))
 	{
+		DataCacheKey cachekey = {0};
+		bool found = false;
+
 		mappedObjName = transform_object_name(dbzddl->id, "table");
 		if (mappedObjName)
 		{
@@ -1655,6 +1778,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			else if (!schema && table)
 			{
 				/* table stays as table but no schema */
+				schema = pstrdup("public");
 				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s;", table);
 			}
 		}
@@ -1674,8 +1798,16 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				/* trigger pg's error shutdown routine */
 				elog(ERROR, "%s", msg);
 			}
-			appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s.%s;", db, table);
+			/* make schema points to db */
+			schema = db;
+			appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s.%s;", schema, table);
 		}
+
+		/* drop data cache for schema.table if exists */
+		strlcpy(cachekey.schema, schema, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+		strlcpy(cachekey.table, table, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+		hash_search(dataCacheHash, &cachekey, HASH_REMOVE, &found);
+
 	}
 	else if (!strcmp(dbzddl->type, "ALTER"))
 	{
@@ -1685,6 +1817,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		bool found = false, altered = false;
 		Relation rel;
 		TupleDesc tupdesc;
+		DataCacheKey cachekey = {0};
 
 		mappedObjName = transform_object_name(dbzddl->id, "table");
 		if (mappedObjName)
@@ -1749,15 +1882,17 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", schema, table);
 		}
 
+		/* drop data cache for schema.table if exists */
+		strlcpy(cachekey.schema, schema, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+		strlcpy(cachekey.table, table, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+		hash_search(dataCacheHash, &cachekey, HASH_REMOVE, &found);
+
 		/*
 		 * For ALTER, we must obtain the current schema in PostgreSQL and identify
 		 * which column is the new column added. We will first check if table exists
 		 * and then add its column to a temporary hash table that we can compare
 		 * with the new column list.
 		 */
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		schemaoid = get_namespace_oid(schema, false);
 		if (!OidIsValid(schemaoid))
 		{
@@ -1785,9 +1920,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		rel = table_open(tableoid, NoLock);
 		tupdesc = RelationGetDescr(rel);
 		table_close(rel, NoLock);
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
 
 		if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
 		{
@@ -1942,6 +2074,8 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 }
 
 /*
+ * processDataByType
+ *
  * this function performs necessary data conversions to convert input data
  * as string and output a processed string based on type
  */
@@ -2086,7 +2220,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		{
 			if (addquote)
 			{
-				escapeSingleQuote(in, addquote);
+				out = escapeSingleQuote(in, addquote);
 			}
 			else
 			{
@@ -2234,7 +2368,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					 */
 					if (addquote)
 					{
-						escapeSingleQuote(in, addquote);
+						out = escapeSingleQuote(in, addquote);
 					}
 					else
 					{
@@ -2394,7 +2528,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 
 			if (addquote)
 			{
-				escapeSingleQuote(in, addquote);
+				out = escapeSingleQuote(in, addquote);
 			}
 			else
 			{
@@ -2490,6 +2624,11 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 	return out;
 }
 
+/*
+ * list_sort_cmp
+ *
+ * helper function to compare 2 ListCells for sorting
+ */
 static int
 list_sort_cmp(const ListCell *a, const ListCell *b)
 {
@@ -2503,6 +2642,11 @@ list_sort_cmp(const ListCell *a, const ListCell *b)
 	return 0;
 }
 
+/*
+ * convert2PGDML
+ *
+ * this function converts  DBZ_DML to PG_DML strucutre
+ */
 static PG_DML *
 convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 {
@@ -2717,7 +2861,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					pgcolval_after->position = colval_after->position;
 					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
 
-
+					data = processDataByType(colval_before, false, dbzdml->remoteObjectId);
 					if (data != NULL)
 					{
 						pgcolval_before->value = pstrdup(data);
@@ -2750,6 +2894,11 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 	return pgdml;
 }
 
+/*
+ * get_additional_parameters
+ *
+ * this function fetches additional parameters from Jsonb based on the given column data types
+ */
 static void
 get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefore, int pos)
 {
@@ -2822,6 +2971,11 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 		pfree(strinfo.data);
 }
 
+/*
+ * parseDBZDML
+ *
+ * this function parses a Jsonb that represents DML operation and produce a DBZ_DML structure
+ */
 static DBZ_DML *
 parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 {
@@ -2843,6 +2997,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	HASHCTL hash_ctl;
 	NameOidEntry * entry;
 	bool found;
+	DataCacheKey cachekey = {0};
+	DataCacheEntry * cacheentry;
 
 	/* these are the components that compose of an object ID before transformation */
 	char * db = NULL, * schema = NULL, * table = NULL;
@@ -2878,7 +3034,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 	/* fetch table - required */
 	getPathElementString(jb, "payload.source.table", &strinfo, true);
-	if (!strcasecmp(strinfo.data, "NULL"))
+	if (!strcasecmp(strinfo.data, "NULL") || !strcasecmp(strinfo.data, "dbzsignal"))
 	{
 		elog(WARNING, "malformed DML change request - no table attribute specified");
 		destroyDBZDML(dbzdml);
@@ -2955,6 +3111,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	}
 
 	dbzdml->op = op;
+
 	/*
 	 * before parsing, we need to make sure the target namespace and table
 	 * do exist in PostgreSQL, and also fetch their attribute type IDs. PG
@@ -2968,80 +3125,98 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	for (j = 0; j < strlen(dbzdml->table); j++)
 		dbzdml->table[j] = (char) pg_tolower((unsigned char) dbzdml->table[j]);
 
-	StartTransactionCommand();
-	PushActiveSnapshot(GetTransactionSnapshot());
+	/* prepare cache key */
+	strlcpy(cachekey.schema, dbzdml->schema, sizeof(cachekey.schema));
+	strlcpy(cachekey.table, dbzdml->table, sizeof(cachekey.table));
 
-	schemaoid = get_namespace_oid(dbzdml->schema, false);
-	if (!OidIsValid(schemaoid))
+	cacheentry = (DataCacheEntry *) hash_search(dataCacheHash, &cachekey, HASH_ENTER, &found);
+	if (found)
 	{
-		char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-		snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->schema);
-		set_shm_connector_errmsg(myConnectorId, msg);
-
-		/* trigger pg's error shutdown routine */
-		elog(ERROR, "%s", msg);
+		/* use the cached data type hash for lookup later */
+		typeidhash = cacheentry->typeidhash;
+		dbzdml->tableoid = cacheentry->tableoid;
 	}
-
-	dbzdml->tableoid = get_relname_relid(dbzdml->table, schemaoid);
-	if (!OidIsValid(dbzdml->tableoid))
+	else
 	{
-		char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-		snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", dbzdml->table);
-		set_shm_connector_errmsg(myConnectorId, msg);
-
-		/* trigger pg's error shutdown routine */
-		elog(ERROR, "%s", msg);
-	}
-
-	elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", dbzdml->schema, dbzdml->table, dbzdml->tableoid);
-
-	/* prepare a temporary hash table for datatype look up with column name */
-	memset(&hash_ctl, 0, sizeof(hash_ctl));
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(NameOidEntry);
-	hash_ctl.hcxt = CurrentMemoryContext;
-
-	typeidhash = hash_create("Name to OID Hash Table",
-							 512, // limit to 512 columns max
-							 &hash_ctl,
-							 HASH_ELEM | HASH_CONTEXT);
-
-	/*
-	 * get the column data type IDs for all columns from PostgreSQL catalog
-	 * The type IDs are stored in typeidhash temporarily for the parser
-	 * below to look up
-	 */
-	rel = table_open(dbzdml->tableoid, NoLock);
-	tupdesc = RelationGetDescr(rel);
-
-	for (attnum = 1; attnum <= tupdesc->natts; attnum++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-		elog(DEBUG2, "column %d: name %s, type %u, length %d",
-				attnum,
-				NameStr(attr->attname),
-				attr->atttypid,
-				attr->attlen);
-
-		entry = (NameOidEntry *) hash_search(typeidhash, NameStr(attr->attname), HASH_ENTER, &found);
-		if (!found)
+		schemaoid = get_namespace_oid(dbzdml->schema, false);
+		if (!OidIsValid(schemaoid))
 		{
-			strncpy(entry->name, NameStr(attr->attname), NAMEDATALEN);
-			entry->oid = attr->atttypid;
-			entry->position = attnum;
-			entry->typemod = attr->atttypmod;
-			elog(DEBUG2, "Inserted name '%s' with OID %u and position %d", entry->name, entry->oid, entry->position);
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->schema);
+			set_shm_connector_errmsg(myConnectorId, msg);
+
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
 		}
-		else
+
+		dbzdml->tableoid = get_relname_relid(dbzdml->table, schemaoid);
+		if (!OidIsValid(dbzdml->tableoid))
 		{
-			elog(DEBUG2, "Name '%s' already exists with OID %u and position %d", entry->name, entry->oid, entry->position);
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", dbzdml->table);
+			set_shm_connector_errmsg(myConnectorId, msg);
+
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
 		}
+
+		elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", dbzdml->schema, dbzdml->table, dbzdml->tableoid);
+
+		/* populate cached information */
+		strlcpy(cacheentry->key.schema, dbzdml->schema, sizeof(cachekey.schema));
+		strlcpy(cacheentry->key.table, dbzdml->table, sizeof(cachekey.table));
+		cacheentry->tableoid = dbzdml->tableoid;
+
+		/* prepare a cached hash table for datatype look up with column name */
+		memset(&hash_ctl, 0, sizeof(hash_ctl));
+		hash_ctl.keysize = NAMEDATALEN;
+		hash_ctl.entrysize = sizeof(NameOidEntry);
+		hash_ctl.hcxt = TopMemoryContext;
+
+		cacheentry->typeidhash = hash_create("Name to OID Hash Table",
+											 512, // limit to 512 columns max
+											 &hash_ctl,
+											 HASH_ELEM | HASH_CONTEXT);
+
+		/* point to the cached datatype hash */
+		typeidhash = cacheentry->typeidhash;
+
+		/*
+		 * get the column data type IDs for all columns from PostgreSQL catalog
+		 * The type IDs are stored in typeidhash temporarily for the parser
+		 * below to look up
+		 */
+		rel = table_open(dbzdml->tableoid, NoLock);
+		tupdesc = RelationGetDescr(rel);
+
+		/* cache tupdesc */
+		cacheentry->tupdesc = CreateTupleDescCopy(tupdesc);
+
+		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+			elog(DEBUG2, "column %d: name %s, type %u, length %d",
+					attnum,
+					NameStr(attr->attname),
+					attr->atttypid,
+					attr->attlen);
+
+			entry = (NameOidEntry *) hash_search(typeidhash, NameStr(attr->attname), HASH_ENTER, &found);
+			if (!found)
+			{
+				strncpy(entry->name, NameStr(attr->attname), NAMEDATALEN);
+				entry->oid = attr->atttypid;
+				entry->position = attnum;
+				entry->typemod = attr->atttypmod;
+				elog(DEBUG2, "Inserted name '%s' with OID %u and position %d", entry->name, entry->oid, entry->position);
+			}
+			else
+			{
+				elog(DEBUG2, "Name '%s' already exists with OID %u and position %d", entry->name, entry->oid, entry->position);
+			}
+		}
+		table_close(rel, NoLock);
 	}
-	table_close(rel, NoLock);
-
-	PopActiveSnapshot();
-	CommitTransactionCommand();
-
 	switch(op)
 	{
 		case 'c':	/* create: data created after initial sync (INSERT) */
@@ -3207,13 +3382,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							colval->datatype = entry->oid;
 							colval->position = entry->position;
 							colval->typemod = entry->typemod;
-
-							/*
-							 * get additional parameters if applicable - this assumes the position
-							 * in dbz json array is the same as the position created in PostgreSQL
-							 * table. If later we introduced column mappings or both have different
-							 * number of columns. This part needs update too - todo
-							 */
 							get_additional_parameters(jb, colval, false, entry->position - 1);
 						}
 						else
@@ -3618,6 +3786,11 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	return dbzdml;
 }
 
+/*
+ * fc_get_connector_type
+ *
+ * this function takes connector type in string and returns a corresponding enum
+ */
 ConnectorType
 fc_get_connector_type(const char * connector)
 {
@@ -3640,6 +3813,11 @@ fc_get_connector_type(const char * connector)
 	}
 }
 
+/*
+ * init_mysql
+ *
+ * initialize data type hash table for mysql database
+ */
 static void
 init_mysql(void)
 {
@@ -3683,6 +3861,11 @@ init_mysql(void)
 	}
 }
 
+/*
+ * init_sqlserver
+ *
+ * initialize data type hash table for sqlserver database
+ */
 static void
 init_sqlserver(void)
 {
@@ -3726,9 +3909,26 @@ init_sqlserver(void)
 	}
 }
 
+/*
+ * fc_initFormatConverter
+ *
+ * main entry to initialize all hash tables for all supported database types
+ */
 void
 fc_initFormatConverter(ConnectorType connectorType)
 {
+	/* init data cache hash */
+	HASHCTL	info;
+
+	info.keysize = sizeof(DataCacheKey);
+	info.entrysize = sizeof(DataCacheEntry);
+	info.hcxt = CurrentMemoryContext;
+
+	dataCacheHash = hash_create("data cache hash",
+							 256,
+							 &info,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
 	switch (connectorType)
 	{
 		case TYPE_MYSQL:
@@ -3753,6 +3953,11 @@ fc_initFormatConverter(ConnectorType connectorType)
 	}
 }
 
+/*
+ * fc_deinitFormatConverter
+ *
+ * main entry to de-initialize all hash tables for all supported database types
+ */
 void
 fc_deinitFormatConverter(ConnectorType connectorType)
 {
@@ -3780,7 +3985,12 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 	}
 }
 
-
+/*
+ * fc_load_rules
+ *
+ * read the given rulefile and parse them into several object type and data
+ * transformation hash tables
+ */
 bool
 fc_load_rules(ConnectorType connectorType, const char * rulefile)
 {
@@ -3797,6 +4007,7 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 	char * key = NULL;
 	char * value = NULL;
 	bool found = 0;
+	StringInfoData strinfo;
 
 	HTAB * rulehash = NULL;
 	DatatypeHashEntry hashentry;
@@ -4199,17 +4410,55 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 			value = NULL;
 		}
 	}
+
+	/* load extra per-connector parameters here if specified */
+	initStringInfo(&strinfo);
+
+	getPathElementString(jb, "ssl_rules.ssl_mode", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+		extraConnInfo.ssl_mode = pstrdup(strinfo.data);
+
+	getPathElementString(jb, "ssl_rules.ssl_keystore", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+		extraConnInfo.ssl_keystore = pstrdup(strinfo.data);
+
+	getPathElementString(jb, "ssl_rules.ssl_keystore_pass", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+		extraConnInfo.ssl_keystore_pass = pstrdup(strinfo.data);
+
+	getPathElementString(jb, "ssl_rules.ssl_truststore", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+		extraConnInfo.ssl_truststore = pstrdup(strinfo.data);
+
+	getPathElementString(jb, "ssl_rules.ssl_truststore_pass", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+		extraConnInfo.ssl_truststore_pass = pstrdup(strinfo.data);
+
+	if (strinfo.data)
+		pfree(strinfo.data);
+
 	return true;
 }
 
-/* Main function to process Debezium change event */
+/*
+ * fc_processDBZChangeEvent
+ *
+ * Main function to process Debezium change event
+ */
 int
-fc_processDBZChangeEvent(const char * event)
+fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats)
 {
 	Datum jsonb_datum;
 	Jsonb *jb;
 	StringInfoData strinfo;
 	ConnectorType type;
+	MemoryContext tempContext, oldContext;
+
+	tempContext = AllocSetContextCreate(TopMemoryContext,
+										"FORMAT_CONVERTER",
+										ALLOCSET_DEFAULT_SIZES);
+
+	oldContext = MemoryContextSwitchTo(tempContext);
 
 	initStringInfo(&strinfo);
 
@@ -4219,19 +4468,30 @@ fc_processDBZChangeEvent(const char * event)
 
     /* Get connector type */
     getPathElementString(jb, "payload.source.connector", &strinfo, true);
-
     type = fc_get_connector_type(strinfo.data);
 
     /* Check if it's a DDL or DML event */
-    getPathElementString(jb, "payload.ddl", &strinfo, true);
+    getPathElementString(jb, "payload.source.snapshot", &strinfo, true);
+    if (!strcmp(strinfo.data, "true") || !strcmp(strinfo.data, "last"))
+    {
+    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+    		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+    }
+    else
+    {
+    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+    		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+    }
 
     getPathElementString(jb, "payload.op", &strinfo, true);
-
     if (!strcmp(strinfo.data, "NULL"))
     {
         /* Process DDL event */
     	DBZ_DDL * dbzddl = NULL;
     	PG_DDL * pgddl = NULL;
+
+    	/* increment batch statistics */
+    	increment_connector_statistics(myBatchStats, STATS_DDL, 1);
 
     	/* (1) parse */
     	elog(DEBUG1, "parsing DBZ DDL change event...");
@@ -4241,6 +4501,9 @@ fc_processDBZChangeEvent(const char * event)
     	{
     		elog(DEBUG1, "malformed DDL event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
@@ -4252,7 +4515,10 @@ fc_processDBZChangeEvent(const char * event)
     	{
     		elog(WARNING, "failed to convert DBZ DDL to PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDDL(dbzddl);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
@@ -4263,15 +4529,15 @@ fc_processDBZChangeEvent(const char * event)
     	{
     		elog(WARNING, "failed to execute PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDDL(dbzddl);
     		destroyPGDDL(pgddl);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
-    	/* (4) update offset */
-       	set_shm_dbz_offset(myConnectorId);
-
-    	/* (5) clean up */
+    	/* (4) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
     	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDDL(dbzddl);
@@ -4283,7 +4549,8 @@ fc_processDBZChangeEvent(const char * event)
     	DBZ_DML * dbzdml = NULL;
     	PG_DML * pgdml = NULL;
 
-    	elog(DEBUG1, "this is DML change event");
+    	/* increment batch statistics */
+    	increment_connector_statistics(myBatchStats, STATS_DML, 1);
 
     	/* (1) parse */
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
@@ -4292,6 +4559,9 @@ fc_processDBZChangeEvent(const char * event)
 		{
 			elog(WARNING, "malformed DNL event");
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
 			return -1;
 		}
 
@@ -4302,30 +4572,42 @@ fc_processDBZChangeEvent(const char * event)
     	{
     		elog(WARNING, "failed to convert DBZ DML to PG DML change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDML(dbzdml);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
     		return -1;
     	}
 
     	/* (3) execute */
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
     	elog(DEBUG1, "executing PG DML change event...");
-    	if(ra_executePGDML(pgdml, type))
+    	if(ra_executePGDML(pgdml, type, myBatchStats))
     	{
     		elog(WARNING, "failed to execute PG DML change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
         	destroyDBZDML(dbzdml);
         	destroyPGDML(pgdml);
+        	MemoryContextSwitchTo(oldContext);
+        	MemoryContextDelete(tempContext);
     		return -1;
     	}
 
-    	/* (4) update offset */
-       	set_shm_dbz_offset(myConnectorId);
-
-       	/* (5) clean up */
+       	/* (4) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
     	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);
     }
+
+	if(strinfo.data)
+		pfree(strinfo.data);
+
+	if (jb)
+		pfree(jb);
+
+	MemoryContextSwitchTo(oldContext);
+	MemoryContextDelete(tempContext);
 	return 0;
 }

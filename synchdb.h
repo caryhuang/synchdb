@@ -28,7 +28,9 @@
 #define SYNCHDB_CONNINFO_TABLELIST_SIZE 256
 #define SYNCHDB_CONNINFO_RULEFILENAME_SIZE 64
 #define SYNCHDB_CONNINFO_DB_NAME_SIZE 64
-#define SYNCHDB_MAX_ACTIVE_CONNECTORS 30
+//#define SYNCHDB_MAX_ACTIVE_CONNECTORS 30
+
+#define DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC 100000
 
 #define SYNCHDB_OFFSET_SIZE 256
 #define SYNCHDB_ERRMSG_SIZE 256
@@ -77,7 +79,36 @@ typedef enum _connectorState
 	STATE_EXECUTING,	/* conversion done, try to execute it on pg */
 	STATE_OFFSET_UPDATE,/* in this state when user requests offset update */
 	STATE_RESTARTING,	/* connector is restarting with new snapshot mode */
+	STATE_MEMDUMP,		/* connector is dumping jvm heap memory info */
 } ConnectorState;
+
+/**
+ * ConnectorStage - Enum representing different stages of connector
+ */
+typedef enum _connectorStage
+{
+	STAGE_UNDEF = 0,
+	STAGE_INITIAL_SNAPSHOT,
+	STAGE_CHANGE_DATA_CAPTURE,
+} ConnectorStage;
+
+/**
+ * ConnectorStatistics - Enum representing different statistics of a connector
+ */
+typedef enum _connectorStatistics
+{
+	STATS_UNDEF = 0,
+	STATS_DDL,
+	STATS_DML,
+	STATS_READ,
+	STATS_CREATE,
+	STATS_UPDATE,
+	STATS_DELETE,
+	STATS_BAD_CHANGE_EVENT,
+	STATS_TOTAL_CHANGE_EVENT,
+	STATS_BATCH_COMPLETION,
+	STATS_AVERAGE_BATCH_SIZE
+} ConnectorStatistics;
 
 /**
  * BatchInfo - Structure containing the metadata of a batch change request
@@ -86,11 +117,11 @@ typedef struct _BatchInfo
 {
 	 int batchId;
 	 int batchSize;
-	 int currRecordIndex;
 } BatchInfo;
 
 /**
- * ConnectionInfo - DBZ Connection info
+ * ConnectionInfo - DBZ Connection info. These are put in shared memory so
+ * connector background workers can access when they are spawned.
  */
 typedef struct _ConnectionInfo
 {
@@ -107,6 +138,29 @@ typedef struct _ConnectionInfo
 } ConnectionInfo;
 
 /**
+ * ConnectorName - Used to store as a List* of names for automatic connector
+ * resume feature
+ */
+typedef struct _ConnectorName
+{
+	char name[SYNCHDB_CONNINFO_NAME_SIZE];
+} ConnectorName;
+
+/**
+ * ExtraConnectionInfo - Extra DBZ Connection info parameters read from the
+ * rule file (if specified). These won't be put in shared memory so they
+ * are declared as pointers.
+ */
+typedef struct _ExtraConnectionInfo
+{
+	char * ssl_mode;
+	char * ssl_keystore;
+	char * ssl_keystore_pass;
+	char * ssl_truststore;
+	char * ssl_truststore_pass;
+} ExtraConnectionInfo;
+
+/**
  * SynchdbRequest - Structure representing a request to change connector state
  */
 typedef struct _SynchdbRequest
@@ -117,18 +171,43 @@ typedef struct _SynchdbRequest
 } SynchdbRequest;
 
 /**
+ * SynchdbRequest - Structure representing a statistic info per connector.
+ * If you add new stats values here, make sure to add the same to ConnectorStatistics
+ * enum above
+ *
+ * todo: to be persisted in future
+ */
+typedef struct _SynchdbStatistics
+{
+	unsigned long long stats_ddl;				/* number of DDL operations performed */
+	unsigned long long stats_dml;				/* number of DML operations performed */
+	unsigned long long stats_read;				/* READ events generated during initial snapshot */
+	unsigned long long stats_create;			/* INSERT events generated during CDC */
+	unsigned long long stats_update;			/* UPDATE events generated during CDC */
+	unsigned long long stats_delete;			/* DELETE events generated during CDC */
+	unsigned long long stats_bad_change_event;	/* number of bad change events */
+	unsigned long long stats_total_change_event;/* number of total change events */
+	unsigned long long stats_batch_completion;	/* number of batches completed */
+	unsigned long long stats_average_batch_size;/* calculated average batch size: */
+
+	/* todo: more stats to be added */
+} SynchdbStatistics;
+
+/**
  *  Structure holding state information for connectors
  */
 typedef struct _ActiveConnectors
 {
 	pid_t pid;
 	ConnectorState state;
+	ConnectorStage stage;
 	ConnectorType type;
 	SynchdbRequest req;
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
 	char dbzoffset[SYNCHDB_OFFSET_SIZE];
 	char snapshotMode[SYNCHDB_SNAPSHOT_MODE_SIZE];
 	ConnectionInfo conninfo;
+	SynchdbStatistics stats;
 } ActiveConnectors;
 
 /**
@@ -137,7 +216,7 @@ typedef struct _ActiveConnectors
 typedef struct _SynchdbSharedState
 {
 	LWLock		lock;		/* mutual exclusion */
-	ActiveConnectors connectors[SYNCHDB_MAX_ACTIVE_CONNECTORS];
+	ActiveConnectors * connectors;
 } SynchdbSharedState;
 
 /* Function prototypes */
@@ -148,10 +227,12 @@ void set_shm_connector_errmsg(int connectorId, const char * err);
 const char * get_shm_connector_errmsg(int connectorId);
 void set_shm_connector_state(int connectorId, ConnectorState state);
 const char * get_shm_connector_state(int connectorId);
-void set_shm_connector_dbs(int connectorId, char * srcdb, char * dstdb);
 void set_shm_dbz_offset(int connectorId);
 const char * get_shm_dbz_offset(int connectorId);
 ConnectorState get_shm_connector_state_enum(int connectorId);
 const char* connectorTypeToString(ConnectorType type);
+void set_shm_connector_stage(int connectorId, ConnectorStage stage);
+ConnectorStage get_shm_connector_stage_enum(int connectorId);
+void increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics which, int incby);
 
 #endif /* SYNCHDB_SYNCHDB_H_ */
