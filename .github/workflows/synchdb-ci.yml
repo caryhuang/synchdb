@@ -228,8 +228,8 @@ jobs:
     - name: Create connection information and start connectors
       run: |
         psql -d test_db << EOF || { echo "Failed to create connections or start connectors"; cat logfile; exit 1; }
-        SELECT synchdb_add_conninfo('mysqlconn', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql', '');
-        SELECT synchdb_add_conninfo('sqlserverconn', '127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver', '');
+        SELECT synchdb_add_conninfo('mysqlconn', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');
+        SELECT synchdb_add_conninfo('sqlserverconn', '127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver');
         SELECT synchdb_start_engine_bgw('mysqlconn');
         SELECT synchdb_start_engine_bgw('sqlserverconn');
         EOF
