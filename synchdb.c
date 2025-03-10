@@ -2810,15 +2810,6 @@ _PG_init(void)
 }
 
 /*
- * Finalization function
- */
-void
-_PG_fini(void)
-{
-	elog(DEBUG1," shutdown synchdb");
-}
-
-/*
  * synchdb_engine_main - Main entry point for the SynchDB background worker
  */
 void

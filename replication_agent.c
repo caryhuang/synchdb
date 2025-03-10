@@ -334,7 +334,12 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 
 		addRTEPermissionInfo(&perminfos, rte);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+		ExecInitRangeTable(estate, list_make1(rte), perminfos,
+				bms_make_singleton(1));
+#else
 		ExecInitRangeTable(estate, list_make1(rte), perminfos);
+#endif
 		estate->es_output_cid = GetCurrentCommandId(true);
 
 		/* initialize resultRelInfo */
@@ -470,7 +475,12 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 
 		addRTEPermissionInfo(&perminfos, rte);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+		ExecInitRangeTable(estate, list_make1(rte), perminfos,
+				bms_make_singleton(1));
+#else
 		ExecInitRangeTable(estate, list_make1(rte), perminfos);
+#endif
 		estate->es_output_cid = GetCurrentCommandId(true);
 
 		/* initialize resultRelInfo */
@@ -663,7 +673,12 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 
 		addRTEPermissionInfo(&perminfos, rte);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+		ExecInitRangeTable(estate, list_make1(rte), perminfos,
+				bms_make_singleton(1));
+#else
 		ExecInitRangeTable(estate, list_make1(rte), perminfos);
+#endif
 		estate->es_output_cid = GetCurrentCommandId(true);
 
 		/* initialize resultRelInfo */
