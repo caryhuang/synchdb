@@ -1,8 +1,10 @@
 ## Introduction
 
-SynchDB is a PostgreSQL extension designed to replicate data from one or more heterogeneous databases (such as MySQL, MS SQLServer, Oracle, etc.) directly to PostgreSQL in a fast and reliable way. PostgreSQL serves as the destination from multiple heterogeneous database sources. No middleware or third-party software is required to orchestrate the data synchronization between heterogeneous databases and PostgreSQL. SynchDB extension itself is capable of handling all the data synchronization needs.
+SynchDB is a PostgreSQL extension designed for fast and reliable data replication from multiple heterogeneous databases (including MySQL, SQL Server, and Oracle) into PostgreSQL. It eliminates the need for middleware or third-party software, enabling direct synchronization without additional orchestration.
 
-Visit SynchDB documentation site [here](https://docs.synchdb.com/) for more details.
+SynchDB is a dual-language module, combining Java (for utilizing Debezium Embedded connectors) and C (for interacting with PostgreSQL core) components, and requires the Java Virtual Machine (JVM) and Java Native Interface (JNI) to operate together.
+
+Visit SynchDB documentation site [here](https://docs.synchdb.com/) for more design details.
 
 ## Architecture
 SynchDB extension consists of six major components:
@@ -16,8 +18,7 @@ SynchDB extension consists of six major components:
 ![img](https://www.highgo.ca/wp-content/uploads/2024/07/synchdb.drawio.png)
 
 ### Debezium Runner Engine (Java)
-* A java application utilizing Debezium embedded library.
-* Supports various connector implementations to replicate change data from various database types such as MySQL, Oracle, SQL Server, etc.
+* A java application that drives Debezium Embedded engine and utilizes all of the database connectors that it supports.
 * Invoked by `SynchDB Worker` to initialize Debezium embedded library and receive change data.
 * Send the change data to `SynchDB Worker` in generalized JSON format for further processing.
 
@@ -26,7 +27,7 @@ SynchDB extension consists of six major components:
 * Configure each worker's connector type, destination database IPs, ports, etc.
 
 ### SynchDB Worker
-* Instantiats a `Debezium Runner Engine` to replicate changes from a specific connector type.
+* Instantiats a `Debezium Runner Engine` inside a Java Virtual Machine (JVM) to replicate changes from a specific connector type.
 * Communicate with Debezium Runner via JNI to receive change data in JSON formats.
 * Transfer the JSON change data to `Format Converter` module for further processing.
 
@@ -162,7 +163,7 @@ ldd synchdb.so
 ```
 
 ## Run SynchDB Test
-Refer to `testenv/README.md` or visit our documentation page [here](https://docs.synchdb.com/user-guide/prepare_tests_env/) to prepare a sample MySQL and SQLServer database instances for testing.
+Refer to `testenv/README.md` or visit our documentation page [here](https://docs.synchdb.com/user-guide/prepare_tests_env/) to prepare a sample MySQL, SQL Server or Oracle database instances for testing.
 
 SynchDB extension requires pgcrypto to encrypt certain sensitive credential data. Please make sure it is installed prior to installing SynchDB. Alternatively, you can include `CASCADE` clause in `CREATE EXTENSION` to automatically install dependencies:
 
@@ -170,61 +171,75 @@ SynchDB extension requires pgcrypto to encrypt certain sensitive credential data
 CREATE EXTENSION synchdb CASCADE;
 ```
 
-### Create a Connection Information
-With SynchDB installed, we can create one or more connector information entries that represent the details to connect to a remote heterogeneous database and what to replicate. This can be done with `synchdb_add_conninfo()` function.
+### Create a Connector
+A connector represents the details to connecto to a remote heterogeneous database and describes what tables to replicate from. It can be created with `synchdb_add_conninfo()` function.
 
-For example:
+Create a MySQL connector and replicate `inventory.orders` and `inventory.customers` tables under `invnetory` database:
 ``` SQL
-# create a mysql conninfo called 'mysqlconn' to replicate inventory.orders and inventory.customers tables from source database 'inventory' to destination database 'postgres' using default transform rules
-SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1',3306,'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'mysql', '');
-
-# create a sqlserver conninfo called 'sqlserverconn' to replicate all tables from source database 'testDB' to destination database 'sqlserverdb' using default transform rules
-SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1',1433,'sa', 'Password!', 'testDB', 'sqlserverdb', '', 'sqlserver', '');
+SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'mysql');
 ```
 
-### Review all Connection Information Created
-All connection information are created in the table `synchdb_conninfo`. We are free to view its content and make modification as required. Please note that the password of a user credential is encrypted by pgcrypto using a key only known to synchdb. So please do not modify the password field or it may be decrypted incorrectly if tempered. See below for an example output: 
+Create a SQL Server connector and replicate from all tables under `testDB` database.
+```SQL
+SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'postgres', '', 'sqlserver');
+```
+
+Create a Oracle connector and replicate from all tables under `mydb` database.
+```SQL
+SELECT synchdb_add_conninfo('oracleconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'mydb', 'postgres', '', 'oracle');
+```
+
+### Review all Connectors Created
+All created connectors are stored in the `synchdb_conninfo` table. Please note that user passwords are encrypted by SynchDB on creation so please do not modify the password field directly. 
 
 ``` SQL
 postgres=# \x
 Expanded display is on.
 
 postgres=# select * from synchdb_conninfo;
--[ RECORD 1 ]-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-name | mysqlconn
-data | {"pwd": "\\xc30d040703024828cc4d982e47b07bd23901d03e40da5995d2a631fb89d49f748b87247aee94070f71ecacc4990c3e71cad9f68d57c440de42e35bcc78fd145feab03452e454284289db", "port": 3306, "user": "mysqluser", "dstdb": "postgres", "srcdb": "inventory", "table": "inventory.orders,inventory.customers", "hostname": "192.168.1.86", "connector": "mysql", "null"}
--[ RECORD 2 ]-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-name | sqlserverconn
-data | {"pwd": "\\xc30d0407030231678e1bb0f8d3156ad23a010ca3a4b0ad35ed148f8181224885464cdcfcec42de9834878e2311b343cd184fde65e0051f75d6a12d5c91d0a0403549fe00e4219215eafe1b", "port": 1433, "user": "sa", "dstdb": "sqlserverdb", "srcdb": "testDB", "table": "null", "hostname": "192.168.1.86", "connector": "sqlserver", "null"}
+-[ RECORD 1 ]-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+name     | oracleconn
+isactive | f
+data     | {"pwd": "\\xc30d04070302e3baf1293d0d553066d234014f6fc52e6eea425884b1f65f1955bf504b85062dfe538ca2e22bfd6db9916662406fc45a3a530b7bf43ce4cfaa2b049a1c9af8", "port": 1521, "user": "c##dbzuser", "dstdb": "postgres", "srcdb": "mydb", "table": "null", "hostname": "127.0.0.1", "connector": "oracle"}
+-[ RECORD 2 ]-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+name     | sqlserverconn
+isactive | t
+data     | {"pwd": "\\xc30d0407030245ca4a983b6304c079d23a0191c6dabc1683e4f66fc538db65b9ab2788257762438961f8201e6bcefafa60460fbf441e55d844e7f27b31745f04e7251c0123a159540676c4", "port": 1433, "user": "sa", "dstdb": "postgres", "srcdb": "testDB", "table": "null", "hostname": "127.0.0.1", "connector": "sqlserver"}
+-[ RECORD 3 ]-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+name     | mysqlconn
+isactive | t
+data     | {"pwd": "\\xc30d04070302986aff858065e96b62d23901b418a1f0bfdf874ea9143ec096cd648a1588090ee840de58fb6ba5a04c6430d8fe7f7d466b70a930597d48b8d31e736e77032cb34c86354e", "port": 3306, "user": "mysqluser", "dstdb": "postgres", "srcdb": "inventory", "table": "inventory.orders,inventory.customers", "hostname": "127.0.0.1", "connector": "mysql"}
+
 ```
 
-### Start a Connector Worker
-Use `synchdb_start_engine_bgw()` function to start a connector worker. It takes one argument which is the connection information name created above. the commands below will spawn a worker for each conenctor with the specified replication configuration.
+### Start a Connector
+A connector can be started by `synchdb_start_engine_bgw()` function. It takes one connector name argument which must have been created by `synchdb_add_conninfo()` prior to starting. The commands below starts a connector in default snapshot mode, which replicates designated table schemas, their initial data and proceed to stream live changes (CDC).
 
 ``` SQL
 select synchdb_start_engine_bgw('mysqlconn');
+select synchdb_start_engine_bgw('oracleconn');
 select synchdb_start_engine_bgw('sqlserverconn');
 ```
 
-### View the Connector States
-Use `synchdb_state_view()` to examine all the running connectors and their states. Currently, synchdb can support up to 30 running workers.
+### View Connector Running States
+Use `synchdb_state_view()` to examine all connectors' running states.
 
 ``` SQL
 postgres=# select * from synchdb_state_view;
- id | connector | conninfo_name  |  pid   |  state  |   err    |                                          last_dbz_offset
-----+-----------+----------------+--------+---------+----------+---------------------------------------------------------------------------------------------------
-  0 | mysql     | mysqlconn      | 461696 | syncing | no error | {"ts_sec":1725644339,"file":"mysql-bin.000004","pos":138466,"row":1,"server_id":223344,"event":2}
-  1 | sqlserver | sqlserverconn  | 461739 | syncing | no error | {"event_serial_no":1,"commit_lsn":"00000100:00000c00:0003","change_lsn":"00000100:00000c00:0002"}
-  3 | null      |                |     -1 | stopped | no error | no offset
-  4 | null      |                |     -1 | stopped | no error | no offset
-  5 | null      |                |     -1 | stopped | no error | no offset
-  ...
-  ...
+     name      | connector_type |  pid   |        stage        |  state  |   err    |                                           last_dbz_offset
+---------------+----------------+--------+---------------------+---------+----------+------------------------------------------------------------------------------------------------------
+ sqlserverconn | sqlserver      | 579820 | change data capture | polling | no error | {"commit_lsn":"0000006a:00006608:0003","snapshot":true,"snapshot_completed":false}
+ mysqlconn     | mysql          | 579845 | change data capture | polling | no error | {"ts_sec":1741301103,"file":"mysql-bin.000009","pos":574318212,"row":1,"server_id":223344,"event":2}
+ oracleconn    | oracle         | 580053 | change data capture | polling | no error | offset file not flushed yet
+(3 rows)
+
 ```
 
-### Stop a Connector Worker
-Use `synchdb_stop_engine_bgw()` SQL function to stop a running or paused connector worker. This function takes `conninfo_name` as its only parameter, which can be found from the output of `synchdb_get_state()` view.
+### Stop a Connector
+Use `synchdb_stop_engine_bgw()` SQL function to stop a connector.It takes one connector name argument which must have been created by `synchdb_add_conninfo()` function.
 
 ``` SQL
 select synchdb_stop_engine_bgw('mysqlconn');
+select synchdb_stop_engine_bgw('sqlserverconn');
+select synchdb_stop_engine_bgw('oracleconn');
 ```

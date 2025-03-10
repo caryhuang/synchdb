@@ -2331,7 +2331,11 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 		rel = table_open(tableoid, NoLock);
 		tupdesc = RelationGetDescr(rel);
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+		pkoid = RelationGetPrimaryKeyIndex(rel, true);
+#else
 		pkoid = RelationGetPrimaryKeyIndex(rel);
+#endif
 		table_close(rel, NoLock);
 
 		/*

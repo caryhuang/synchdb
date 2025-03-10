@@ -43,6 +43,8 @@
 #define SYNCHDB_JSON_PATH_SIZE 128
 #define SYNCHDB_INVALID_BATCH_ID -1
 
+#define SYNCHDB_PG_MAJOR_VERSION  PG_VERSION_NUM / 100
+
 /*
  * ex: 	pg_synchdb/[connector]_[name]_offsets.dat
  * 		pg_synchdb/mysql_mysqlconn_offsets.dat
