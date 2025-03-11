@@ -25,9 +25,25 @@
 typedef struct pg_ddl
 {
 	char * ddlquery;	/* to be fed into SPI*/
+	char * type;		/* CREATE, DROP or ALTER-ADD, ALTER-DROP or ALTER */
+	char * schema;		/* name of PG schema */
+	char * tbname;		/* name of PG table */
+	List * columns;		/* list of PG_DDL_COLUMN */
 } PG_DDL;
 
-typedef struct pg_ddl_column_value
+/*
+ * Structure to represent a PG column in a DDL event that is
+ * sufficient to update the attribute table. It does not need
+ * to contain full column information
+ */
+typedef struct pg_ddl_column
+{
+	char * attname;
+	char * atttype;
+	int position;
+} PG_DDL_COLUMN;
+
+typedef struct pg_dml_column_value
 {
 	char * value;	/* string representation of column values that
 					 * is processed and ready to be used to built
@@ -54,5 +70,6 @@ int ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** c
 int ra_executeCommand(const char * query);
 int ra_listConnInfoNames(char ** out, int * numout);
 char * ra_transformDataExpression(char * data, char * wkb, char * srid, char * expression);
+int ra_listObjmaps(const char * name, ObjectMap ** out, int * numout);
 
 #endif /* SYNCHDB_REPLICATION_AGENT_H_ */

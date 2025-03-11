@@ -41,6 +41,8 @@ typedef enum _timeRep
 	TIME_MICROTIMESTAMP,	/* number of microseconds since epoch */
 	TIME_NANOTIMESTAMP,		/* number of nanoseconds since epoch */
 	TIME_ZONEDTIMESTAMP,	/* string representation of timestamp with timezone */
+	TIME_MICRODURATION,	/* duration expressed in microseconds */
+	DATA_VARIABLE_SCALE,	/* indication if scale is variable (for oracle) */
 } TimeRep;
 
 /* Structure to represent a column in a DDL event */
@@ -73,7 +75,14 @@ typedef struct
 	Oid oid;
 	int position;
 	int typemod;
+	bool ispk;
 } NameOidEntry;
+
+typedef struct
+{
+	char name[NAMEDATALEN];
+	int jsonpos;
+} NameJsonposEntry;
 
 /* Structure to represent a column value in a DML event */
 typedef struct dbz_dml_column_value
@@ -86,6 +95,7 @@ typedef struct dbz_dml_column_value
 	int scale;		/* location of decimal point - decimal type only */
 	int timerep;	/* how dbz represents time related fields */
 	int typemod;	/* extra data type modifier */
+	bool ispk;		/* indicate if this column is a primary key*/
 } DBZ_DML_COLUMN_VALUE;
 
 /* Structure to represent a DML event */
@@ -152,10 +162,12 @@ typedef struct transformExpressionHashEntry
 } TransformExpressionHashEntry;
 
 /* Function prototypes */
-int fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats);
+int fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, bool schemasync, const char * name);
 ConnectorType fc_get_connector_type(const char * connector);
 void fc_initFormatConverter(ConnectorType connectorType);
 void fc_deinitFormatConverter(ConnectorType connectorType);
 bool fc_load_rules(ConnectorType connectorType, const char * rulefile);
+bool fc_load_objmap(const char * name, ConnectorType connectorType);
+char * escapeSingleQuote(const char * in, bool addquote);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */

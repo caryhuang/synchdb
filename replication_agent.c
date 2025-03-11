@@ -30,11 +30,15 @@
 #include "synchdb.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
+#include "storage/ipc.h"
 
 /* external global variables */
 extern bool synchdb_dml_use_spi;
 extern uint64 SPI_processed;
 extern int myConnectorId;
+extern int synchdb_error_strategy;
+extern bool synchdb_log_event_on_error;
+extern char * g_eventStr;
 
 /*
  * swap_tokens
@@ -139,6 +143,12 @@ spi_execute_select_one(const char * query, int * numcols)
 	if (SPI_connect() != SPI_OK_CONNECT)
 	{
 		elog(WARNING, "synchdb_pgsql - SPI_connect failed");
+		if (!skiptx)
+		{
+			/* Start a transaction and set up a snapshot */
+			StartTransactionCommand();
+			PushActiveSnapshot(GetTransactionSnapshot());
+		}
 		return NULL;
 	}
 
@@ -153,6 +163,12 @@ spi_execute_select_one(const char * query, int * numcols)
 		default:
 		{
 			SPI_finish();
+			if (!skiptx)
+			{
+				/* Start a transaction and set up a snapshot */
+				StartTransactionCommand();
+				PushActiveSnapshot(GetTransactionSnapshot());
+			}
 			return NULL;
 		}
 	}
@@ -160,6 +176,12 @@ spi_execute_select_one(const char * query, int * numcols)
 	if (numrows == 0)
 	{
 		SPI_finish();
+		if (!skiptx)
+		{
+			/* Start a transaction and set up a snapshot */
+			StartTransactionCommand();
+			PushActiveSnapshot(GetTransactionSnapshot());
+		}
 		return NULL;
 	}
 
@@ -202,7 +224,6 @@ spi_execute(const char * query, ConnectorType type)
 {
 	int ret = -1;
 	bool skiptx = false;
-	MemoryContext oldContext, execContext;
 	/*
 	 * if we are already in transaction or transaction block, we can skip
 	 * the transaction and snapshot acquisition code below
@@ -218,15 +239,6 @@ spi_execute(const char * query, ConnectorType type)
 			StartTransactionCommand();
 			PushActiveSnapshot(GetTransactionSnapshot());
 		}
-
-		/* Create a temporary memory context for query execution */
-		execContext = AllocSetContextCreate(CurrentMemoryContext,
-											"synchdb_spi_exec_context",
-											ALLOCSET_DEFAULT_SIZES);
-
-		/* Switch to the temporary memory context */
-		oldContext = MemoryContextSwitchTo(execContext);
-
 		if (SPI_connect() != SPI_OK_CONNECT)
 		{
 			elog(ERROR, "synchdb_pgsql - SPI_connect failed");
@@ -254,19 +266,12 @@ spi_execute(const char * query, ConnectorType type)
 			elog(ERROR, "SPI_finish failed");
 		}
 
-		/* Switch back to the original memory context and reset the temporary one */
-		MemoryContextSwitchTo(oldContext);
-		MemoryContextReset(execContext);
-
 		if (!skiptx)
 		{
 			/* Commit the transaction */
 			PopActiveSnapshot();
 			CommitTransactionCommand();
 		}
-
-		/* Delete the temporary context */
-		MemoryContextDelete(execContext);
 	}
 	PG_CATCH();
 	{
@@ -275,15 +280,13 @@ spi_execute(const char * query, ConnectorType type)
 		if (errdata)
 			set_shm_connector_errmsg(myConnectorId, errdata->message);
 
+		/* dump the JSON change event as additional detail if available */
+		if (synchdb_log_event_on_error && g_eventStr != NULL)
+			elog(LOG, "%s", g_eventStr);
+
 		FreeErrorData(errdata);
 		SPI_finish();
 		ret = -1;
-		/* Ensure the temporary memory context is cleaned up */
-		if (execContext)
-		{
-			MemoryContextSwitchTo(oldContext);
-			MemoryContextDelete(execContext);
-		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -331,7 +334,12 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 
 		addRTEPermissionInfo(&perminfos, rte);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+		ExecInitRangeTable(estate, list_make1(rte), perminfos,
+				bms_make_singleton(1));
+#else
 		ExecInitRangeTable(estate, list_make1(rte), perminfos);
+#endif
 		estate->es_output_cid = GetCurrentCommandId(true);
 
 		/* initialize resultRelInfo */
@@ -394,13 +402,29 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 		if (errdata)
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "table %d: %s",
-					tableoid, errdata->message);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "%s.%s: %s | %s",
+					errdata->schema_name == NULL ? "" : errdata->schema_name,
+					errdata->table_name == NULL ? "" : errdata->table_name,
+					errdata->message,
+					errdata->detail == NULL ? "" : errdata->detail);
 			set_shm_connector_errmsg(myConnectorId, msg);
 			pfree(msg);
 		}
-
 		FreeErrorData(errdata);
+
+		/* dump the JSON change event as additional detail if available */
+		if (synchdb_log_event_on_error && g_eventStr != NULL)
+			elog(LOG, "%s", g_eventStr);
+
+		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
+		{
+			ExecCloseIndices(resultRelInfo);
+			table_close(rel, NoLock);
+			ExecResetTupleTable(estate->es_tupleTable, false);
+			FreeExecutorState(estate);
+			FlushErrorState();
+			return -1;
+		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -451,7 +475,12 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 
 		addRTEPermissionInfo(&perminfos, rte);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+		ExecInitRangeTable(estate, list_make1(rte), perminfos,
+				bms_make_singleton(1));
+#else
 		ExecInitRangeTable(estate, list_make1(rte), perminfos);
+#endif
 		estate->es_output_cid = GetCurrentCommandId(true);
 
 		/* initialize resultRelInfo */
@@ -496,13 +525,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 
 		/* We must open indexes here. */
 		ExecOpenIndices(resultRelInfo, false);
-
-		/*
-		 * check if there is a PK or relation identity index that we could use to
-		 * locate the old tuple. If no identity or PK, there may potentially be
-		 * other indexes created on other columns that can be used. But for now,
-		 * we do not bother checking for them. Mark it as todo for later.
-		 */
 		idxoid = GetRelationIdentityOrPK(rel);
 		if (OidIsValid(idxoid))
 		{
@@ -553,16 +575,13 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 				}
 			}
 			ExecStoreVirtualTuple(remoteslot);
-
 			EvalPlanQualSetSlot(&epqstate, remoteslot);
-
 			ExecSimpleRelationUpdate(resultRelInfo, estate, &epqstate, localslot,
 									 remoteslot);
 		}
 		else
 		{
-			elog(DEBUG1, "tuple to update not found");
-			ret = -1;
+			elog(ERROR, "tuple to update not found");
 		}
 
 		/* increment command ID */
@@ -581,13 +600,30 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		if (errdata)
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "table %d: %s",
-					tableoid, errdata->message);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "%s.%s: %s | %s",
+					errdata->schema_name == NULL ? "" : errdata->schema_name,
+					errdata->table_name == NULL ? "" : errdata->table_name,
+					errdata->message,
+					errdata->detail == NULL ? "" : errdata->detail);
 			set_shm_connector_errmsg(myConnectorId, msg);
 			pfree(msg);
 		}
-
 		FreeErrorData(errdata);
+
+		/* dump the JSON change event as additional detail if available */
+		if (synchdb_log_event_on_error && g_eventStr != NULL)
+			elog(LOG, "%s", g_eventStr);
+
+		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
+		{
+			ExecCloseIndices(resultRelInfo);
+			EvalPlanQualEnd(&epqstate);
+			ExecResetTupleTable(estate->es_tupleTable, false);
+			FreeExecutorState(estate);
+			table_close(rel, NoLock);
+			FlushErrorState();
+			return -1;
+		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -637,7 +673,12 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 
 		addRTEPermissionInfo(&perminfos, rte);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+		ExecInitRangeTable(estate, list_make1(rte), perminfos,
+				bms_make_singleton(1));
+#else
 		ExecInitRangeTable(estate, list_make1(rte), perminfos);
+#endif
 		estate->es_output_cid = GetCurrentCommandId(true);
 
 		/* initialize resultRelInfo */
@@ -682,13 +723,6 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 
 		/* We must open indexes here. */
 		ExecOpenIndices(resultRelInfo, false);
-
-		/*
-		 * check if there is a PK or relation identity index that we could use to
-		 * locate the old tuple. If no identity or PK, there may potentially be
-		 * other indexes created on other columns that can be used. But for now,
-		 * we do not bother checking for them. Mark it as todo for later.
-		 */
 		idxoid = GetRelationIdentityOrPK(rel);
 		if (OidIsValid(idxoid))
 		{
@@ -711,13 +745,11 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		if (found)
 		{
 			EvalPlanQualSetSlot(&epqstate, localslot);
-
 			ExecSimpleRelationDelete(resultRelInfo, estate, &epqstate, localslot);
 		}
 		else
 		{
-			elog(DEBUG1, "tuple to delete not found");
-			ret = -1;
+			elog(ERROR, "tuple to delete not found");
 		}
 
 		/* increment command ID */
@@ -736,13 +768,30 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		if (errdata)
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "table %d: %s",
-					tableoid, errdata->message);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "%s.%s: %s | %s",
+					errdata->schema_name == NULL ? "" : errdata->schema_name,
+					errdata->table_name == NULL ? "" : errdata->table_name,
+					errdata->message,
+					errdata->detail == NULL ? "" : errdata->detail);
 			set_shm_connector_errmsg(myConnectorId, msg);
 			pfree(msg);
 		}
-
 		FreeErrorData(errdata);
+
+		/* dump the JSON change event as additional detail if available */
+		if (synchdb_log_event_on_error && g_eventStr != NULL)
+			elog(LOG, "%s", g_eventStr);
+
+		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
+		{
+			ExecCloseIndices(resultRelInfo);
+			EvalPlanQualEnd(&epqstate);
+			ExecResetTupleTable(estate->es_tupleTable, false);
+			FreeExecutorState(estate);
+			table_close(rel, NoLock);
+			FlushErrorState();
+			return -1;
+		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -859,18 +908,21 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"coalesce(data->>'srcdb', 'null'), "
 			"coalesce(data->>'dstdb', 'null'), "
 			"coalesce(data->>'table', 'null'), "
-			"coalesce(data->>'connector', 'null'),"
+			"coalesce(data->>'connector', 'null'), "
 			"isactive,"
-			"coalesce(data->>'rule_file', 'null') FROM "
+			"coalesce(data->>'ssl_mode', 'null'), "
+			"coalesce(data->>'ssl_keystore', 'null'), "
+			"coalesce(pgp_sym_decrypt((data->>'ssl_keystore_pass')::bytea, '%s'), 'null'), "
+			"coalesce(data->>'ssl_truststore', 'null'), "
+			"coalesce(pgp_sym_decrypt((data->>'ssl_truststore_pass')::bytea, '%s'), 'null') "
+			"FROM "
 			"synchdb_conninfo WHERE name = '%s'",
-			SYNCHDB_SECRET, name);
+			SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, name);
 
 	res = spi_execute_select_one(strinfo.data, &numcols);
 	if (!res)
-	{
-		elog(WARNING, "connection name %s does not exist", name);
 		return -1;
-	}
+
 	strlcpy(conninfo->name, name, SYNCHDB_CONNINFO_NAME_SIZE);
 	strlcpy(conninfo->hostname, TextDatumGetCString(res[0]), SYNCHDB_CONNINFO_HOSTNAME_SIZE) ;
 	conninfo->port = atoi(TextDatumGetCString(res[1]));
@@ -881,14 +933,19 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	strlcpy(conninfo->table, TextDatumGetCString(res[6]) ,SYNCHDB_CONNINFO_TABLELIST_SIZE);
 	*connector = pstrdup(TextDatumGetCString(res[7]));
 	conninfo->active = DatumGetBool(res[8]);
-	strlcpy(conninfo->rulefile, TextDatumGetCString(res[9]), SYNCHDB_CONNINFO_RULEFILENAME_SIZE);
+	strlcpy(conninfo->extra.ssl_mode, TextDatumGetCString(res[9]), SYNCHDB_CONNINFO_NAME_SIZE);
+	strlcpy(conninfo->extra.ssl_keystore, TextDatumGetCString(res[10]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	strlcpy(conninfo->extra.ssl_keystore_pass, TextDatumGetCString(res[11]), SYNCHDB_CONNINFO_PASSWORD_SIZE);
+	strlcpy(conninfo->extra.ssl_truststore, TextDatumGetCString(res[12]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	strlcpy(conninfo->extra.ssl_truststore_pass, TextDatumGetCString(res[13]) ,SYNCHDB_CONNINFO_PASSWORD_SIZE);
 
-	elog(DEBUG2, "name %s hostname %s, port %d, user %s pwd %s srcdb %s "
-			"dstdb %s table %s connector %s rulefile %s",
+	elog(DEBUG1, "name %s hostname %s, port %d, user %s pwd %s srcdb %s "
+			"dstdb %s table %s connector %s extras(%s %s %s %s %s)",
 			conninfo->name, conninfo->hostname, conninfo->port,
 			conninfo->user, conninfo->pwd, conninfo->srcdb,
 			conninfo->dstdb, conninfo->table, *connector,
-			conninfo->rulefile);
+			conninfo->extra.ssl_mode, conninfo->extra.ssl_keystore, conninfo->extra.ssl_keystore_pass,
+			conninfo->extra.ssl_truststore, conninfo->extra.ssl_truststore_pass);
 	pfree(res);
 	return 0;
 }
@@ -936,7 +993,7 @@ ra_listConnInfoNames(char ** out, int * numout)
 	if (SPI_connect() != SPI_OK_CONNECT)
 	{
 		elog(WARNING, "synchdb_pgsql - SPI_connect failed");
-		return -1;
+		goto end;
 	}
 
 	ret = SPI_execute(query, true, 0);
@@ -949,14 +1006,14 @@ ra_listConnInfoNames(char ** out, int * numout)
 		default:
 		{
 			SPI_finish();
-			return -1;
+			goto end;
 		}
 	}
 	*numout = SPI_processed;
 	if (*numout == 0)
 	{
 		SPI_finish();
-		return -1;
+		goto end;
 	}
 
 	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
@@ -969,14 +1026,15 @@ ra_listConnInfoNames(char ** out, int * numout)
 
 	/* Close the connection */
 	SPI_finish();
-
+	ret = 0;
+end:
 	if (!skiptx)
 	{
 		/* Commit the transaction */
 		PopActiveSnapshot();
 		CommitTransactionCommand();
 	}
-	return 0;
+	return ret;
 }
 
 /*
@@ -1049,7 +1107,7 @@ ra_transformDataExpression(char * data, char * wkb, char * srid, char * expressi
 
 	/* Close the connection */
 	SPI_finish();
-
+end:
 	if (!skiptx)
 	{
 		/* Commit the transaction */
@@ -1057,7 +1115,6 @@ ra_transformDataExpression(char * data, char * wkb, char * srid, char * expressi
 		CommitTransactionCommand();
 	}
 
-end:
 	if (filledExpression)
 		pfree(filledExpression);
 
@@ -1065,4 +1122,135 @@ end:
 		pfree(strinfo.data);
 
 	return value;
+}
+
+/*
+ * ra_listConnInfoNames
+ *
+ * This function executes a query on both synchdb_att_view and synchdb_objmap and returns a list of mapping
+ * information
+ */
+int
+ra_listObjmaps(const char * name, ObjectMap ** out, int * numout)
+{
+	int ret = -1, i = 0;
+	StringInfoData strinfo;
+	char * value = NULL;
+
+	MemoryContext oldcontext;
+	bool skiptx = false;
+
+	initStringInfo(&strinfo);
+	appendStringInfo(&strinfo, "SELECT objtype, enabled, srcobj, dstobj, "
+			"(SELECT pg_tbname FROM synchdB_att_view WHERE (ext_tbname=srcobj OR (ext_tbname || '.' || "
+			"ext_attname) = srcobj) AND (objtype='table' OR objtype='column' OR objtype='datatype') "
+			"AND %s.name=%s.name LIMIT 1), "
+			"(SELECT pg_attname FROM synchdB_att_view WHERE (ext_tbname || '.' || ext_attname)=srcobj "
+			"AND (objtype='column' OR objtype='datatype') AND %s.name=%s.name),"
+			"(SELECT pg_atttypename FROM synchdB_att_view WHERE (ext_tbname || '.' || ext_attname)=srcobj "
+			"AND objtype='datatype' AND %s.name=%s.name) "
+			"FROM %s WHERE name = '%s' ORDER BY objtype",
+			SYNCHDB_OBJECT_MAPPING_TABLE,
+			SYNCHDB_ATTRIBUTE_VIEW,
+			SYNCHDB_OBJECT_MAPPING_TABLE,
+			SYNCHDB_ATTRIBUTE_VIEW,
+			SYNCHDB_OBJECT_MAPPING_TABLE,
+			SYNCHDB_ATTRIBUTE_VIEW,
+			SYNCHDB_OBJECT_MAPPING_TABLE, name);
+	/*
+	 * if we are already in transaction or transaction block, we can skip
+	 * the transaction and snapshot acquisition code below
+	 */
+	if (IsTransactionOrTransactionBlock())
+		skiptx = true;
+
+	if (!skiptx)
+	{
+		/* Start a transaction and set up a snapshot */
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+	{
+		elog(WARNING, "synchdb_pgsql - SPI_connect failed");
+		goto end;
+	}
+
+	ret = SPI_execute(strinfo.data, true, 0);
+	switch (ret)
+	{
+		case SPI_OK_SELECT:
+		{
+			break;
+		}
+		default:
+		{
+			SPI_finish();
+			goto end;
+		}
+	}
+	*numout = SPI_processed;
+	if (*numout == 0)
+	{
+		SPI_finish();
+		goto end;
+	}
+
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	*out = palloc0(sizeof(ObjectMap) * (*numout));
+	for (i = 0; i < *numout; i++)
+	{
+		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1);
+		if (value)
+			strlcpy((*out)[i].objtype, value, SYNCHDB_CONNINFO_NAME_SIZE);
+
+		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2);
+		if (value)
+		{
+			if (strcmp(value, "t") == 0)
+				(*out)[i].enabled = true;
+			else if (strcmp(value, "f") == 0)
+				(*out)[i].enabled = false;
+			else
+				(*out)[i].enabled = true;
+		}
+
+		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 3);
+		if (value)
+			strlcpy((*out)[i].srcobj, value, SYNCHDB_CONNINFO_NAME_SIZE);
+
+		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4);
+		if (value)
+			strlcpy((*out)[i].dstobj, value, SYNCHDB_TRANSFORM_EXPRESSION_SIZE);
+
+		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5);
+		if (value)
+			strlcpy((*out)[i].curr_pg_tbname, value, SYNCHDB_CONNINFO_NAME_SIZE);
+
+		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 6);
+		if (value)
+			strlcpy((*out)[i].curr_pg_attname, value, SYNCHDB_CONNINFO_NAME_SIZE);
+
+		value = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 7);
+		if (value)
+			strlcpy((*out)[i].curr_pg_atttypename, value, SYNCHDB_CONNINFO_NAME_SIZE);
+	}
+	MemoryContextSwitchTo(oldcontext);
+
+	/* Close the connection */
+	SPI_finish();
+	ret = 0;
+end:
+	if (!skiptx)
+	{
+		/* Commit the transaction */
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+
+	if(strinfo.data)
+		pfree(strinfo.data);
+
+	return ret;
 }
