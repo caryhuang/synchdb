@@ -32,7 +32,6 @@ import org.apache.log4j.*;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -299,7 +298,8 @@ public class DebeziumRunner {
 
 		public ChangeRecordBatch(List<ChangeEvent<String, String>> records, DebeziumEngine.RecordCommitter committer) 
 		{
-			this.records = new ArrayList<>(records);
+			//this.records = new ArrayList<>(records);
+			this.records = records;
 			this.committer = committer;
 		}
 	}
@@ -654,7 +654,7 @@ public class DebeziumRunner {
 
 	public List<String> getChangeEvents()
 	{
-		List<String> listCopy;
+		List<String> listCopy = null;
 		if (activeBatchHash == null)
 		{
 			activeBatchHash = new HashMap<>();
@@ -668,11 +668,11 @@ public class DebeziumRunner {
         if (!future.isDone())
 		{
 			int i = 0;
-			listCopy = new ArrayList<>();
 			ChangeRecordBatch myNextBatch;
 			myNextBatch = batchManager.getNextBatch();
 			if (myNextBatch != null)
 			{
+				listCopy = new ArrayList<>(myNextBatch.records.size() + 1);
 				logger.info("Debezium -> Synchdb: sent batchid(" + myNextBatch.batchid + ") with size(" + myNextBatch.records.size() + ")");
 				/* first element: batch id */
 				listCopy.add("B-" + String.valueOf(myNextBatch.batchid));

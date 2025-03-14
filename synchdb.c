@@ -707,7 +707,6 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	}
 	if (changeEventsList == NULL)
 	{
-		elog(WARNING, "getChangeEvents returned null");
 		return -1;
 	}
 
