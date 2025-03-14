@@ -51,7 +51,7 @@ public class DebeziumRunner {
 	final int TYPE_MYSQL = 1;
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
-	final int BATCH_QUEUE_SIZE = 3;
+	final int BATCH_QUEUE_SIZE = 5;
 	
 	final int LOG_LEVEL_UNDEF = 0;
 	final int LOG_LEVEL_ALL = 1;
@@ -438,7 +438,6 @@ public class DebeziumRunner {
 				/* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
 				props.setProperty("schema.include.list", myParameters.user);
 				props.setProperty("lob.enabled", "true");
-				props.setProperty("poll.interval.ms", "100");
 				props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
 				break;
 			}
@@ -475,7 +474,7 @@ public class DebeziumRunner {
 		}
 		
 		/* setting common properties */
-
+		props.setProperty("poll.interval.ms", "500");
 		if (myParameters.table.equals("null"))
 			logger.warn("table is null - skip setting table.include.list property");
 		else if (myParameters.table.startsWith("file:"))
