@@ -832,79 +832,6 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 	return 0;
 }
 
-/*
- * getPathElementJsonb
- *
- * Function to get a JSONB element from a path
- */
-static Jsonb *
-getPathElementJsonb(Jsonb * jb, char * path)
-{
-	Datum * datum_elems = NULL;
-	char * str_elems = NULL, * p = path;
-	int numPaths = 0, curr = 0;
-	char * pathcopy = path;
-	bool isnull;
-	Datum datout;
-	Jsonb * out = NULL;
-
-	if (strchr(pathcopy, '.'))
-	{
-		/* count how many elements are in path*/
-		while (*p != '\0')
-		{
-			if (*p == '.')
-			{
-				numPaths++;
-			}
-			p++;
-		}
-		/* add the last one */
-		numPaths++;
-		pathcopy = pstrdup(path);
-	}
-	else
-	{
-		numPaths = 1;
-	}
-
-	datum_elems = palloc0(sizeof(Datum) * numPaths);
-
-	if (numPaths > 1)
-	{
-		/* multi level paths, */
-		str_elems= strtok(pathcopy, ".");
-		if (str_elems)
-		{
-			datum_elems[curr] = CStringGetTextDatum(str_elems);
-			curr++;
-			while (str_elems)
-			{
-				/* parse the remaining elements */
-				str_elems = strtok(NULL, ".");
-
-				if (str_elems == NULL)
-					break;
-
-				datum_elems[curr] = CStringGetTextDatum(str_elems);
-				curr++;
-			}
-		}
-	}
-	else
-	{
-		/* only one level, just use pathcopy*/
-		datum_elems[curr] = CStringGetTextDatum(pathcopy);
-	}
-	datout = jsonb_get_element(jb, datum_elems, numPaths, &isnull, false);
-	out = isnull ? NULL : DatumGetJsonbP(datout);
-
-	pfree(datum_elems);
-	if (pathcopy != path)
-		pfree(pathcopy);
-	return out;
-}
-
 static HTAB *
 build_schema_jsonpos_hash(Jsonb * jb)
 {
@@ -921,6 +848,9 @@ build_schema_jsonpos_hash(Jsonb * jb)
 	NameJsonposEntry * entry;
 	bool found = false;
 	int j = 0;
+	Datum datum_elems[4] ={CStringGetTextDatum("schema"), CStringGetTextDatum("fields"),
+			CStringGetTextDatum("0"), CStringGetTextDatum("fields")};
+	bool isnull;
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
@@ -932,7 +862,8 @@ build_schema_jsonpos_hash(Jsonb * jb)
 							&hash_ctl,
 							HASH_ELEM | HASH_CONTEXT);
 
-	schemadata = getPathElementJsonb(jb, "schema.fields.0.fields");
+//	schemadata = getPathElementJsonb(jb, "schema.fields.0.fields");
+	schemadata = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 4, &isnull, false));
 	if (schemadata)
 	{
 		it = JsonbIteratorInit(&schemadata->root);
@@ -1194,8 +1125,12 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
     if (!strcmp(ddlinfo->type, "CREATE") || !strcmp(ddlinfo->type, "ALTER"))
     {
 		/* fetch payload.tableChanges.0.table.columns as jsonb */
-		ddlpayload = getPathElementJsonb(jb, "payload.tableChanges.0.table.columns");
+    	Datum datum_elems[5] ={CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges"),
+    			CStringGetTextDatum("0"), CStringGetTextDatum("table"), CStringGetTextDatum("columns")};
+    	bool isnull;
 
+//		ddlpayload = getPathElementJsonb(jb, "payload.tableChanges.0.table.columns");
+    	ddlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 5, &isnull, false));
 		/*
 		 * following parser expects this json array named 'columns' from DBZ embedded:
 		 * "columns": [
@@ -3833,7 +3768,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	Relation rel;
 	TupleDesc tupdesc;
 	int attnum, j = 0;
-
+	bool isnull = false;
 	HTAB * typeidhash;
 	HTAB * namejsonposhash;
 	HASHCTL hash_ctl;
@@ -4129,7 +4064,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			 * 	in this case, the parser will parse the entire sub element as string under the key "g"
 			 * 	in the above example.
 			 */
-			dmlpayload = getPathElementJsonb(jb, "payload.after");
+			Datum datum_elems[2] ={CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
+			dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+//			dmlpayload = getPathElementJsonb(jb, "payload.after");
 			if (dmlpayload)
 			{
 				int pause = 0;
@@ -4275,7 +4212,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			 * 		"after": null
 			 * 	}
 			 */
-			dmlpayload = getPathElementJsonb(jb, "payload.before");
+//			dmlpayload = getPathElementJsonb(jb, "payload.before");
+			Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
+			dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
 			if (dmlpayload)
 			{
 				int pause = 0;
@@ -4432,9 +4371,17 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			{
 				/* need to parse before and after */
 				if (i == 0)
-					dmlpayload = getPathElementJsonb(jb, "payload.before");
+				{
+//					dmlpayload = getPathElementJsonb(jb, "payload.before");
+					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
+					dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+				}
 				else
-					dmlpayload = getPathElementJsonb(jb, "payload.after");
+				{
+//					dmlpayload = getPathElementJsonb(jb, "payload.after");
+					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
+					dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+				}
 				if (dmlpayload)
 				{
 					int pause = 0;
@@ -5830,6 +5777,8 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	bool islastsnapshot = false;
 	int ret = -1;
 	struct timeval tv;
+	Datum datum_elems[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("source")};
+	bool isnull;
 
 	tempContext = AllocSetContextCreate(TopMemoryContext,
 										"FORMAT_CONVERTER",
@@ -5844,7 +5793,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     jb = DatumGetJsonbP(jsonb_datum);
 
     /* Obtain source element - required */
-    source = getPathElementJsonb(jb, "payload.source");
+	source = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
     if (source)
     {
 		JsonbValue * v = NULL;

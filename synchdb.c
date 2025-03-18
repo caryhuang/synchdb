@@ -827,10 +827,12 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 				g_eventStr = eventStr;
 
 			/* change event message, send to format converter */
-			fc_processDBZChangeEvent(eventStr, myBatchStats, schemasync,
+			if (fc_processDBZChangeEvent(eventStr, myBatchStats, schemasync,
 					get_shm_connector_name_by_id(myConnectorId),
-					(i == firstgoodevent),
-					(i == size - 1));
+					(i == firstgoodevent), (i == size - 1)))
+			{
+				firstgoodevent++;
+			}
 
 			(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
 			(*env)->DeleteLocalRef(env, event);
