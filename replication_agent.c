@@ -304,14 +304,12 @@ static int
 synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 {
 	Relation rel;
-	TupleDesc tupdesc;
 	TupleTableSlot *slot;
 	EState	   *estate;
 	RangeTblEntry *rte;
 	List	   *perminfos = NIL;
 	ResultRelInfo *resultRelInfo;
 	ListCell * cell;
-	int i = 0;
 
 	/*
 	 * we put in TRY and CATCH block to capture potential exceptions raised
@@ -347,16 +345,9 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 		InitResultRelInfo(resultRelInfo, rel, 1, NULL, 0);
 
 		/* turn colval into TupleTableSlot */
-		tupdesc = RelationGetDescr(rel);
-		slot = ExecInitExtraTupleSlot(estate, tupdesc, &TTSOpsVirtual);
+		slot = ExecInitExtraTupleSlot(estate, RelationGetDescr(rel), &TTSOpsVirtual);
 
 		ExecClearTuple(slot);
-
-		/* initialize all values in slot to null */
-		for (i = 0; i < tupdesc->natts; i++)
-		{
-			slot->tts_isnull[i] = true;
-		}
 
 		/* then we fill valid data to slot */
 		foreach(cell, colval)
@@ -442,14 +433,13 @@ static int
 synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, ConnectorType type)
 {
 	Relation rel;
-	TupleDesc tupdesc;
 	TupleTableSlot * remoteslot, * localslot;
 	EState	   *estate;
 	RangeTblEntry *rte;
 	List	   *perminfos = NIL;
 	ResultRelInfo *resultRelInfo;
 	ListCell * cell;
-	int i = 0, ret = 0;
+	int ret = 0;
 	EPQState	epqstate;
 	bool found;
 	Oid idxoid = InvalidOid;
@@ -488,18 +478,10 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		InitResultRelInfo(resultRelInfo, rel, 1, NULL, 0);
 
 		/* turn colvalbefore into TupleTableSlot */
-		tupdesc = RelationGetDescr(rel);
-
-		remoteslot = ExecInitExtraTupleSlot(estate, tupdesc, &TTSOpsVirtual);
+		remoteslot = ExecInitExtraTupleSlot(estate, RelationGetDescr(rel), &TTSOpsVirtual);
 		localslot = table_slot_create(rel, &estate->es_tupleTable);
 
 		ExecClearTuple(remoteslot);
-
-		/* initialize all values in slot to null */
-		for (i = 0; i < tupdesc->natts; i++)
-		{
-			remoteslot->tts_isnull[i] = true;
-		}
 
 		/* then we fill valid data to slot */
 		foreach(cell, colvalbefore)
@@ -548,12 +530,6 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		{
 			/* turn colvalafter into TupleTableSlot */
 			ExecClearTuple(remoteslot);
-
-			/* initialize all values in slot to null */
-			for (i = 0; i < tupdesc->natts; i++)
-			{
-				remoteslot->tts_isnull[i] = true;
-			}
 
 			/* then we fill valid data to slot */
 			foreach(cell, colvalafter)
@@ -640,14 +616,13 @@ static int
 synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 {
 	Relation rel;
-	TupleDesc tupdesc;
 	TupleTableSlot * remoteslot, * localslot;
 	EState	   *estate;
 	RangeTblEntry *rte;
 	List	   *perminfos = NIL;
 	ResultRelInfo *resultRelInfo;
 	ListCell * cell;
-	int i = 0, ret = 0;
+	int ret = 0;
 	EPQState	epqstate;
 	bool found;
 	Oid idxoid = InvalidOid;
@@ -686,18 +661,10 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		InitResultRelInfo(resultRelInfo, rel, 1, NULL, 0);
 
 		/* turn colvalbefore into TupleTableSlot */
-		tupdesc = RelationGetDescr(rel);
-
-		remoteslot = ExecInitExtraTupleSlot(estate, tupdesc, &TTSOpsVirtual);
+		remoteslot = ExecInitExtraTupleSlot(estate, RelationGetDescr(rel), &TTSOpsVirtual);
 		localslot = table_slot_create(rel, &estate->es_tupleTable);
 
 		ExecClearTuple(remoteslot);
-
-		/* initialize all values in slot to null */
-		for (i = 0; i < tupdesc->natts; i++)
-		{
-			localslot->tts_isnull[i] = true;
-		}
 
 		/* then we fill valid data to slot */
 		foreach(cell, colvalbefore)

@@ -733,11 +733,12 @@ public class DebeziumRunner {
 		{
 			logger.info("debezium marked all records in batchid(" + batchid + ") as processed");
 
-			for (i = 0; i < myBatch.records.size(); i++)
-			{
-				myBatch.committer.markProcessed(myBatch.records.get(i));
-			}
-
+			/*
+			 * mark only the last change event in batch as done. This has the same effect as
+			 * marking the entire batch as done that does not require individually mark each
+			 * change event as done, which takes a longer time
+			 */
+			myBatch.committer.markProcessed(myBatch.records.get(myBatch.records.size()-1));
 			/* mark this batch complete to allow debezium to commit and flush offset */
 			myBatch.committer.markBatchFinished();
 			
