@@ -862,7 +862,6 @@ build_schema_jsonpos_hash(Jsonb * jb)
 							&hash_ctl,
 							HASH_ELEM | HASH_CONTEXT);
 
-//	schemadata = getPathElementJsonb(jb, "schema.fields.0.fields");
 	schemadata = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 4, &isnull, false));
 	if (schemadata)
 	{
@@ -1129,7 +1128,6 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
     			CStringGetTextDatum("0"), CStringGetTextDatum("table"), CStringGetTextDatum("columns")};
     	bool isnull;
 
-//		ddlpayload = getPathElementJsonb(jb, "payload.tableChanges.0.table.columns");
     	ddlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 5, &isnull, false));
 		/*
 		 * following parser expects this json array named 'columns' from DBZ embedded:
@@ -2665,8 +2663,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			else
 			{
 				/* no extra processing for nunmeric types in other connectors */
-				out = (char *) palloc0(strlen(in) + 1);
-				strlcpy(out, in, strlen(in) + 1);
+				out = pstrdup(in);
 			}
 			break;
 		}
@@ -2785,8 +2782,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			}
 			else
 			{
-				out = (char *) palloc0(strlen(in) + 1);
-				strlcpy(out, in, strlen(in) + 1);
+				out = pstrdup(in);
 			}
 			break;
 		}
@@ -2890,7 +2886,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			else
 			{
 				out = (char *) palloc0(strlen(datestr) + 1);
-				strlcpy(out, datestr,strlen(datestr) + 1);
+				strcpy(out, datestr);
 			}
 			break;
 		}
@@ -2933,8 +2929,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					}
 					else
 					{
-						out = (char *) palloc0(strlen(in) + 1);
-						strlcpy(out, in, strlen(in) + 1);
+						out = pstrdup(in);
 					}
 
 					/* skip the rest of processing */
@@ -2984,7 +2979,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			else
 			{
 				out = (char *) palloc0(strlen(timestamp) + 1);
-				strlcpy(out, timestamp, strlen(timestamp) + 1);
+				strcpy(out, timestamp);
 			}
 			break;
 		}
@@ -3047,7 +3042,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			else
 			{
 				out = (char *) palloc0(strlen(time) + 1);
-				strlcpy(out, time, strlen(time) + 1);
+				strcpy(out, time);
 			}
 			break;
 		}
@@ -3213,8 +3208,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			}
 			else
 			{
-				out = (char *) palloc0(strlen(in) + 1);
-				strlcpy(out, in, strlen(in) + 1);
+				out = pstrdup(in);
 			}
 			break;
 		}
@@ -4066,7 +4060,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			 */
 			Datum datum_elems[2] ={CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
 			dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
-//			dmlpayload = getPathElementJsonb(jb, "payload.after");
 			if (dmlpayload)
 			{
 				int pause = 0;
@@ -4212,7 +4205,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			 * 		"after": null
 			 * 	}
 			 */
-//			dmlpayload = getPathElementJsonb(jb, "payload.before");
 			Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
 			dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
 			if (dmlpayload)
@@ -4372,13 +4364,11 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 				/* need to parse before and after */
 				if (i == 0)
 				{
-//					dmlpayload = getPathElementJsonb(jb, "payload.before");
 					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
 					dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
 				}
 				else
 				{
-//					dmlpayload = getPathElementJsonb(jb, "payload.after");
 					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
 					dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
 				}
@@ -5162,7 +5152,7 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 
 	/* Allocate memory to store file contents */
 	json_string = palloc0(jsonlength + 1);
-	fread(json_string, 1, jsonlength, file);
+	(void) fread(json_string, 1, jsonlength, file);
 	json_string[jsonlength] = '\0';
 
 	fclose(file);

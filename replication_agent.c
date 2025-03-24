@@ -303,12 +303,12 @@ spi_execute(const char * query, ConnectorType type)
 static int
 synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 {
-	Relation rel;
+	Relation rel = NULL;
 	TupleTableSlot *slot;
-	EState	   *estate;
+	EState	   *estate = NULL;
 	RangeTblEntry *rte;
 	List	   *perminfos = NIL;
-	ResultRelInfo *resultRelInfo;
+	ResultRelInfo *resultRelInfo = NULL;
 	ListCell * cell;
 
 	/*
@@ -432,12 +432,12 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 static int
 synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, ConnectorType type)
 {
-	Relation rel;
+	Relation rel = NULL;
 	TupleTableSlot * remoteslot, * localslot;
-	EState	   *estate;
+	EState	   *estate = NULL;
 	RangeTblEntry *rte;
 	List	   *perminfos = NIL;
-	ResultRelInfo *resultRelInfo;
+	ResultRelInfo *resultRelInfo = NULL;
 	ListCell * cell;
 	int ret = 0;
 	EPQState	epqstate;
@@ -615,12 +615,12 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 static int
 synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 {
-	Relation rel;
+	Relation rel = NULL;
 	TupleTableSlot * remoteslot, * localslot;
-	EState	   *estate;
+	EState	   *estate = NULL;
 	RangeTblEntry *rte;
 	List	   *perminfos = NIL;
-	ResultRelInfo *resultRelInfo;
+	ResultRelInfo *resultRelInfo = NULL;
 	ListCell * cell;
 	int ret = 0;
 	EPQState	epqstate;
