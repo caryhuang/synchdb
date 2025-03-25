@@ -41,6 +41,9 @@ jobs:
       run: |
          sudo apt-get update
          sudo apt install -y postgresql-common
+         sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+         sudo apt install -y postgresql-$${{ fromJson(matrix.pg_version).major }} 
+         sudo apt install -y postgresql-server-dev-$${{ fromJson(matrix.pg_version).major }}
     - name: Expose $PG_MAJOR to Github Env
       run: echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
       shell: bash
