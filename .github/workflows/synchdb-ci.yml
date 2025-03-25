@@ -37,7 +37,4 @@ jobs:
         check-latest: true
     
     - name: Set up Maven
-      uses: stCarolas/setup-maven@v4.5
-      with:
-        maven-version: 3.9.8
       run: echo 'setup done'
