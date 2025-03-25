@@ -4,9 +4,6 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# shellcheck disable=SC1091
-source ci/ci_helpers.sh
-
 # read pg major version, error if not provided
 PG_MAJOR=${PG_MAJOR:?please provide the postgres major version}
 
