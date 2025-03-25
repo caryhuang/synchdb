@@ -23,7 +23,6 @@ jobs:
     strategy:
       matrix:
         pg_version:
-          - ${{ needs.params.outputs.pg15_version }}
           - ${{ needs.params.outputs.pg16_version }}
           - ${{ needs.params.outputs.pg17_version }}
     runs-on: ubuntu-22.04
