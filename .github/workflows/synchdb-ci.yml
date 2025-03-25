@@ -4,9 +4,9 @@ concurrency:
 on:
   workflow_dispatch:
   push:
-    branches: [ main, synchdb-devel ]
+    branches: [ main, synchdb-devel, github-action-test]
   pull_request:
-    branches: [ main, synchdb-devel ]
+    branches: [ main, synchdb-devel github-action-test]
 
 jobs:
   params:
