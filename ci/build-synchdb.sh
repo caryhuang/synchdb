@@ -26,15 +26,12 @@ function build_synchdb()
 	#sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
 	#sudo apt install -y postgresql-${pg_major} postgresql-server-dev-${pg_major}
 
-	builddir="${basedir}/build-${pg_major}"
+	installdir="${basedir}/build-${pg_major}"
 	echo "Beginning build for PostgreSQL ${pg_major}..." >&2
 	#mkdir -p "${builddir}" && cd "${builddir}"
-	echo "i am in $PWD"
-	ls
 	export USE_PGXS=1
 	make build_dbz PG_CONFIG=/usr/pgsql-${pg_major}/bin/pg_config
-	echo "find pg"
-	which postgres
+	sudo make install_dbz DESTDIR=${installdir} PG_CONFIG=/usr/pgsql-${pg_major}/bin/pg_config 
 	#CFLAGS=-Werror "${basedir}/configure" PG_CONFIG="/usr/lib/postgresql/${pg_major}/bin/pg_config" --enable-coverage --with-security-flags
 	#installdir="${builddir}/install"	
 	
