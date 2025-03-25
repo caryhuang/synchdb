@@ -42,7 +42,7 @@ jobs:
       shell: bash
     - name: Install PG build env
       run: |
-        sudo apt install -y postgresql-common
+        yes | sudo apt install -y postgresql-common
         sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
         sudo apt install -y postgresql-$PG_MAJOR postgresql-server-dev-$PG_MAJOR
       shell: bash
