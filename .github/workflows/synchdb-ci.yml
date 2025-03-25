@@ -40,7 +40,7 @@ jobs:
     - name: Install pg dev
       run: |
          sudo apt-get update
-         sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+         sudo DEBIAN_FRONTEND=noninteractive /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
          sudo apt-get install -y postgresql-$${{ fromJson(matrix.pg_version).major }} 
          sudo apt-get install -y postgresql-server-dev-$${{ fromJson(matrix.pg_version).major }}
     - name: Expose $PG_MAJOR to Github Env
