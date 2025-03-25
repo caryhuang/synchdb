@@ -22,11 +22,6 @@ function build_synchdb()
 {
 	pg_major="$1"
 
-	#sudo apt install -y postgresql-common
-	#sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
-	#sudo apt install -y postgresql-${pg_major} postgresql-server-dev-${pg_major}
-	sudo apt install -y postgresql-server-dev-${pg_major}
-
 	installdir="${basedir}/build-${pg_major}"
 	echo "Beginning build for PostgreSQL ${pg_major}..." >&2
 	#mkdir -p "${builddir}" && cd "${builddir}"
