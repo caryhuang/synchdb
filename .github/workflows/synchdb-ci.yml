@@ -40,12 +40,6 @@ jobs:
     - name: Expose $PG_MAJOR to Github Env
       run: echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
       shell: bash
-    - name: Install PG build env
-      run: |
-        yes | sudo apt install -y postgresql-common
-        sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
-        sudo apt install -y postgresql-$PG_MAJOR postgresql-server-dev-$PG_MAJOR
-      shell: bash
     - name: Build
       run: "./ci/build-synchdb.sh"
       shell: bash
