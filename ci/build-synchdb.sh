@@ -31,7 +31,10 @@ function build_synchdb()
 	#mkdir -p "${builddir}" && cd "${builddir}"
 	echo "i am in $PWD"
 	ls
-	make build_dbz
+	export USE_PGXS=1
+	make build_dbz PG_CONFIG=/usr/pgsql-${pg_major}/bin/pg_config
+	echo "find pg"
+	which postgres
 	#CFLAGS=-Werror "${basedir}/configure" PG_CONFIG="/usr/lib/postgresql/${pg_major}/bin/pg_config" --enable-coverage --with-security-flags
 	#installdir="${builddir}/install"	
 	
