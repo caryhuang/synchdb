@@ -1,5 +1,6 @@
 name: SynchDB CI
 on:
+  workflow_dispatch:
   push:
     branches: [ main, synchdb-devel ]
   pull_request:
