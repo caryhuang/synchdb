@@ -17,3 +17,21 @@ basedir="$(pwd)"
 
 # get the project and clear out the git repo (reduce workspace size
 rm -rf "${basedir}/.git"
+
+function build_synchdb()
+{
+	pg_major="$1"
+
+	sudo apt install -y postgresql-common
+	sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+	sudo apt install -y postgresql-${pg_major} postgresql-server-dev-${pg_major}
+
+	builddir="${basedir}/build-${pg_major}"
+	echo "Beginning build for PostgreSQL ${pg_major}..." >&2
+	mkdir -p "${builddir}" && cd "${builddir}"
+	CFLAGS=-Werror "${basedir}/configure" PG_CONFIG="/usr/lib/postgresql/${pg_major}/bin/pg_config" --enable-coverage --with-security-flags
+	installdir="${builddir}/install"	
+
+}
+
+build_synchdb "${PG_MAJOR}"
