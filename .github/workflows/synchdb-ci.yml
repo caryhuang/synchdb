@@ -38,7 +38,7 @@ jobs:
       with:
         maven-version: 3.9.8
     - name: Expose $PG_MAJOR to Github Env
-      run: echo "PG_MAJOR=${PG_MAJOR}" >> $GITHUB_ENV
+      run: echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
       shell: bash
     - name: Build
       run: "./ci/build-synchdb.sh"
