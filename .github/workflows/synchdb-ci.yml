@@ -37,6 +37,10 @@ jobs:
       uses: stCarolas/setup-maven@v4.5
       with:
         maven-version: 3.9.8
+    - name: Install pg dev
+      run: |
+         sudo apt-get update
+         sudo apt install -y postgresql-common
     - name: Expose $PG_MAJOR to Github Env
       run: echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
       shell: bash
