@@ -17,7 +17,7 @@ jobs:
         run: echo 'noop'
   build:
     needs: params
-    name: Build for PG$${{ fromJson(matrix.pg_version).major }}
+    name: Build for PG${{ fromJson(matrix.pg_version).major }}
     strategy:
       matrix:
         pg_version:
@@ -50,11 +50,11 @@ jobs:
     - name: Build
       run: "./ci/build-synchdb.sh"
       shell: bash
-    - uses: actions/upload-artifact@v4.6.0
+    - uses: actions/upload-artifact@v4
       with:
-        name: synchdb-${{ env.PG_MAJOR }}
+        name: synchdb-install-${{ env.PG_MAJOR }}
         path: |-
-          ./synchdb-install.tar.gz
+          ./synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz
   test-synchdb:
     name: PG${{ fromJson(matrix.pg_version).major }} - MySQL Tests
     strategy:
@@ -67,7 +67,11 @@ jobs:
     - params
     - build
     steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: synchdb-install-${{ fromJson(matrix.pg_version).major }}
     - name: Test synchdb MySQL
       run: |
-        echo "testing done... check install"
+        echo "testing done... check install. i am at $PWD"
+        ls
       shell: bash
