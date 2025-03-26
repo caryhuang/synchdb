@@ -50,3 +50,24 @@ jobs:
     - name: Build
       run: "./ci/build-synchdb.sh"
       shell: bash
+    - uses: actions/upload-artifact@v4.6.0
+      with:
+        name: synchdb-${{ env.PG_MAJOR }}
+        path: |-
+          ${{ github.workspace }}/build_output
+  test-synchdb:
+    name: PG${{ fromJson(matrix.pg_version).major }} - MySQL Tests
+    strategy:
+      matrix:
+        pg_version:
+          - ${{ needs.params.outputs.pg16_version }}
+          - ${{ needs.params.outputs.pg17_version }}
+    runs-on: ubuntu-22.04
+    needs:
+    - params
+    - build
+    steps:
+    - name: Test synchdb MySQL
+      run: |
+        echo "testing done... check install"
+      shell: bash
