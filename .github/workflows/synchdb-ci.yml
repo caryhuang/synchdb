@@ -50,9 +50,9 @@ jobs:
     - name: Build
       run: "./ci/build-synchdb.sh"
       shell: bash
-    - uses: actions/upload-artifact@v4.6.0
+    - uses: actions/upload-artifact@v4
       with:
-        name: synchdb-${{ env.PG_MAJOR }}
+        name: synchdb-install-${{ env.PG_MAJOR }}
         path: |-
           ./synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz
   test-synchdb:
@@ -69,7 +69,7 @@ jobs:
     steps:
     - uses: actions/download-artifact@v4
       with:
-        name: synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz
+        name: synchdb-install-${{ fromJson(matrix.pg_version).major }}
     - name: Test synchdb MySQL
       run: |
         echo "testing done... check install"
