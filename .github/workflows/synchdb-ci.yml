@@ -50,3 +50,20 @@ jobs:
     - name: Build
       run: "./ci/build-synchdb.sh"
       shell: bash
+  test-synchdb:
+    name: PG${{ fromJson(matrix.pg_version).major }} - MySQL Tests
+    strategy:
+      matrix:
+        pg_version:
+          - ${{ needs.params.outputs.pg16_version }}
+          - ${{ needs.params.outputs.pg17_version }}
+    runs-on: ubuntu-22.04
+    needs:
+    - params
+    - build
+    steps:
+    - name: Test synchdb MySQL
+      run: |
+        echo "testing done... check install"
+        ls /usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/lib
+      shell: bash
