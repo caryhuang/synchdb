@@ -45,7 +45,9 @@ jobs:
         sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
         sudo apt-get install -y postgresql-server-dev-${{ fromJson(matrix.pg_version).major }}
     - name: Expose $PG_MAJOR to Github Env
-      run: echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
+      run: |
+        echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
+        echo "USE_PGXS=1" >> $GITHUB_ENV
       shell: bash
     - name: Build
       run: "./ci/build-synchdb.sh"
