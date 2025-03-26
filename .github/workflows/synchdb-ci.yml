@@ -67,7 +67,7 @@ jobs:
     - params
     - build
     steps:
-    - uses: actions/download-artifact@v4.1.8
+    - uses: actions/download-artifact@v4.6.0
       with:
         name: synchdb-${{ fromJson(matrix.pg_version).major }}.tar.gz
     - name: Test synchdb MySQL
