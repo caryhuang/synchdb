@@ -29,7 +29,7 @@ function build_synchdb()
 	make build_dbz PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
 	make PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
 
-	sudo make install_dbz libdir=/usr/lib/postgresql/${pg_major}/lib  PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
+	#make install_dbz libdir=/usr/lib/postgresql/${pg_major}/lib  PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
 	sudo make install PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
 
 }
