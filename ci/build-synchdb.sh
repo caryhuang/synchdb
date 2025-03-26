@@ -22,16 +22,20 @@ function build_synchdb()
 {
 	pg_major="$1"
 
-	installdir="${basedir}/build-${pg_major}"
+	installdir="${basedir}/synchdb-install-${pg_major}"
+	mkdir -p $installdir
 	echo "Beginning build for PostgreSQL ${pg_major}..." >&2
 	#mkdir -p "${builddir}" && cd "${builddir}"
 	export USE_PGXS=1
 	make build_dbz PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
 	make PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
 
-	sudo USE_PGXS=1 make install_dbz libdir=/usr/lib/postgresql/${pg_major}/lib  PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
-	sudo USE_PGXS=1 make install PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
+	sudo USE_PGXS=1 make install_dbz libdir=${installdir}/lib  PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
+	sudo USE_PGXS=1 make install DESTDIR=${installdir} PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
 
+	cd $installdir
+	ls
+	tar czvf synchdb-install-${pg_major}.tar.gz *
 }
 
 build_synchdb "${PG_MAJOR}"
