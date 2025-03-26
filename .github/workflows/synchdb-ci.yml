@@ -72,5 +72,6 @@ jobs:
         name: synchdb-install-${{ fromJson(matrix.pg_version).major }}
     - name: Test synchdb MySQL
       run: |
-        echo "testing done... check install"
+        echo "testing done... check install. i am at $PWD"
+        ls
       shell: bash
