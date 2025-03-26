@@ -36,6 +36,7 @@ function build_synchdb()
 	cd $installdir
 	ls
 	tar czvf synchdb-install-${pg_major}.tar.gz *
+	mv synchdb-install-${pg_major}.tar.gz $basedir
 }
 
 build_synchdb "${PG_MAJOR}"
