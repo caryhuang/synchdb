@@ -54,7 +54,7 @@ jobs:
       with:
         name: synchdb-${{ env.PG_MAJOR }}
         path: |-
-          ./synchdb-install-$${{ fromJson(matrix.pg_version).major }}.tar.gz
+          ./synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz
   test-synchdb:
     name: PG${{ fromJson(matrix.pg_version).major }} - MySQL Tests
     strategy:
