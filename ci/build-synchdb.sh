@@ -26,8 +26,8 @@ function build_synchdb()
 	echo "Beginning build for PostgreSQL ${pg_major}..." >&2
 	#mkdir -p "${builddir}" && cd "${builddir}"
 	export USE_PGXS=1
-	make build_dbz PG_CONFIG=/usr/pgsql-${pg_major}/bin/pg_config
-	make PG_CONFIG=/usr/pgsql-${pg_major}/bin/pg_config
+	make build_dbz PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
+	make PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
 	#sudo make install_dbz libdir=/usr/pggsql-${pg_major}/lib PG_CONFIG=/usr/pgsql-${pg_major}/bin/pg_config 
 	#CFLAGS=-Werror "${basedir}/configure" PG_CONFIG="/usr/lib/postgresql/${pg_major}/bin/pg_config" --enable-coverage --with-security-flags
 	#installdir="${builddir}/install"	
