@@ -17,7 +17,7 @@ jobs:
         run: echo 'noop'
   build:
     needs: params
-    name: Build for PG$${{ fromJson(matrix.pg_version).major }}
+    name: Build for PG${{ fromJson(matrix.pg_version).major }}
     strategy:
       matrix:
         pg_version:
@@ -67,6 +67,9 @@ jobs:
     - params
     - build
     steps:
+    - uses: actions/download-artifact@v4.1.8
+      with:
+        name: synchdb-${{ fromJson(matrix.pg_version).major }}.tar.gz
     - name: Test synchdb MySQL
       run: |
         echo "testing done... check install"
