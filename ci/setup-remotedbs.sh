@@ -121,7 +121,7 @@ GRANT EXECUTE ON DBMS_WORKLOAD_REPOSITORY TO PUBLIC;
 exit;
 EOF
 
-	docker exec -i $id 'sqlplus c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
+	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
 CREATE TABLE test_table (
 id NUMBER PRIMARY KEY,
 binary_double_col BINARY_DOUBLE,
