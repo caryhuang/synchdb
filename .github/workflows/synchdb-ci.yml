@@ -121,7 +121,7 @@ jobs:
         echo "shared_buffers = 128MB" >> synchdbtest/postgresql.conf
         echo "dynamic_shared_memory_type = posix" >> synchdbtest/postgresql.conf
         echo "Starting PostgreSQL @ $PWD:"
-        pg_ctl -D synchdbtest -l logfile start
+        pg_ctl -D synchdbtest start
         echo "PostgreSQL status:"
         pg_ctl -D synchdbtest status
     - name: Test synchdb MySQL
