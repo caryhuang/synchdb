@@ -67,9 +67,26 @@ jobs:
     - params
     - build
     steps:
+    - uses: actions/checkout@v2
     - uses: actions/download-artifact@v4
       with:
         name: synchdb-install-${{ fromJson(matrix.pg_version).major }}
+    - name: Set up JDK 22
+      uses: actions/setup-java@v2
+      with:
+        java-version: '22'
+        distribution: 'temurin'
+        architecture: x64
+        check-latest: true
+    - name: Configure linker
+      run: |
+        echo "configure Java"
+        JAVA_PATH=$(which java)
+        JDK_HOME_PATH=$(readlink -f ${JAVA_PATH} | sed 's:/bin/java::')
+        JDK_LIB_PATH=${JDK_HOME_PATH}/lib
+        echo $JDK_LIB_PATH | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        echo $JDK_LIB_PATH/server | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        sudo ldconfig
     - name: Install pg and synchdb
       run: |
         sudo apt-get update
@@ -77,6 +94,36 @@ jobs:
         sudo apt-get install -y postgresql-client-${{ fromJson(matrix.pg_version).major }}
         sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
         sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
+    - name: Set up test environment
+      run: |
+        sudo apt-get install -y docker-compose
+        echo "Docker Compose version:"
+        docker-compose --version
+        echo "Starting MySQL container..."
+        docker-compose -f testenv/mysql/synchdb-mysql-test.yaml up -d
+        echo "Starting SQL Server container..."
+        docker-compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml up -d
+        echo "Waiting for containers to be ready..."
+        sleep 20  # Give containers time to fully start
+        echo "Docker container status:"
+        docker ps -a
+        echo "Docker logs for MySQL:"
+        docker logs mysql || echo "No MySQL container found"
+        id=$(docker ps | grep sqlserver | awk '{print $1}')
+        echo "check docker $id sqlcmd command"
+        docker exec -i $id ls -l /opt/mssql-tools18/bin/sqlcmd || { echo "sqlcmd not found on the sqlserver docker"; exit 1; }
+        export PATH=$PATH:/usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/bin
+        echo "Initializing database:"
+        initdb -D synchdbtest
+        echo "Configuring PostgreSQL:"
+        echo "shared_preload_libraries = 'synchdb'" >> synchdbtest/postgresql.conf
+        echo "max_connections = 100" >> synchdbtest/postgresql.conf
+        echo "shared_buffers = 128MB" >> synchdbtest/postgresql.conf
+        echo "dynamic_shared_memory_type = posix" >> synchdbtest/postgresql.conf
+        echo "Starting PostgreSQL @ $PWD:"
+        pg_ctl -D synchdbtest -l logfile start
+        echo "PostgreSQL status:"
+        pg_ctl -D synchdbtest status
     - name: Test synchdb MySQL
       run: |
         echo "testing done... check install. i am at $PWD"
