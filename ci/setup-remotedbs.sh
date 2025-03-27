@@ -44,8 +44,8 @@ function setup_sqlserver()
 	sleep 20  # Give containers time to fully start
 	id=$(docker ps | grep sqlserver | awk '{print $1}')
 	docker cp inventory.sql $id:/
-	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION"
-	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql
+	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION" > /dev/null
+	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql > /dev/null
 	exit 0
 }
 
