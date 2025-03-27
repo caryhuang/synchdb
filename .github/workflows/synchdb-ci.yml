@@ -122,12 +122,6 @@ jobs:
         echo "PostgreSQL status:"
         pg_ctl -D synchdbtest status 
         docker ps
-    - name: Test synchdb
-      run: |
-        psql -d postgres -c "CREATE EXTENSION synchdb CASCADE;" || { echo "synchdb installation failed"; exit 1; }
-        psql -d postgres << EOF || { echo "Failed to create connections or start connectors"; cat logfile; exit 1; }
-        SELECT synchdb_add_conninfo('mysqlconn', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');
-        SELECT synchdb_add_conninfo('sqlserverconn', '127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'postgres', '', 'sqlserver');
-        SELECT synchdb_start_engine_bgw('mysqlconn');
-        SELECT synchdb_start_engine_bgw('sqlserverconn');
-        EOF
+    - name: Test synchdb - ${{ matrix.dbtypes }}
+      run: "./ci/test-synchdb.sh"
+      shell: bash
