@@ -174,7 +174,7 @@ jobs:
           docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1
 
           # Check if the table exists in PostgreSQL
-          table_exists=$(psql -d test_db -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'testdb' AND table_name = 'orders';" | tr -d ' \n')
+          table_exists=$(psql -d postgres -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'testdb' AND table_name = 'orders';" | tr -d ' \n')
           
           echo "SQL Server count: ['$syncing_src_count']"
           echo "Table exists in PostgreSQL: $table_exists"
@@ -191,7 +191,7 @@ jobs:
           
           # Capture and clean the outputs
           syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
-          syncing_dst_count=$(psql -d test_db -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
+          syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
 
           # Debug: Print cleaned variables
           echo "Cleaned src_count: ['$syncing_src_count']"
@@ -206,14 +206,14 @@ jobs:
             while [ $inner_attempt -le $inner_max_attempts ]; do
               echo "Attempt $inner_attempt of $inner_max_attempts for new record sync"
               new_syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
-              new_syncing_dst_count=$(psql -d test_db -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
+              new_syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
               
               echo "New src_count: ['$new_syncing_src_count']"
               echo "New dst_count: ['$new_syncing_dst_count']"
               
               if [ "$new_syncing_dst_count" -eq "$new_syncing_src_count" ]; then
                 echo "Both connectors are in syncing state"
-                psql -d test_db -c "SELECT * FROM synchdb_state_view;"
+                psql -d postgres -c "SELECT * FROM synchdb_state_view;"
                 exit 0
               else
                 echo "Waiting for last record to sync (current count: $new_syncing_dst_count vs $new_syncing_src_count)"
@@ -232,7 +232,7 @@ jobs:
         done
         
         echo "Timeout: Initial sync did not complete"
-        psql -d test_db -c "SELECT * FROM synchdb_state_view;"
+        psql -d postgres -c "SELECT * FROM synchdb_state_view;"
         exit 1
 
       shell: bash
