@@ -32,7 +32,7 @@ GRANT replication slave ON *.* TO mysqluser;
 GRANT RELOAD ON *.* TO 'mysqluser'@'%';
 FLUSH PRIVILEGES;
 EOF
-	exit0
+	exit 0
 }
 
 function setup_sqlserver()
