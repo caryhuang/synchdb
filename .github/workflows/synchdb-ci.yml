@@ -56,12 +56,16 @@ jobs:
         path: |-
           ./synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz
   test-synchdb:
-    name: PG${{ fromJson(matrix.pg_version).major }} - MySQL Tests
+    name: PG${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }} Tests
     strategy:
       matrix:
         pg_version:
           - ${{ needs.params.outputs.pg16_version }}
           - ${{ needs.params.outputs.pg17_version }}
+        dbtypes:
+          - mysql
+          - oracle
+          - sqlserver
     runs-on: ubuntu-22.04
     needs:
     - params
