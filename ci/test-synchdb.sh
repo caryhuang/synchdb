@@ -99,7 +99,7 @@ function test_oracle()
 {
 	echo "testing oracle..."
 	id=$(docker ps | grep oracle | awk '{print $1}')
-	psql -d postgres -c "SELECT synchdb_add_conninfo('oracleconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'free', 'postgres', '', 'oracle');"
+	psql -d postgres -c "SELECT synchdb_add_conninfo('oracleconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'FREE', 'postgres', '', 'oracle');"
     if [ $? -ne 0 ]; then
         echo "failed to create connector"
         exit 1
