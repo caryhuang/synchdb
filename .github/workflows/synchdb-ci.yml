@@ -142,7 +142,7 @@ jobs:
         docker ps
         id=$(docker ps | grep sqlserver | awk '{print $1}')
         echo "copy inventory SQL "
-        docker cp postgres/contrib/synchdb/inventory.sql $id:/
+        docker cp inventory.sql $id:/
         echo "SQL Server logs:"
         docker logs $id
         echo "Attempting to connect to SQL Server without SSL verification:"
