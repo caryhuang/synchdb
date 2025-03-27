@@ -125,7 +125,7 @@ function test_synchdb()
 echo "CREATE synchdb extension..."
 
 psql -d postgres -c "CREATE EXTENSION synchdb CASCADE;"
-if [ $? -ne 0 ];
+if [ $? -ne 0 ]; then
 	echo "failed to create synchdb extension"
 	exit 1
 fi
