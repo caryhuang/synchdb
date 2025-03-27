@@ -118,7 +118,6 @@ jobs:
         echo "Initializing database:"
         initdb -D synchdbtest
         echo "Configuring PostgreSQL:"
-        echo "shared_preload_libraries = 'synchdb'" >> synchdbtest/postgresql.conf
         echo "max_connections = 100" >> synchdbtest/postgresql.conf
         echo "shared_buffers = 128MB" >> synchdbtest/postgresql.conf
         echo "dynamic_shared_memory_type = posix" >> synchdbtest/postgresql.conf
@@ -128,6 +127,11 @@ jobs:
         pg_ctl -D synchdbtest status
     - name: Test synchdb MySQL
       run: |
-        echo "testing done... check install. i am at $PWD"
-        ls /usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/lib
+        psql -d test_db -c "CREATE EXTENSION synchdb CASCADE;" || { echo "synchdb installation failed"; exit 1; }
+        psql -d test_db << EOF || { echo "Failed to create connections or start connectors"; cat logfile; exit 1; }
+        SELECT synchdb_add_conninfo('mysqlconn', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'test_db', '', 'mysql');
+        SELECT synchdb_add_conninfo('sqlserverconn', '127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'test_db', '', 'sqlserver');
+        SELECT synchdb_start_engine_bgw('mysqlconn');
+        SELECT synchdb_start_engine_bgw('sqlserverconn');
+        EOF
       shell: bash
