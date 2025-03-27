@@ -22,8 +22,6 @@ rm -rf "${basedir}/.git"
 function test_mysql()
 {
 	echo "testing mysql..."
-	id=$(docker ps | grep sqlserver | awk '{print $1}')
-
 	psql -d postgres -c "SELECT synchdb_add_conninfo('mysqlconn', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');"
     if [ $? -ne 0 ]; then
         echo "failed to create connector"
@@ -61,6 +59,7 @@ function test_sqlserver()
 {
 
 	echo "testing sqlserver..."
+	id=$(docker ps | grep sqlserver | awk '{print $1}')
 	psql -d postgres -c "SELECT synchdb_add_conninfo('sqlserverconn', '127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'postgres', '', 'sqlserver');"
 	if [ $? -ne 0 ]; then
     	echo "failed to create connector"
