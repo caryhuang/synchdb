@@ -41,7 +41,7 @@ function test_mysql()
 		echo "initial snapshot failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
 		exit 1
 	fi
-	echo "initial snapshot done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
+	echo "initial snapshot test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
 
 	docker exec -i mysql mysql -umysqluser -pmysqlpwd -e "INSERT INTO inventory.orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
 	sleep 5
@@ -51,6 +51,7 @@ function test_mysql()
 		echo "CDC failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
 		exit 1
 	fi
+	echo "CDC test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
 
 	exit 0
 }
@@ -79,7 +80,7 @@ function test_sqlserver()
 		echo "initial snapshot failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
 		exit 1
 	fi
-	echo "initial snapshot done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
+	echo "initial snapshot test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
 
 	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
 	sleep 5
@@ -90,6 +91,7 @@ function test_sqlserver()
 		echo "CDC failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
 		exit 1
 	fi
+	echo "CDC test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
 	exit 0
 }
 
