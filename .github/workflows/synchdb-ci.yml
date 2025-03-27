@@ -187,7 +187,7 @@ jobs:
           fi
       
           echo "Raw PostgreSQL output:"
-          psql -d test_db -t -c "SELECT COUNT(*) from testDB.orders;"
+          psql -d postgres -t -c "SELECT COUNT(*) from testDB.orders;"
           
           # Capture and clean the outputs
           syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
