@@ -148,6 +148,7 @@ nclob_col NCLOB,
 rowid_col ROWID,
 urowid_col UROWID
 );
+commit;
 ALTER TABLE test_table ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
 exit;
 EOF
@@ -209,6 +210,7 @@ INSERT INTO test_table (
     (SELECT ROWID FROM test_table WHERE ROWNUM = 1),
     NULL
 );
+commit;
 exit;
 EOF
 	exit 0
