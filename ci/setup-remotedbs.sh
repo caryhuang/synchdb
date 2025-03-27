@@ -152,7 +152,7 @@ ALTER TABLE test_table ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
 exit;
 EOF
 
-	docker exec -i $id 'sqlplus c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
+	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
 INSERT INTO test_table (
     id, binary_double_col, binary_float_col, float_col, number_col, 
     long_col, date_col, interval_ds_col, interval_ym_col, timestamp_col, 
