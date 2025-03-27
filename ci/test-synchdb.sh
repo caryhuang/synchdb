@@ -99,7 +99,7 @@ function test_oracle()
 {
 	echo "testing oracle..."
 	id=$(docker ps | grep oracle | awk '{print $1}')
-	psql -d postgres -c "SELECT synchdb_add_conninfo('oracleconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'mydb', 'postgres', '', 'oracle');"
+	psql -d postgres -c "SELECT synchdb_add_conninfo('oracleconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'free', 'postgres', '', 'oracle');"
     if [ $? -ne 0 ]; then
         echo "failed to create connector"
         exit 1
@@ -111,7 +111,7 @@ function test_oracle()
         exit 1
     fi
 
-	sleep 120
+	sleep 40
 	syncing_src_count=$(docker exec -i $id sqlplus -S 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF | awk '{print $1}'
 SET HEADING OFF;
 SET FEEDBACK OFF;
