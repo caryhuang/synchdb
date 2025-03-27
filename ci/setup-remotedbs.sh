@@ -56,6 +56,7 @@ function setup_oracle()
 	echo "sleep to give container time to startup..."
     sleep 20  # Give containers time to fully start
 	id=$(docker ps | grep oracle | awk '{print $1}')
+	docker exec -i $id mkdir /opt/oracle/oradata/recovery_area
 	docker exec -i $id sqlplus / as sysdba <<EOF
 Alter user sys identified by oracle;
 exit;
