@@ -98,6 +98,80 @@ function test_sqlserver()
 function test_oracle()
 {
 	echo "testing oracle..."
+	id=$(docker ps | grep oracle | awk '{print $1}')
+	psql -d postgres -c "SELECT synchdb_add_conninfo('oracleconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'mydb', 'postgres', '', 'oracle');"
+    if [ $? -ne 0 ]; then
+        echo "failed to create connector"
+        exit 1
+    fi
+
+    psql -d postgres -c "SELECT synchdb_start_engine_bgw('oracleconn');"
+    if [ $? -ne 0 ]; then
+        echo "failed to start connector"
+        exit 1
+    fi
+
+	sleep 20
+	syncing_src_count=$(docker exec -i $id sqlplus -S 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF | awk '{print $1}'
+SET HEADING OFF;
+SET FEEDBACK OFF;
+SET PAGESIZE 0;
+SELECT count(*) FROM test_table;
+exit
+EOF
+)
+	syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from free.test_table;" | tr -d ' \n')
+    if [ "$syncing_src_count" -ne "$syncing_dst_count" ]; then
+        echo "initial snapshot failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
+        exit 1
+    fi
+    echo "initial snapshot test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
+
+	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
+INSERT INTO test_table (
+    id, binary_double_col, binary_float_col, float_col, number_col,
+    long_col, date_col, interval_ds_col, interval_ym_col, timestamp_col,
+    timestamp_tz_col, timestamp_ltz_col, char_col, nchar_col,
+    nvarchar2_col, varchar_col, varchar2_col, raw_col,
+    bfile_col, blob_col, clob_col, nclob_col, rowid_col, urowid_col
+) VALUES (
+    3, 12345.6789, 1234.56, 9876.54321, 1000.50,
+    'This is a long text',
+    TO_DATE('2024-01-31', 'YYYY-MM-DD'),
+    INTERVAL '2 03:04:05' DAY TO SECOND,
+    INTERVAL '1-6' YEAR TO MONTH,
+    TIMESTAMP '2024-01-31 10:30:00',
+    TIMESTAMP '2024-01-31 10:30:00 -08:00',
+    SYSTIMESTAMP,
+    'A',
+    N'B',
+    N'Unicode Text',
+    'Text Data',
+    'More Text Data',
+    HEXTORAW('DEADBEEF'),
+    BFILENAME('MY_DIR', 'file.pdf'),
+    EMPTY_BLOB(),
+    EMPTY_CLOB(),
+    EMPTY_CLOB(),
+    NULL,
+    NULL
+);
+exit;
+EOF
+	sleep 20
+	syncing_src_count=$(docker exec -i $id sqlplus -S 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF | awk '{print $1}'
+SET HEADING OFF;
+SET FEEDBACK OFF;
+SET PAGESIZE 0;
+SELECT count(*) FROM test_table;
+exit
+EOF
+)
+    syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from free.test_table;" | tr -d ' \n')
+	 if [ "$syncing_src_count" -ne "$syncing_dst_count" ]; then
+        echo "CDC failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
+        exit 1
+    fi
 	exit 0
 }
 
