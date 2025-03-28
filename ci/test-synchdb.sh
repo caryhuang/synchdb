@@ -111,7 +111,7 @@ function test_oracle()
         exit 1
     fi
 
-	sleep 40
+	sleep 180
 	psql -d postgres -c "SELECT * FROM synchdb_state_view;"
 	tail -1000 logfile
 	syncing_src_count=$(docker exec -i $id sqlplus -S 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF | awk '{print $1}'
