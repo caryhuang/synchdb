@@ -135,10 +135,10 @@ exit;
 EOF
 
 	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
-INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES (TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
-INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES (TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
-INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES (TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
-INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES (TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (1, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (2, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (3, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (4, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
 commit;
 exit;
 EOF

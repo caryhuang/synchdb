@@ -130,7 +130,7 @@ EOF
     echo "initial snapshot test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
 
 	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
-INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES (TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (5, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
 exit;
 EOF
 	sleep 20
