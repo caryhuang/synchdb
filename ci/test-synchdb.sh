@@ -34,6 +34,7 @@ function test_mysql()
 	exit 1
 	fi
 
+	echo "waiting for initial snapshot before checking results..."
 	sleep 10
 	psql -d postgres -c "SELECT * FROM synchdb_state_view;"
 	syncing_src_count=$(docker exec -i mysql mysql -umysqluser -pmysqlpwd -sN -e "SELECT COUNT(*) from inventory.orders" | tr -d ' \r\n')
@@ -45,6 +46,7 @@ function test_mysql()
 	echo "initial snapshot test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
 
 	docker exec -i mysql mysql -umysqluser -pmysqlpwd -e "INSERT INTO inventory.orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
+	echo "waiting for CDC before checking results..."
 	sleep 10
 	syncing_src_count=$(docker exec -i mysql mysql -umysqluser -pmysqlpwd -sN -e "SELECT COUNT(*) from inventory.orders" | tr -d ' \r\n')
 	syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from inventory.orders;" | tr -d ' \n')
@@ -74,6 +76,7 @@ function test_sqlserver()
 		exit 1
 	fi
 	
+	echo "waiting for initial snapshot before checking results..."
 	sleep 10
 	psql -d postgres -c "SELECT * FROM synchdb_state_view;"
 	syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
@@ -85,6 +88,7 @@ function test_sqlserver()
 	echo "initial snapshot test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
 
 	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
+	echo "waiting for CDC before checking results..."
 	sleep 10
 	syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
 	syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
@@ -114,6 +118,7 @@ function test_oracle()
 		exit 1
 	fi
 
+	echo "waiting for initial snapshot before checking results..."
 	sleep 20
 	psql -d postgres -c "SELECT * FROM synchdb_state_view;"
 	syncing_src_count=$(docker exec -i $id sqlplus -S 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF | awk '{print $1}'
@@ -136,8 +141,8 @@ INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (5, T
 commit;
 exit;
 EOF
-	sleep 60
-	psql -d postgres -c "SELECT * FROM synchdb_stats_view;"
+	echo "waiting for CDC before checking results..."
+	sleep 40
 	syncing_src_count=$(docker exec -i $id sqlplus -S 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF | awk '{print $1}'
 SET HEADING OFF;
 SET FEEDBACK OFF;
@@ -152,6 +157,7 @@ EOF
 		exit 1
 	fi
 	psql -d postgres -c "SELECT * FROM synchdb_stats_view;"
+	echo "CDC test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
 	exit 0
 }
 
