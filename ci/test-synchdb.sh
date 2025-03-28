@@ -120,7 +120,7 @@ function test_oracle()
 SET HEADING OFF;
 SET FEEDBACK OFF;
 SET PAGESIZE 0;
-SELECT count(*) FROM test_table;
+SELECT count(*) FROM orders;
 exit
 EOF
 )
@@ -140,7 +140,7 @@ EOF
 SET HEADING OFF;
 SET FEEDBACK OFF;
 SET PAGESIZE 0;
-SELECT count(*) FROM test_table;
+SELECT count(*) FROM orders;
 exit
 EOF
 )
