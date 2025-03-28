@@ -124,7 +124,7 @@ EOF
 
 	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
 CREATE TABLE orders (
-id NUMBER PRIMARY KEY,
+id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 order_date DATE,
 purchaser NUMBER,
 quantity NUMBER,
