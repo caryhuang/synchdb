@@ -82,7 +82,7 @@ jobs:
         distribution: 'temurin'
         architecture: x64
         check-latest: true
-    - name: Configure linker
+    - name: Configure Linker
       run: |
         echo "configure Java"
         JAVA_PATH=$(which java)
@@ -122,6 +122,6 @@ jobs:
         echo "PostgreSQL status:"
         pg_ctl -D synchdbtest status 
         docker ps
-    - name: Test synchdb - ${{ matrix.dbtypes }}
+    - name: Synchdb Sanity Tests - ${{ matrix.dbtypes }}
       run: "./ci/test-synchdb.sh"
       shell: bash
