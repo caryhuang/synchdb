@@ -23,18 +23,19 @@ function test_mysql()
 {
 	echo "testing mysql..."
 	psql -d postgres -c "SELECT synchdb_add_conninfo('mysqlconn', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', '', 'mysql');"
-    if [ $? -ne 0 ]; then
-        echo "failed to create connector"
-        exit 1
-    fi
+	if [ $? -ne 0 ]; then
+		echo "failed to create connector"
+		exit 1
+	fi
 
 	psql -d postgres -c "SELECT synchdb_start_engine_bgw('mysqlconn');"
-    if [ $? -ne 0 ]; then
-        echo "failed to start connector"
-        exit 1
-    fi
+	if [ $? -ne 0 ]; then
+		echo "failed to start connector"
+	exit 1
+	fi
 
 	sleep 10
+	psql -d postgres -c "SELECT * FROM synchdb_state_view;"
 	syncing_src_count=$(docker exec -i mysql mysql -umysqluser -pmysqlpwd -sN -e "SELECT COUNT(*) from inventory.orders" | tr -d ' \r\n')
 	syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from inventory.orders;" | tr -d ' \n')
 	if [ "$syncing_src_count" -ne "$syncing_dst_count" ]; then
@@ -52,7 +53,7 @@ function test_mysql()
 		exit 1
 	fi
 	echo "CDC test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
-
+	psql -d postgres -c "SELECT * FROM synchdb_stats_view;"
 	exit 0
 }
 
@@ -63,17 +64,18 @@ function test_sqlserver()
 	id=$(docker ps | grep sqlserver | awk '{print $1}')
 	psql -d postgres -c "SELECT synchdb_add_conninfo('sqlserverconn', '127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'postgres', '', 'sqlserver');"
 	if [ $? -ne 0 ]; then
-    	echo "failed to create connector"
-    	exit 1
+		echo "failed to create connector"
+		exit 1
 	fi
 	
 	psql -d postgres -c "SELECT synchdb_start_engine_bgw('sqlserverconn');"
-    if [ $? -ne 0 ]; then
-        echo "failed to start connector"
-        exit 1
-    fi
+	if [ $? -ne 0 ]; then
+		echo "failed to start connector"
+		exit 1
+	fi
 	
 	sleep 10
+	psql -d postgres -c "SELECT * FROM synchdb_state_view;"
 	syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
 	syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
 	if [ "$syncing_src_count" -ne "$syncing_dst_count" ]; then
@@ -85,13 +87,14 @@ function test_sqlserver()
 	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
 	sleep 10
 	syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
-    syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
+	syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
 
 	if [ "$syncing_src_count" -ne "$syncing_dst_count" ]; then
 		echo "CDC failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
 		exit 1
 	fi
 	echo "CDC test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
+	psql -d postgres -c "SELECT * FROM synchdb_stats_view;"
 	exit 0
 }
 
@@ -100,20 +103,19 @@ function test_oracle()
 	echo "testing oracle..."
 	id=$(docker ps | grep oracle | awk '{print $1}')
 	psql -d postgres -c "SELECT synchdb_add_conninfo('oracleconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'FREE', 'postgres', '', 'oracle');"
-    if [ $? -ne 0 ]; then
-        echo "failed to create connector"
-        exit 1
-    fi
+	if [ $? -ne 0 ]; then
+		echo "failed to create connector"
+		exit 1
+	fi
 
-    psql -d postgres -c "SELECT synchdb_start_engine_bgw('oracleconn');"
-    if [ $? -ne 0 ]; then
-        echo "failed to start connector"
-        exit 1
-    fi
+	psql -d postgres -c "SELECT synchdb_start_engine_bgw('oracleconn');"
+	if [ $? -ne 0 ]; then
+		echo "failed to start connector"
+		exit 1
+	fi
 
-	sleep 350
+	sleep 20
 	psql -d postgres -c "SELECT * FROM synchdb_state_view;"
-	tail -1000 logfile
 	syncing_src_count=$(docker exec -i $id sqlplus -S 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF | awk '{print $1}'
 SET HEADING OFF;
 SET FEEDBACK OFF;
@@ -122,18 +124,18 @@ SELECT count(*) FROM test_table;
 exit
 EOF
 )
-	syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from free.test_table;" | tr -d ' \n')
-    if [ "$syncing_src_count" -ne "$syncing_dst_count" ]; then
-        echo "initial snapshot failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
-        exit 1
-    fi
-    echo "initial snapshot test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
+	syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from free.orders;" | tr -d ' \n')
+	if [ "$syncing_src_count" -ne "$syncing_dst_count" ]; then
+		echo "initial snapshot failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
+		exit 1
+	fi
+	echo "initial snapshot test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
 
 	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
 INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (5, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
 exit;
 EOF
-	sleep 20
+	sleep 10
 	syncing_src_count=$(docker exec -i $id sqlplus -S 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF | awk '{print $1}'
 SET HEADING OFF;
 SET FEEDBACK OFF;
@@ -142,11 +144,12 @@ SELECT count(*) FROM test_table;
 exit
 EOF
 )
-    syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from free.test_table;" | tr -d ' \n')
-	 if [ "$syncing_src_count" -ne "$syncing_dst_count" ]; then
-        echo "CDC failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
-        exit 1
-    fi
+    syncing_dst_count=$(psql -d postgres -t -c "SELECT COUNT(*) from free.orders;" | tr -d ' \n')
+	if [ "$syncing_src_count" -ne "$syncing_dst_count" ]; then
+		echo "CDC failed. orders table count mismatch: src:$syncing_src_count vs dst:$syncing_dst_count"
+		exit 1
+	fi
+	psql -d postgres -c "SELECT * FROM synchdb_stats_view;"
 	exit 0
 }
 
