@@ -130,34 +130,7 @@ EOF
     echo "initial snapshot test done, orders table count matched: src:$syncing_src_count vs dst:$syncing_dst_count"
 
 	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
-INSERT INTO test_table (
-    id, binary_double_col, binary_float_col, float_col, number_col,
-    long_col, date_col, interval_ds_col, interval_ym_col, timestamp_col,
-    timestamp_tz_col, timestamp_ltz_col, char_col, nchar_col,
-    nvarchar2_col, varchar_col, varchar2_col, raw_col,
-    bfile_col, blob_col, clob_col, nclob_col, rowid_col, urowid_col
-) VALUES (
-    3, 12345.6789, 1234.56, 9876.54321, 1000.50,
-    'This is a long text',
-    TO_DATE('2024-01-31', 'YYYY-MM-DD'),
-    INTERVAL '2 03:04:05' DAY TO SECOND,
-    INTERVAL '1-6' YEAR TO MONTH,
-    TIMESTAMP '2024-01-31 10:30:00',
-    TIMESTAMP '2024-01-31 10:30:00 -08:00',
-    SYSTIMESTAMP,
-    'A',
-    N'B',
-    N'Unicode Text',
-    'Text Data',
-    'More Text Data',
-    HEXTORAW('DEADBEEF'),
-    BFILENAME('MY_DIR', 'file.pdf'),
-    EMPTY_BLOB(),
-    EMPTY_CLOB(),
-    EMPTY_CLOB(),
-    NULL,
-    NULL
-);
+INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107);
 exit;
 EOF
 	sleep 20
