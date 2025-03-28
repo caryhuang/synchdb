@@ -5074,6 +5074,7 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 	char * key = NULL;
 	char * value = NULL;
 	bool found = 0;
+	size_t ret = 0;
 
 	HTAB * rulehash = NULL;
 	DatatypeHashEntry hashentry;
@@ -5152,10 +5153,15 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 
 	/* Allocate memory to store file contents */
 	json_string = palloc0(jsonlength + 1);
-	(void) fread(json_string, 1, jsonlength, file);
+	ret = fread(json_string, 1, jsonlength, file);
 	json_string[jsonlength] = '\0';
 
 	fclose(file);
+	if (ret == 0)
+	{
+		set_shm_connector_errmsg(myConnectorId, "rule file empty");
+		elog(ERROR, "Rule file is empty: %s", rulefile);
+	}
 
 	jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(json_string));
 	jb = DatumGetJsonbP(jsonb_datum);
