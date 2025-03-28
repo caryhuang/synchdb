@@ -137,6 +137,7 @@ commit;
 exit;
 EOF
 	sleep 20
+	psql -d postgres -c "SELECT * FROM synchdb_stats_view;"
 	syncing_src_count=$(docker exec -i $id sqlplus -S 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF | awk '{print $1}'
 SET HEADING OFF;
 SET FEEDBACK OFF;
