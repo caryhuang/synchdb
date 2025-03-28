@@ -2897,7 +2897,7 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
 	pid_t pid;
-	ConnectionInfo connInfo;
+	ConnectionInfo connInfo = {0};
 	char *connector = NULL;
 	int ret = -1, connectorid = -1;
 	StringInfoData strinfo;
@@ -2993,7 +2993,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
 	pid_t pid;
-	ConnectionInfo connInfo;
+	ConnectionInfo connInfo = {0};
 	char *connector = NULL;
 	int ret = -1, connectorid = -1;
 	StringInfoData strinfo;

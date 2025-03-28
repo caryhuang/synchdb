@@ -1,0 +1,133 @@
+name: SynchDB CI
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, synchdb-devel, github-action-test]
+  pull_request:
+    branches: [ main, synchdb-devel github-action-test]
+jobs:
+  params:
+    runs-on: ubuntu-22.04
+    name: Initialize parameters
+    outputs:
+      pg16_version: '{ "major": "16", "full": "16.8" }'
+      pg17_version: '{ "major": "17", "full": "17.4" }'
+    steps:
+      - name: set up parameters
+        run: echo 'noop'
+  build:
+    needs: params
+    name: Build for PG${{ fromJson(matrix.pg_version).major }}
+    strategy:
+      matrix:
+        pg_version:
+          - ${{ needs.params.outputs.pg16_version }}
+          - ${{ needs.params.outputs.pg17_version }}
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up JDK 22
+      uses: actions/setup-java@v2
+      with:
+        java-version: '22'
+        distribution: 'temurin'
+        architecture: x64
+        check-latest: true
+    - name: Set up Maven
+      uses: stCarolas/setup-maven@v4.5
+      with:
+        maven-version: 3.9.8
+    - name: Install pg
+      run: |
+        sudo apt-get update
+        echo -ne "\n" | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+        sudo apt-get install -y postgresql-client-${{ fromJson(matrix.pg_version).major }}
+        sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
+        sudo apt-get install -y postgresql-server-dev-${{ fromJson(matrix.pg_version).major }}
+    - name: Expose $PG_MAJOR to Github Env
+      run: echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
+      shell: bash
+    - name: Build
+      run: "./ci/build-synchdb.sh"
+      shell: bash
+    - uses: actions/upload-artifact@v4
+      with:
+        name: synchdb-install-${{ env.PG_MAJOR }}
+        path: |-
+          ./synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz
+  test-synchdb:
+    name: PG${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }} Tests
+    strategy:
+      matrix:
+        pg_version:
+          - ${{ needs.params.outputs.pg16_version }}
+          - ${{ needs.params.outputs.pg17_version }}
+        dbtypes:
+          - mysql
+          - oracle
+          - sqlserver
+    runs-on: ubuntu-22.04
+    needs:
+    - params
+    - build
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/download-artifact@v4
+      with:
+        name: synchdb-install-${{ fromJson(matrix.pg_version).major }}
+    - name: Set up JDK 22
+      uses: actions/setup-java@v2
+      with:
+        java-version: '22'
+        distribution: 'temurin'
+        architecture: x64
+        check-latest: true
+    - name: Configure Linker
+      run: |
+        echo "configure Java"
+        JAVA_PATH=$(which java)
+        JDK_HOME_PATH=$(readlink -f ${JAVA_PATH} | sed 's:/bin/java::')
+        JDK_LIB_PATH=${JDK_HOME_PATH}/lib
+        echo $JDK_LIB_PATH | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        echo $JDK_LIB_PATH/server | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        sudo ldconfig
+    - name: Install Base PG and SynchDB
+      run: |
+        sudo apt-get update
+        echo -ne "\n" | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+        sudo apt-get install -y postgresql-client-${{ fromJson(matrix.pg_version).major }}
+        sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
+        sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
+        sudo apt-get install -y docker-compose
+        docker-compose --version
+    - name: Expose $DBTYPE to Github Env
+      run: echo "DBTYPE=${{ matrix.dbtypes }}" >> $GITHUB_ENV
+      shell: bash
+    - name: Prepare Remote Database - ${{ matrix.dbtypes }}
+      run: "./ci/setup-remotedbs.sh"
+      shell: bash
+    - name: Start PG
+      run: |
+        export PATH=$PATH:/usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/bin
+        mkdir -p /var/run/postgresql
+        sudo chown -R $(whoami) /var/run/postgresql
+        echo "Initializing database:"
+        initdb -D synchdbtest
+        echo "Configuring PostgreSQL:"
+        echo "max_connections = 100" >> synchdbtest/postgresql.conf
+        echo "shared_buffers = 128MB" >> synchdbtest/postgresql.conf
+        echo "dynamic_shared_memory_type = posix" >> synchdbtest/postgresql.conf
+        echo "Starting PostgreSQL @ $PWD:"
+        pg_ctl -D synchdbtest -l logfile start
+        echo "PostgreSQL status:"
+        pg_ctl -D synchdbtest status 
+        docker ps
+    - name: Synchdb Sanity Tests - ${{ matrix.dbtypes }}
+      run: "./ci/test-synchdb.sh"
+      shell: bash
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: synchdb-test-outputs-${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }}
+        path: |-
+          ./logfile
