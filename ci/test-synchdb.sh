@@ -33,7 +33,7 @@ function test_mysql()
 		echo "failed to start connector"
 	exit 1
 	fi
-
+	exit 1
 	echo "waiting for initial snapshot before checking results..."
 	sleep 10
 	psql -d postgres -c "SELECT * FROM synchdb_state_view;"
