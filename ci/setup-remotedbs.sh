@@ -78,13 +78,11 @@ ALTER PROFILE DEFAULT LIMIT FAILED_LOGIN_ATTEMPTS UNLIMITED;
 exit;
 EOF
 	docker exec -i $id sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<EOF
-CREATE TABLESPACE LOGMINER_TBS DATAFILE '/opt/oracle/oradata/FREE/logminer_tbs.dbf' SIZE 25M REUSE
-AUTOEXTEND ON MAXSIZE UNLIMITED;
+CREATE TABLESPACE LOGMINER_TBS DATAFILE '/opt/oracle/oradata/FREE/logminer_tbs.dbf' SIZE 25M REUSE AUTOEXTEND ON MAXSIZE UNLIMITED;
 exit;
 EOF
 	docker exec -i $id sqlplus sys/oracle@//localhost:1521/FREEPDB1 as sysdba <<EOF
-CREATE TABLESPACE LOGMINER_TBS DATAFILE '/opt/oracle/oradata/FREE/FREEPDB1/logminer_tbs.dbf' SIZE 25M
-REUSE AUTOEXTEND ON MAXSIZE UNLIMITED;
+CREATE TABLESPACE LOGMINER_TBS DATAFILE '/opt/oracle/oradata/FREE/FREEPDB1/logminer_tbs.dbf' SIZE 25M REUSE AUTOEXTEND ON MAXSIZE UNLIMITED;
 exit;
 EOF
 	docker exec -i $id sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<'EOF'
