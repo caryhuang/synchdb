@@ -129,6 +129,6 @@ jobs:
     - uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: synchdb-test-${{ env.PG_MAJOR }}-${{ matrix.dbtypes }}
+        name: synchdb-test-outputs-${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }}
         path: |-
           ./logfile
