@@ -31,9 +31,8 @@ function test_mysql()
 	psql -d postgres -c "SELECT synchdb_start_engine_bgw('mysqlconn');"
 	if [ $? -ne 0 ]; then
 		echo "failed to start connector"
-	exit 1
+		exit 1
 	fi
-	exit 1
 	echo "waiting for initial snapshot before checking results..."
 	sleep 10
 	psql -d postgres -c "SELECT * FROM synchdb_state_view;"
