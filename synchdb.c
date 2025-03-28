@@ -1555,9 +1555,9 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 		elog(LOG, "resuimg dbz engine with host %s, port %u, user %s, src_db %s, "
 				"dst_db %s, table %s, snapshotMode %s",
 				newConnInfo.hostname, newConnInfo.port, newConnInfo.user,
-				newConnInfo.srcdb ? newConnInfo.srcdb : "N/A",
+				strlen(newConnInfo.srcdb) > 0 ? newConnInfo.srcdb : "N/A",
 				newConnInfo.dstdb,
-				newConnInfo.table ? newConnInfo.table : "N/A",
+				strlen(newConnInfo.table) ? newConnInfo.table : "N/A",
 				reqcopy->reqdata);
 
 		elog(WARNING, "resuimg dbz engine with snapshot_mode %s...", reqcopy->reqdata);
@@ -1656,9 +1656,9 @@ setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char 
 			" snapshotMode %s",
 			myConnectorId, conninfo->name,
 			conninfo->hostname, conninfo->port, conninfo->user,
-			conninfo->srcdb ? conninfo->srcdb : "N/A",
+			strlen(conninfo->srcdb) > 0 ? conninfo->srcdb : "N/A",
 			conninfo->dstdb,
-			conninfo->table ? conninfo->table : "N/A",
+			strlen(conninfo->table) > 0 ? conninfo->table : "N/A",
 			*connectorType, connectorTypeToString(*connectorType),
 			conninfo->name, *snapshotMode);
 
@@ -2254,7 +2254,7 @@ get_shm_connector_stage(int connectorId)
 	ConnectorStage stage;
 
 	if (!sdb_state)
-		return STATE_UNDEF;
+		return "unknown";
 
 	/*
 	 * We're only reading, so shared lock is sufficient.
@@ -2402,7 +2402,7 @@ get_shm_connector_stage_enum(int connectorId)
 	ConnectorStage stage;
 
 	if (!sdb_state)
-		return STATE_UNDEF;
+		return STAGE_UNDEF;
 
 	/*
 	 * We're only reading, so shared lock is sufficient.
@@ -2897,7 +2897,7 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
 	pid_t pid;
-	ConnectionInfo connInfo;
+	ConnectionInfo connInfo = {0};
 	char *connector = NULL;
 	int ret = -1, connectorid = -1;
 	StringInfoData strinfo;
@@ -2993,7 +2993,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
 	pid_t pid;
-	ConnectionInfo connInfo;
+	ConnectionInfo connInfo = {0};
 	char *connector = NULL;
 	int ret = -1, connectorid = -1;
 	StringInfoData strinfo;
