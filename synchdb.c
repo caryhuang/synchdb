@@ -1266,6 +1266,7 @@ prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char
 	 * index location
 	 */
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	memset(&(sdb_state->connectors[connectorid]), 0, sizeof(ActiveConnectors));
 	sdb_state->connectors[connectorid].type = type;
 	memset(sdb_state->connectors[connectorid].snapshotMode, 0, SYNCHDB_SNAPSHOT_MODE_SIZE);
 	strcpy(sdb_state->connectors[connectorid].snapshotMode, snapshotMode);
