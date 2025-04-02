@@ -43,7 +43,26 @@ typedef enum _timeRep
 	TIME_ZONEDTIMESTAMP,	/* string representation of timestamp with timezone */
 	TIME_MICRODURATION,	/* duration expressed in microseconds */
 	DATA_VARIABLE_SCALE,	/* indication if scale is variable (for oracle) */
+	DATA_GEOMETRY,			/* indication of geometry data */
+	DATA_ENUM,				/* indication of enum data */
 } TimeRep;
+
+/* structure to hold dbz data literal type in json */
+typedef enum _DbzType
+{
+	DBZTYPE_UNDEF = 0,
+	DBZTYPE_FLOAT32,
+	DBZTYPE_FLOAT64,
+	DBZTYPE_FLOAT,
+	DBZTYPE_DOUBLE,
+	DBZTYPE_BYTES,
+	DBZTYPE_INT8,
+	DBZTYPE_INT16,
+	DBZTYPE_INT32,
+	DBZTYPE_INT64,
+	DBZTYPE_STRUCT,
+	DBZTYPE_STRING,
+} DbzType;
 
 /* Structure to represent a column in a DDL event */
 typedef struct dbz_ddl_column
@@ -78,18 +97,24 @@ typedef struct
 	int position;
 	int typemod;
 	bool ispk;
+	char typcategory;
+	bool typispreferred;
+	char typname[NAMEDATALEN];
 } NameOidEntry;
 
 typedef struct
 {
 	char name[NAMEDATALEN];
 	int jsonpos;
+	DbzType dbztype;
+	TimeRep timerep;
+	int scale;
 } NameJsonposEntry;
 
 /* Structure to represent a column value in a DML event */
 typedef struct dbz_dml_column_value
 {
-	char * name;
+	char * name;	/* name of the column field */
 	char * remoteColumnName;	/* original column name from remote server */
 	char * value;	/* expressed as string as taken from json */
 	Oid datatype;	/* data type Oid as defined by PostgreSQL */
@@ -98,6 +123,10 @@ typedef struct dbz_dml_column_value
 	int timerep;	/* how dbz represents time related fields */
 	int typemod;	/* extra data type modifier */
 	bool ispk;		/* indicate if this column is a primary key*/
+	DbzType dbztype;	/* data literal type as defined by dbz */
+	char typcategory;	/* type category defined by pg */
+	bool typispreferred;	/* wether type category is preferred by pg */
+	char * typname;		/* the name of the data type */
 } DBZ_DML_COLUMN_VALUE;
 
 /* Structure to represent a DML event */
