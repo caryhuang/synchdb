@@ -15,16 +15,12 @@ codename=${codename%)*}
 # we'll do everything with absolute paths
 basedir="$(pwd)"
 
-# get the project and clear out the git repo (reduce workspace size
-rm -rf "${basedir}/.git"
-
-
 function setup_mysql()
 {
 	echo "setting up mysql..."
 	docker-compose -f testenv/mysql/synchdb-mysql-test.yaml up -d
 	echo "sleep to give container time to startup..."
-	sleep 20  # Give containers time to fully start
+	sleep 30  # Give containers time to fully start
 	docker exec -i mysql mysql -uroot -pmysqlpwdroot -e "SELECT VERSION();" || { echo "Failed to connect to MySQL"; docker logs mysql; exit 1; }
 	docker exec -i mysql mysql -uroot -pmysqlpwdroot << EOF
 GRANT replication client ON *.* TO mysqluser;
@@ -41,7 +37,7 @@ function setup_sqlserver()
 	echo "setting up sqlserv...er"
 	docker-compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml up -d
 	echo "sleep to give container time to startup..."
-	sleep 20  # Give containers time to fully start
+	sleep 30  # Give containers time to fully start
 	id=$(docker ps | grep sqlserver | awk '{print $1}')
 	docker cp inventory.sql $id:/
 	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION" > /dev/null
@@ -54,13 +50,14 @@ function setup_oracle()
 	echo "setting up oracle..."
 	docker run -d -p 1521:1521 container-registry.oracle.com/database/free:latest
 	echo "sleep to give container time to startup..."
-    sleep 20  # Give containers time to fully start
+    sleep 30  # Give containers time to fully start
 	id=$(docker ps | grep oracle | awk '{print $1}')
 	docker exec -i $id mkdir /opt/oracle/oradata/recovery_area
 	docker exec -i $id sqlplus / as sysdba <<EOF
 Alter user sys identified by oracle;
 exit;
 EOF
+	sleep 1
 	docker exec -i $id sqlplus /nolog <<EOF
 CONNECT sys/oracle as sysdba;
 alter system set db_recovery_file_dest_size = 10G;
@@ -72,6 +69,7 @@ alter database open;
 archive log list;
 exit;
 EOF
+	sleep 1
 	docker exec -i $id sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<EOF
 ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
 ALTER PROFILE DEFAULT LIMIT FAILED_LOGIN_ATTEMPTS UNLIMITED;

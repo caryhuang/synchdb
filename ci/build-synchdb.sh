@@ -15,9 +15,6 @@ codename=${codename%)*}
 # we'll do everything with absolute paths
 basedir="$(pwd)"
 
-# get the project and clear out the git repo (reduce workspace size
-rm -rf "${basedir}/.git"
-
 function build_synchdb()
 {
 	pg_major="$1"
