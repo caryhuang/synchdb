@@ -16,9 +16,10 @@ def pg_instance():
     log_file = os.path.join(temp_dir, "logfile")
 
     # Init DB
-    subprocess.run(["initdb", "-D", data_dir], check=True)
+    subprocess.run(["initdb", "-D", data_dir], check=True, stdout=subprocess.DEVNULL)
 
     # Start Postgres
+    #print("[setup] setting up postgresql for test...")
     subprocess.run([
         "pg_ctl", "-D", data_dir, "-o", f"-p {PG_PORT}", "-l", log_file, "start"
     ], check=True)
@@ -47,7 +48,8 @@ def pg_instance():
     }
 
     # Teardown: Stop PostgreSQL
-    subprocess.run(["pg_ctl", "-D", data_dir, "stop", "-m", "immediate"], check=True)
+    #print("[teardown] stopping postgresql...")
+    subprocess.run(["pg_ctl", "-D", data_dir, "stop", "-m", "immediate"], check=True, stdout=subprocess.DEVNULL)
     shutil.rmtree(temp_dir)
 
 @pytest.fixture(scope="session")
@@ -65,7 +67,7 @@ def pg_cursor(pg_instance):
     cur.execute("CREATE EXTENSION IF NOT EXISTS synchdb CASCADE;")
 
     yield cur
-
+    #print("tearing down pg_cursor..")
     cur.close()
     conn.close()
 
@@ -79,17 +81,17 @@ def pytest_addoption(parser):
 def dbvendor(pytestconfig):
     return pytestconfig.getoption("dbvendor")
 
-
 @pytest.fixture(scope="session", autouse=True)
 def setup_remote_instance(dbvendor):
     env = os.environ.copy()
     env["DBTYPE"] = dbvendor
 
-    print(f"[setup] Running setup script for {dbvendor}")
-    subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env)
-
+    #print(f"[setup] setting up heterogeneous database {dbvendor}...")
+    subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
+    
     yield
-
+    
+    #print(f"[teardown] stopping heterogeneous database {dbvendor}...")
     teardown_remote_instance(dbvendor)
 
 
@@ -97,6 +99,4 @@ def teardown_remote_instance(dbvendor):
     env = os.environ.copy()
     env["DBTYPE"] = dbvendor
 
-    print(f"[setup] Running teardown script for {dbvendor}")
-    subprocess.run(["bash", "./ci/teardown-remotedbs.sh"], check=True, env=env)
-
+    subprocess.run(["bash", "./ci/teardown-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)

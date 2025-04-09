@@ -23,8 +23,9 @@ function setup_mysql()
 	sleep 30  # Give containers time to fully start
 	docker exec -i mysql mysql -uroot -pmysqlpwdroot -e "SELECT VERSION();" || { echo "Failed to connect to MySQL"; docker logs mysql; exit 1; }
 	docker exec -i mysql mysql -uroot -pmysqlpwdroot << EOF
-GRANT replication client ON *.* TO mysqluser;
-GRANT replication slave ON *.* TO mysqluser;
+GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'mysqluser'@'%';
+GRANT replication client ON *.* TO 'mysqluser'@'%';
+GRANT replication slave ON *.* TO 'mysqluser'@'%';
 GRANT RELOAD ON *.* TO 'mysqluser'@'%';
 FLUSH PRIVILEGES;
 EOF
@@ -34,12 +35,12 @@ EOF
 function setup_sqlserver()
 {
 
-	echo "setting up sqlserv...er"
+	echo "setting up sqlserver..."
 	docker-compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml up -d
 	echo "sleep to give container time to startup..."
 	sleep 30  # Give containers time to fully start
 	id=$(docker ps | grep sqlserver | awk '{print $1}')
-	docker cp inventory.sql $id:/
+	docker cp ./testenv/sqlserver/inventory.sql $id:/
 	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION" > /dev/null
 	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql > /dev/null
 	exit 0
@@ -122,7 +123,7 @@ EOF
 
 	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
 CREATE TABLE orders (
-id NUMBER PRIMARY KEY,
+order_number NUMBER PRIMARY KEY,
 order_date DATE,
 purchaser NUMBER,
 quantity NUMBER,
@@ -133,10 +134,10 @@ exit;
 EOF
 
 	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
-INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (1, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
-INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (2, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
-INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (3, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
-INSERT INTO orders(id, order_date, purchaser, quantity, product_id) VALUES (4, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10001, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10002, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10003, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10004, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
 commit;
 exit;
 EOF
