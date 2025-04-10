@@ -141,10 +141,6 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
         assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
 
 def test_CreateObjmapEntries(pg_cursor, dbvendor):
-    print("create table name mapping")
-    print("create column name mapping")
-    print("create data type mapping")
-    print("create transform expression")
     assert True
 
 def test_CreateObjmapEntriesWithError(pg_cursor, dbvendor):

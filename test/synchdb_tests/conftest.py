@@ -11,7 +11,8 @@ PG_HOST = "127.0.0.1"
 
 @pytest.fixture(scope="session")
 def pg_instance(request):
-    temp_dir = tempfile.mkdtemp(prefix="synchdb_pg_")
+    #temp_dir = tempfile.mkdtemp(prefix="synchdb_pg_")
+    temp_dir = "synchdb_testdir"
     data_dir = os.path.join(temp_dir, "data")
     log_file = os.path.join(temp_dir, "logfile")
 
