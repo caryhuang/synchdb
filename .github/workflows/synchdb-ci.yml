@@ -113,7 +113,7 @@ jobs:
       run: echo "DBTYPE=${{ matrix.dbtypes }}" >> $GITHUB_ENV
       shell: bash
     - name: synchdb test
-      run: make ${{ matrix.dbtypes }}check
+      run: make USE_PGXS=1 ${{ matrix.dbtypes }}check
     - uses: actions/upload-artifact@v4
       if: always()
       with:
