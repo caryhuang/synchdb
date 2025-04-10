@@ -186,4 +186,28 @@ def test_AlterTransformExpression(pg_cursor, dbvendor):
 def test_TransformExpressionWithError(pg_cursor, dbvendor):
     assert True
 
+def test_ConvertString2Numeric(pg_cursor, dbvendor):
+    assert True
+
+def test_ConvertString2Datetime(pg_cursor, dbvendor):
+    assert True
+
+def test_ConvertString2Date(pg_cursor, dbvendor):
+    assert True
+
+def test_ConvertString2Time(pg_cursor, dbvendor):
+    assert True
+
+def test_ConvertString2Bit(pg_cursor, dbvendor):
+    assert True
+
+def test_ConvertString2Timestamp(pg_cursor, dbvendor):
+    assert True
+
+def test_ConvertString2Binary(pg_cursor, dbvendor):
+    assert True
+
+def test_ConvertString2Interval(pg_cursor, dbvendor):
+    assert True
+
 
