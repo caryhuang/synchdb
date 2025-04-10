@@ -90,7 +90,7 @@ dbcheck:
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
 	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo >&2 "❌ docker-compose not found in PATH"; exit 1; }
 	@echo "Running tests against dbvendor=$(DB)"
-	PYTHONPATH=./test/synchdb_tests/ pytest -v -s --dbvendor=$(DB) ./test/synchdb_tests/
+	PYTHONPATH=./test/synchdb_tests/ pytest -v -s --dbvendor=$(DB) --capture=tee-sys ./test/synchdb_tests/
 	rm -r .pytest_cache ./test/synchdb_tests/__pycache__ ./test/synchdb_tests/t/__pycache__
 
 mysqlcheck:

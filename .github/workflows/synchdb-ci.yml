@@ -123,4 +123,4 @@ jobs:
       with:
         name: synchdb-test-outputs-${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }}
         path: |-
-          ./logfile
+          ./synchdb_testdir
