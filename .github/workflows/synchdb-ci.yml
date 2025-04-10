@@ -109,14 +109,15 @@ jobs:
         sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
         sudo apt-get install -y docker-compose
         docker-compose --version
-        export PATH=$PATH:/usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/bin
-        mkdir -p /var/run/postgresql
-        sudo chown -R $(whoami) /var/run/postgresql
     - name: Expose $DBTYPE to Github Env
       run: echo "DBTYPE=${{ matrix.dbtypes }}" >> $GITHUB_ENV
       shell: bash
     - name: synchdb test
-      run: make USE_PGXS=1 ${{ matrix.dbtypes }}check
+      run: |
+        export PATH=$PATH:/usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/bin
+        mkdir -p /var/run/postgresql
+        sudo chown -R $(whoami) /var/run/postgresql
+        make USE_PGXS=1 ${{ matrix.dbtypes }}check
     - uses: actions/upload-artifact@v4
       if: always()
       with:
