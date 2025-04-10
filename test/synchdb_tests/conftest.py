@@ -10,7 +10,7 @@ PG_PORT = "5432"
 PG_HOST = "127.0.0.1"
 
 @pytest.fixture(scope="session")
-def pg_instance():
+def pg_instance(request):
     temp_dir = tempfile.mkdtemp(prefix="synchdb_pg_")
     data_dir = os.path.join(temp_dir, "data")
     log_file = os.path.join(temp_dir, "logfile")
@@ -46,11 +46,14 @@ def pg_instance():
         "data_dir": data_dir,
         "log_file": log_file
     }
-
-    # Teardown: Stop PostgreSQL
-    #print("[teardown] stopping postgresql...")
-    subprocess.run(["pg_ctl", "-D", data_dir, "stop", "-m", "immediate"], check=True, stdout=subprocess.DEVNULL)
-    shutil.rmtree(temp_dir)
+    
+    # do not remove postgresql server dir if failed
+    if request.session.testsfailed > 0:
+        print(f"test failed: postgresql server dir and log retained at {data_dir} and {log_file}")
+        subprocess.run(["pg_ctl", "-D", data_dir, "stop", "-m", "immediate"], check=True, stdout=subprocess.DEVNULL)
+    else:
+        subprocess.run(["pg_ctl", "-D", data_dir, "stop", "-m", "immediate"], check=True, stdout=subprocess.DEVNULL)
+        shutil.rmtree(temp_dir)
 
 @pytest.fixture(scope="session")
 def pg_cursor(pg_instance):
@@ -82,7 +85,7 @@ def dbvendor(pytestconfig):
     return pytestconfig.getoption("dbvendor")
 
 @pytest.fixture(scope="session", autouse=True)
-def setup_remote_instance(dbvendor):
+def setup_remote_instance(dbvendor, request):
     env = os.environ.copy()
     env["DBTYPE"] = dbvendor
 
@@ -90,10 +93,11 @@ def setup_remote_instance(dbvendor):
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
     
     yield
-    
-    #print(f"[teardown] stopping heterogeneous database {dbvendor}...")
-    teardown_remote_instance(dbvendor)
 
+    if request.session.testsfailed > 0:
+        print("test failed: remote databaes docker instance retained. Check `docker ps`")
+    else:
+        teardown_remote_instance(dbvendor)
 
 def teardown_remote_instance(dbvendor):
     env = os.environ.copy()

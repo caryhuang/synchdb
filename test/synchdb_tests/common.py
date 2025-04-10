@@ -48,9 +48,8 @@ def run_pg_query_one(cursor, query):
     row = cursor.fetchone()
     return row
 
-## compare data types. Note: not all combinations are included here
-## just enough to get the tests to run and pass... Feel free to add
-## more for more complex tests
+## default data type matrix for all supported database vendors
+## todo: better ways to lookup
 def verify_default_type_mappings(exttype, pgtype, dbvendor):
 
     if exttype == pgtype:
@@ -72,7 +71,117 @@ def verify_default_type_mappings(exttype, pgtype, dbvendor):
         return True
     elif exttype == "number" and pgtype == "numeric":
         return True
-    elif exttype == "date" and pgtype == "timestamp without time zone":
+    elif exttype == "decimal" and pgtype == "numeric":
+        return True
+    elif exttype == "date" and pgtype == "timestamp without time zone" or pgtype == "timestamp with time zone":
+        return True
+    elif exttype == "time" and pgtype == "time without time zone" or pgtype == "time with time zone":
+        return True
+    elif exttype == "binary" and pgtype == "bytea":
+        return True
+    elif exttype == "smallint" and pgtype == "smallint":
+        return True
+    elif exttype == "tinyint" and pgtype == "smallint":
+        return True
+    
+    #if dbvendor == "mysql":
+    if exttype == "decimal unsigned" and pgtype == "numeric":
+        return True
+    elif exttype == "double unsigned" and pgtype == "double precision":
+        return True
+    elif exttype == "tinyint" and pgtype == "smallint":
+        return True
+    elif exttype == "float unsigned" and pgtype == "real":
+        return True
+    elif exttype == "int unsigned" and pgtype == "bigint":
+        return True
+    elif exttype == "mediumint" and pgtype == "integer":
+        return True
+    elif exttype == "mediumint unsigned" and pgtype == "integer":
+        return True
+    elif exttype == "year" and pgtype == "integer":
+        return True
+    elif exttype == "smallint unsigned" and pgtype == "integer":
+        return True
+    elif exttype == "tinyint unsigned" and pgtype == "smallint":
+        return True
+    elif exttype == "varbinary" and pgtype == "bytea":
+        return True
+    elif exttype == "blob" and pgtype == "bytea":
+        return True
+    elif exttype == "longblob" and pgtype == "bytea":
+        return True
+    elif exttype == "tinyblob" and pgtype == "bytea":
+        return True
+    elif exttype == "mediumtext" and pgtype == "text":
+        return True
+    elif exttype == "tinytext" and pgtype == "text":
+        return True
+    elif exttype == "longtext" and pgtype == "text":
+        return True
+    elif exttype == "json" and pgtype == "jsonb":
+        return True
+    elif exttype == "datetime" and pgtype == "timestamp without time zone" or pgtype == "timestamp with time zone":
+        return True
+    #elif dbvendor == "sqlserver":
+    if exttype == "bit" and pgtype == "boolean":
+        return True
+    if exttype == "smallmoney" and pgtype == "money":
+        return True
+    if exttype == "datetime2" and pgtype == "timestamp without time zone" or pgtype == "timestamp with time zone":
+        return True
+    if exttype == "datetimeoffset" and pgtype == "timestamp without time zone" or pgtype == "timestamp with time zone":
+        return True
+    if exttype == "smalldatetime" and pgtype == "timestamp without time zone" or pgtype == "timestamp with time zone":
+        return True
+    if exttype == "char" and pgtype == "character":
+        return True
+    if exttype == "nchar" and pgtype == "character":
+        return True
+    if exttype == "ntext" and pgtype == "text":
+        return True
+    if exttype == "image" and pgtype == "bytea":
+        return True
+    if exttype == "geography" and pgtype == "text":
+        return True
+    if exttype == "nvarchar" and pgtype == "character varying":
+        return True
+    if exttype == "xml" and pgtype == "text":
+        return True
+    if exttype == "uniqueidentifier" and pgtype == "uuid":
+        return True
+    # oracle
+    if exttype == "binary_double" and pgtype == "double precision":
+        return True
+    if exttype == "binary_float" and pgtype == "real":
+        return True
+    if exttype == "long" and pgtype == "text":
+        return True
+    if exttype == "interval day to second" and pgtype == "interval":
+        return True
+    if exttype == "interval year to month" and pgtype == "interval":
+        return True
+    if exttype == "timestamp" and pgtype == "timestamp without time zone":
+        return True
+    if exttype == "timestamp with time zone" and pgtype == "timestamp with time zone":
+        return True
+    if exttype == "timestamp with local time zone" and pgtype == "timestamp with time zone":
+        return True
+    if exttype == "nvarchar2" and pgtype == "character varying":
+        return True
+    if exttype == "varchar2" and pgtype == "character varying":
+        return True
+    if exttype == "raw" and pgtype == "bytea":
+        return True
+    if exttype == "bfile" and pgtype == "text":
+        return True
+    if exttype == "clob" and pgtype == "text":
+        return True
+    if exttype == "nclob" and pgtype == "text":
+        return True
+    if exttype == "rowid" and pgtype == "text":
+        return True
+    if exttype == "urowid" and pgtype == "text":
         return True
 
     print(f"type unmatched: {exttype} : {pgtype} for {dbvendor}")
@@ -220,3 +329,8 @@ def create_synchdb_connector(cursor, vendor, name):
 
     return result
 
+def create_and_start_synchdb_connector(cursor, vendor, name, mode):
+    create_synchdb_connector(cursor, vendor, name)
+    row = run_pg_query_one(cursor, f"SELECT synchdb_start_engine_bgw('{name}', '{mode}')")
+    return row[0]
+    

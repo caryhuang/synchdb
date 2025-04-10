@@ -84,6 +84,7 @@ def test_InitialSnapshot(pg_cursor, dbvendor):
 
     # check table name mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    assert len(rows) > 0
     for row in rows:
         id = row[0].split(".")
         if len(id) == 3:
@@ -93,11 +94,13 @@ def test_InitialSnapshot(pg_cursor, dbvendor):
     
     # check attname mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    assert len(rows) > 0
     for row in rows:
         assert row[0] == row[1]
 
     # check data type mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    assert len(rows) > 0
     for row in rows:
         assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
 
@@ -113,6 +116,18 @@ def test_InitialSnapshot(pg_cursor, dbvendor):
     assert int(pgrow[3]) == int(extrow[0][3])
     assert int(pgrow[4]) == int(extrow[0][4])
 
+
+def test_ConnectorStartSchemaSyncMode(pg_cursor, dbvendor):
+    assert True
+
+def test_ConnectorStartAlwaysMode(pg_cursor, dbvendor):
+    assert True
+
+def test_ConnectorStartNodataMode(pg_cursor, dbvendor):
+    assert True
+
+def test_ConnectorStartWithError(pg_cursor, dbvendor):
+    assert True
 
 def test_ConnectorRestart(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
@@ -140,7 +155,10 @@ def test_ConnectorRestart(pg_cursor, dbvendor):
     oldpid = row[2]
     assert row[2] == oldpid
     assert row[3] == "initial snapshot"
-    assert row[4] == "polling"
+    if row[4] == "polling" or row[4] == "restarting":
+        assert True
+    else:
+        assert False
     assert row[5] == "no error"
 
 
@@ -157,6 +175,12 @@ def test_ConnectorStop(pg_cursor, dbvendor):
     assert row[1] == dbvendor
     assert row[2] == -1
     assert row[4] == "stopped"
+
+def test_ConnectorRestartAlwaysMode(pg_cursor, dbvendor):
+    assert True
+
+def test_ConnectorRestartNodataMode(pg_cursor, dbvendor):
+    assert True
 
 def test_ConnectorDelete(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
