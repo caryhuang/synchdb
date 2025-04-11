@@ -301,7 +301,7 @@ spi_execute(const char * query, ConnectorType type)
  * It creates a tuple from the provided column values and inserts it into the table.
  */
 static int
-synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
+synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts)
 {
 	Relation rel = NULL;
 	TupleTableSlot *slot;
@@ -310,6 +310,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 	List	   *perminfos = NIL;
 	ResultRelInfo *resultRelInfo = NULL;
 	ListCell * cell;
+	int i = 0;
 
 	/*
 	 * we put in TRY and CATCH block to capture potential exceptions raised
@@ -348,6 +349,10 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 		slot = ExecInitExtraTupleSlot(estate, RelationGetDescr(rel), &TTSOpsVirtual);
 
 		ExecClearTuple(slot);
+
+		/* initialize all values in slot to null */
+		for (i = 0; i < natts; i++)
+			slot->tts_isnull[i] = true;
 
 		/* then we fill valid data to slot */
 		foreach(cell, colval)
@@ -430,7 +435,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
  * and replaces the old tuple with the new one.
  */
 static int
-synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, ConnectorType type)
+synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, ConnectorType type, int natts)
 {
 	Relation rel = NULL;
 	TupleTableSlot * remoteslot, * localslot;
@@ -439,7 +444,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 	List	   *perminfos = NIL;
 	ResultRelInfo *resultRelInfo = NULL;
 	ListCell * cell;
-	int ret = 0;
+	int ret = 0, i = 0;
 	EPQState	epqstate;
 	bool found;
 	Oid idxoid = InvalidOid;
@@ -482,6 +487,10 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		localslot = table_slot_create(rel, &estate->es_tupleTable);
 
 		ExecClearTuple(remoteslot);
+
+		/* initialize all values in slot to null */
+		for (i = 0; i < natts; i++)
+			remoteslot->tts_isnull[i] = true;
 
 		/* then we fill valid data to slot */
 		foreach(cell, colvalbefore)
@@ -530,6 +539,10 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		{
 			/* turn colvalafter into TupleTableSlot */
 			ExecClearTuple(remoteslot);
+
+			/* initialize all values in slot to null */
+			for (i = 0; i < natts; i++)
+				remoteslot->tts_isnull[i] = true;
 
 			/* then we fill valid data to slot */
 			foreach(cell, colvalafter)
@@ -613,7 +626,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
  * It locates the existing tuple based on the provided column values and deletes it.
  */
 static int
-synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
+synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int natts)
 {
 	Relation rel = NULL;
 	TupleTableSlot * remoteslot, * localslot;
@@ -622,7 +635,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 	List	   *perminfos = NIL;
 	ResultRelInfo *resultRelInfo = NULL;
 	ListCell * cell;
-	int ret = 0;
+	int ret = 0, i = 0;
 	EPQState	epqstate;
 	bool found;
 	Oid idxoid = InvalidOid;
@@ -665,6 +678,10 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 		localslot = table_slot_create(rel, &estate->es_tupleTable);
 
 		ExecClearTuple(remoteslot);
+
+		/* initialize all values in slot to null */
+		for (i = 0; i < natts; i++)
+			remoteslot->tts_isnull[i] = true;
 
 		/* then we fill valid data to slot */
 		foreach(cell, colvalbefore)
@@ -806,7 +823,7 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			if (synchdb_dml_use_spi)
 				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type);
+				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type, pgdml->natts);
 
 			increment_connector_statistics(myBatchStats, STATS_READ, 1);
 			break;
@@ -816,7 +833,7 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			if (synchdb_dml_use_spi)
 				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type);
+				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type, pgdml->natts);
 
 			increment_connector_statistics(myBatchStats, STATS_CREATE, 1);
 			break;
@@ -829,7 +846,7 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 				ret = synchdb_handle_update(pgdml->columnValuesBefore,
 											 pgdml->columnValuesAfter,
 											 pgdml->tableoid,
-											 type);
+											 type, pgdml->natts);
 			increment_connector_statistics(myBatchStats, STATS_UPDATE, 1);
 			break;
 		}
@@ -838,7 +855,7 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			if (synchdb_dml_use_spi)
 				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				ret = synchdb_handle_delete(pgdml->columnValuesBefore, pgdml->tableoid, type);
+				ret = synchdb_handle_delete(pgdml->columnValuesBefore, pgdml->tableoid, type, pgdml->natts);
 
 			increment_connector_statistics(myBatchStats, STATS_DELETE, 1);
 			break;
