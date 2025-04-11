@@ -2,9 +2,9 @@ name: SynchDB CI
 on:
   workflow_dispatch:
   push:
-    branches: [ main, synchdb-devel, github-action-test]
+    branches: [ main, synchdb-devel]
   pull_request:
-    branches: [ main, synchdb-devel github-action-test]
+    branches: [ main, synchdb-devel]
 jobs:
   params:
     runs-on: ubuntu-22.04
@@ -82,6 +82,15 @@ jobs:
         distribution: 'temurin'
         architecture: x64
         check-latest: true
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+    - name: Install pytest
+      run: |
+        pip install pytest psycopg2
+        python --version
+        pytest --version
     - name: Configure Linker
       run: |
         echo "configure Java"
@@ -103,31 +112,15 @@ jobs:
     - name: Expose $DBTYPE to Github Env
       run: echo "DBTYPE=${{ matrix.dbtypes }}" >> $GITHUB_ENV
       shell: bash
-    - name: Prepare Remote Database - ${{ matrix.dbtypes }}
-      run: "./ci/setup-remotedbs.sh"
-      shell: bash
-    - name: Start PG
+    - name: synchdb test
       run: |
         export PATH=$PATH:/usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/bin
         mkdir -p /var/run/postgresql
         sudo chown -R $(whoami) /var/run/postgresql
-        echo "Initializing database:"
-        initdb -D synchdbtest
-        echo "Configuring PostgreSQL:"
-        echo "max_connections = 100" >> synchdbtest/postgresql.conf
-        echo "shared_buffers = 128MB" >> synchdbtest/postgresql.conf
-        echo "dynamic_shared_memory_type = posix" >> synchdbtest/postgresql.conf
-        echo "Starting PostgreSQL @ $PWD:"
-        pg_ctl -D synchdbtest -l logfile start
-        echo "PostgreSQL status:"
-        pg_ctl -D synchdbtest status 
-        docker ps
-    - name: Synchdb Sanity Tests - ${{ matrix.dbtypes }}
-      run: "./ci/test-synchdb.sh"
-      shell: bash
+        make USE_PGXS=1 ${{ matrix.dbtypes }}check
     - uses: actions/upload-artifact@v4
       if: always()
       with:
         name: synchdb-test-outputs-${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }}
         path: |-
-          ./logfile
+          ./synchdb_testdir
