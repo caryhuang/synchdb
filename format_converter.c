@@ -862,7 +862,7 @@ getDbzTypeFromString(const char * typestring)
 	if (!strcmp(typestring, "string"))
 		return DBZTYPE_STRING;
 
-	elog(WARNING, "unexpected dbz type %s", typestring);
+	elog(DEBUG1, "unexpected dbz type %s", typestring);
 	return DBZTYPE_UNDEF;
 }
 
@@ -897,7 +897,7 @@ getTimerepFromString(const char * typestring)
 	else if (find_exact_string_match(typestring, "io.debezium.data.Enum"))
 		return DATA_ENUM;
 
-	elog(WARNING, "unhandled dbz type %s", typestring);
+	elog(DEBUG1, "unhandled dbz type %s", typestring);
 	return TIME_UNDEF;
 }
 
@@ -3863,6 +3863,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 	/* copy identification data to PG_DML */
 	pgdml->op = dbzdml->op;
 	pgdml->tableoid = dbzdml->tableoid;
+	pgdml->natts = dbzdml->natts;
 
 	switch(dbzdml->op)
 	{
@@ -4391,8 +4392,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 		/* get primary key bitmapset */
 		pkattrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_PRIMARY_KEY);
 
-		/* cache tupdesc */
+		/* cache tupdesc and save natts for later use */
 		cacheentry->tupdesc = CreateTupleDescCopy(tupdesc);
+		dbzdml->natts = tupdesc->natts;
 
 		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 		{

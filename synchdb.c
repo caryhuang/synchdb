@@ -1250,6 +1250,7 @@ static void
 prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid, const char * snapshotMode)
 
 {
+	const char * val = NULL;
 	ConnectorType type = fc_get_connector_type(connector);
 
 	worker->bgw_main_arg = UInt32GetDatum(connectorid);
@@ -1259,6 +1260,9 @@ prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char
 	/* append destination database to worker->bgw_name for clarity */
 	strcat(worker->bgw_name, " -> ");
 	strcat(worker->bgw_name, connInfo->dstdb);
+
+	/* [ivorysql] check if we are running under ivorysql's oracle compatible mode */
+	val = GetConfigOption("ivorysql.compatible_mode", true, false);
 
 	/*
 	 * save connInfo to synchdb shared memory at index[connectorid]. When the connector
@@ -1272,6 +1276,8 @@ prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char
 
 	memset(&(sdb_state->connectors[connectorid].conninfo), 0, sizeof(ConnectionInfo));
 	memcpy(&(sdb_state->connectors[connectorid].conninfo), connInfo, sizeof(ConnectionInfo));
+	if (val && !strcasecmp(val, "oracle"))
+		sdb_state->connectors[connectorid].conninfo.isOraCompat = true;
 	LWLockRelease(&sdb_state->lock);
 }
 
@@ -1650,6 +1656,13 @@ setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char 
 
 	/* Connect to current database: NULL user - bootstrap superuser is used */
 	BackgroundWorkerInitializeConnection(conninfo->dstdb, NULL, 0);
+
+	/* [ivorysql] enable oracle compatible mode if specified */
+	if (conninfo->isOraCompat)
+	{
+		SetConfigOption("ivorysql.compatible_mode", "oracle", PGC_USERSET, PGC_S_OVERRIDE);
+		elog(LOG,"IvorySQL Oracle compatible mode enabled");
+	}
 
 	elog(LOG, "obtained conninfo from shm: myConnectorId %d, name %s, host %s, port %u, "
 			"user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s), conninfo_name %s"

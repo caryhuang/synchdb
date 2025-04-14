@@ -138,6 +138,7 @@ typedef struct dbz_dml
 	char * remoteObjectId;		/* db.schema.table or db.table on remote side */
 	char * mappedObjectId;		/* schema.table, or just table on PG side */
 	Oid tableoid;
+	int natts;					/* number of columns of this pg table */
 	List * columnValuesBefore;	/* list of DBZ_DML_COLUMN_VALUE */
 	List * columnValuesAfter;	/* list of DBZ_DML_COLUMN_VALUE */
 	unsigned long long dbz_ts_ms;	/* time(ms) when this DML is processed by DBZ */
