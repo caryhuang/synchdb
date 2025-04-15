@@ -2046,6 +2046,35 @@ dbz_mark_batch_complete(int batchid)
 	return 0;
 }
 
+static void
+remove_dbz_metadata_files(const char * name)
+{
+	struct dirent *entry;
+	char filepath[256] = {0};
+	char keyword[SYNCHDB_CONNINFO_NAME_SIZE] = {0};
+
+	DIR *dir = opendir(SYNCHDB_METADATA_DIR);
+	if (!dir)
+		elog(ERROR, "failed to open synchdb metadata dir %s", SYNCHDB_METADATA_DIR);
+
+	snprintf(keyword, SYNCHDB_CONNINFO_NAME_SIZE, "_%s_", name);
+
+	while ((entry = readdir(dir)) != NULL)
+	{
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+			continue;
+
+		if (strstr(entry->d_name, keyword) != NULL)
+		{
+			elog(WARNING, "Deleting metadata file: %s", filepath);
+			snprintf(filepath, 256, "%s/%s", SYNCHDB_METADATA_DIR, entry->d_name);
+			if (remove(filepath) != 0)
+				elog(ERROR, "Failed to delete");
+		}
+	}
+	closedir(dir);
+}
+
 /*
  * synchdb_auto_launcher_main - auto connector launcher main routine
  *
@@ -4021,11 +4050,17 @@ synchdb_del_conninfo(PG_FUNCTION_ARGS)
 		}
 	}
 
-	/* then, we remove the connector info record */
-	appendStringInfo(&strinfo, "DELETE FROM %s WHERE name = '%s'",
+	/* remove the connector info record */
+	appendStringInfo(&strinfo, "DELETE FROM %s WHERE name = '%s'; DELETE FROM %s WHERE name = '%s'",
 			SYNCHDB_CONNINFO_TABLE,
+			NameStr(*name),
+			SYNCHDB_ATTRIBUTE_TABLE,
 			NameStr(*name));
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+
+	ra_executeCommand(strinfo.data);
+	remove_dbz_metadata_files(NameStr(*name));
+
+	PG_RETURN_INT32(0);
 }
 
 /*

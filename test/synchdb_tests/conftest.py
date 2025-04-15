@@ -15,6 +15,10 @@ def pg_instance(request):
     temp_dir = "synchdb_testdir"
     data_dir = os.path.join(temp_dir, "data")
     log_file = os.path.join(temp_dir, "logfile")
+    
+    # remove dir if exists
+    if os.path.isdir(temp_dir):
+        shutil.rmtree(temp_dir)
 
     # Init DB
     subprocess.run(["initdb", "-D", data_dir], check=True, stdout=subprocess.DEVNULL)
@@ -95,10 +99,7 @@ def setup_remote_instance(dbvendor, request):
     
     yield
 
-    if request.session.testsfailed > 0:
-        print("test failed: remote databaes docker instance retained. Check `docker ps`")
-    else:
-        teardown_remote_instance(dbvendor)
+    teardown_remote_instance(dbvendor)
 
 def teardown_remote_instance(dbvendor):
     env = os.environ.copy()
