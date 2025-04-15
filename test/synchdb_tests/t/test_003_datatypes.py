@@ -375,8 +375,6 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
     assert len(rows) > 0
     assert len(extrows) > 0
     assert len(rows) == len(extrows)
-    print(rows)
-    print(extrows)
     if dbvendor == "mysql":
         for row, extrow in zip(rows, extrows):
             assert row[0] == Decimal(extrow[0])
