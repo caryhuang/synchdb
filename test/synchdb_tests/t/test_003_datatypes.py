@@ -489,13 +489,48 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
 
 def test_CreateObjmapEntries(pg_cursor, dbvendor):
-    assert True
+    name = getConnectorName(dbvendor) + "_objmap"
+    dbname = getDbname(dbvendor).lower()
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', 'ext_db1.ext_table1', 'pg_table1')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', 'ext_db1.ext_table1.ext_column1', 'pg_column1')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', 'int', 'bigint')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', 'ext_db1.ext_table1.ext_column1', 'text')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'transform', 'ext_db1.ext_table1.ext_column1', '''>>>>>'' || ''%d'' || ''<<<<<''')")
+    assert rows[0] == 0
+
+    rows = run_pg_query_one(pg_cursor, f"SELECT count(*) from synchdb_objmap WHERE name = '{name}'")
+    assert rows[0] == 5
+
+    rows = run_pg_query(pg_cursor, f"SELECT enabled from synchdb_objmap WHERE name = '{name}'")
+    for row in rows:
+        assert row[0] == True
 
 def test_CreateObjmapEntriesWithError(pg_cursor, dbvendor):
     assert True
 
 def test_DeleteObjmapEntries(pg_cursor, dbvendor):
-    assert True
+    name = getConnectorName(dbvendor) + "_objmap"
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'table', 'ext_db1.ext_table1')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'column', 'ext_db1.ext_table1.ext_column1')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'datatype', 'int')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'datatype', 'ext_db1.ext_table1.ext_column1')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'transform', 'ext_db1.ext_table1.ext_column1')")
+    assert rows[0] == 0
+
+    rows = run_pg_query_one(pg_cursor, f"SELECT count(*) from synchdb_objmap WHERE name = '{name}'")
+    assert rows[0] == 5
+
+    rows = run_pg_query(pg_cursor, f"SELECT enabled from synchdb_objmap WHERE name = '{name}'")
+    for row in rows:
+        assert row[0] == False
 
 def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     assert True

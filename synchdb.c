@@ -4051,10 +4051,14 @@ synchdb_del_conninfo(PG_FUNCTION_ARGS)
 	}
 
 	/* remove the connector info record */
-	appendStringInfo(&strinfo, "DELETE FROM %s WHERE name = '%s'; DELETE FROM %s WHERE name = '%s'",
+	appendStringInfo(&strinfo, "DELETE FROM %s WHERE name = '%s';"
+			"DELETE FROM %s WHERE name = '%s';"
+			"DELETE FROM %s WHERE name = '%s';",
 			SYNCHDB_CONNINFO_TABLE,
 			NameStr(*name),
 			SYNCHDB_ATTRIBUTE_TABLE,
+			NameStr(*name),
+			SYNCHDB_OBJECT_MAPPING_TABLE,
 			NameStr(*name));
 
 	ra_executeCommand(strinfo.data);
