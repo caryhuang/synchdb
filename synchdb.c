@@ -2050,14 +2050,15 @@ static void
 remove_dbz_metadata_files(const char * name)
 {
 	struct dirent *entry;
-	char filepath[256] = {0};
-	char keyword[SYNCHDB_CONNINFO_NAME_SIZE] = {0};
+	char filepath[SYNCHDB_METADATA_PATH_SIZE] = {0};
+	char keyword[SYNCHDB_CONNINFO_NAME_SIZE + 2] = {0};
 
 	DIR *dir = opendir(SYNCHDB_METADATA_DIR);
 	if (!dir)
-		elog(ERROR, "failed to open synchdb metadata dir %s", SYNCHDB_METADATA_DIR);
+		elog(ERROR, "failed to open synchdb metadata dir %s : %m",
+				SYNCHDB_METADATA_DIR);
 
-	snprintf(keyword, SYNCHDB_CONNINFO_NAME_SIZE, "_%s_", name);
+	snprintf(keyword, SYNCHDB_CONNINFO_NAME_SIZE + 2, "_%s_", name);
 
 	while ((entry = readdir(dir)) != NULL)
 	{
@@ -2066,10 +2067,12 @@ remove_dbz_metadata_files(const char * name)
 
 		if (strstr(entry->d_name, keyword) != NULL)
 		{
-			elog(WARNING, "Deleting metadata file: %s", filepath);
-			snprintf(filepath, 256, "%s/%s", SYNCHDB_METADATA_DIR, entry->d_name);
+			memset(filepath, 0, SYNCHDB_METADATA_PATH_SIZE);
+			snprintf(filepath, SYNCHDB_METADATA_PATH_SIZE, "%s/%s",
+					SYNCHDB_METADATA_DIR, entry->d_name);
 			if (remove(filepath) != 0)
-				elog(ERROR, "Failed to delete");
+				elog(ERROR, "Failed to delete metadata file %s %m",
+						filepath);
 		}
 	}
 	closedir(dir);

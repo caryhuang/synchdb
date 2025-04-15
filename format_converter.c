@@ -47,7 +47,6 @@
 /* global external variables */
 extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
-extern ExtraConnectionInfo extraConnInfo;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 
@@ -756,10 +755,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 	bool isnull;
 
 	if (!strinfoout)
-	{
-		elog(WARNING, "strinfo is null");
 		return -1;
-	}
 
     /* Count the number of elements in the path */
 	if (strchr(pathcopy, '.'))
@@ -2718,10 +2714,10 @@ handle_base64_to_numeric_with_scale(const char * in, int scale)
 static char *
 handle_string_to_numeric(const char * in, bool addquote)
 {
-	/* todo: we may need to do some checking here */
-	elog(WARNING, "no special handling to convert string ('%s') to numeric"
-			"type. May fail to apply if it contains non-numeric characters",
-			in);
+	/*
+	 * no special handling to convert string to numeric. May fail to apply
+	 * if it contains non-numeric characters
+	 */
 	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
 }
 
@@ -2766,20 +2762,20 @@ handle_base64_to_bit(const char * in, bool addquote, int typemod)
 static char *
 handle_string_to_bit(const char * in, bool addquote)
 {
-	/* todo: we may need to do some checking here */
-	elog(WARNING, "no special handling to convert string ('%s') to bit"
-			"type. May fail to apply if it contains non-bit characters",
-			in);
+	/*
+	 * no special handling to convert string to bit. May fail to apply
+	 * if it contains non-bit characters
+	 */
 	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
 }
 
 static char *
 handle_numeric_to_bit(const char * in, bool addquote)
 {
-	/* todo: we may need to do some checking here */
-	elog(WARNING, "no special handling to convert numeric (%s) to bit"
-			"type. May fail to apply if it contains non-bit characters",
-			in);
+	/*
+	 * no special handling to convert numeric to bit. May fail to apply
+	 * if it contains non-bit numerics
+	 */
 	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
 }
 
@@ -2872,10 +2868,10 @@ handle_numeric_to_date(const char * in, bool addquote, int timerep)
 static char *
 handle_string_to_date(const char * in, bool addquote)
 {
-	/* todo: we may need to do some checking here */
-	elog(WARNING, "no special handling to convert string ('%s') to date"
-			"type. May fail to apply if it contains incorrect date format.",
-			in);
+	/*
+	 * no special handling to convert string to date. May fail to apply
+	 * if it contains unsupported date format
+	 */
 	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
 }
 
@@ -3098,10 +3094,10 @@ handle_numeric_to_time(const char * in, bool addquote, int timerep, int typemod)
 static char *
 handle_string_to_time(const char * in, bool addquote)
 {
-	/* todo: we may need to do some checking here */
-	elog(WARNING, "no special handling to convert string ('%s') to time"
-			"type. May fail to apply if it contains incorrect time format.",
-			in);
+	/*
+	 * no special handling to convert string to time. May fail to apply
+	 * if it contains non-time characters
+	 */
 	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
 }
 
@@ -3132,20 +3128,20 @@ handle_base64_to_byte(const char * in, bool addquote)
 static char *
 handle_string_to_byte(const char * in, bool addquote)
 {
-	/* todo: we may need to do some checking here */
-	elog(WARNING, "no special handling to convert string ('%s') to byte"
-			"type. May fail to apply if it contains non-byte character.",
-			in);
+	/*
+	 * no special handling to convert string to byte. May fail to apply
+	 * if it contains non-byte characters
+	 */
 	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
 }
 
 static char *
 handle_numeric_to_byte(const char * in, bool addquote)
 {
-	/* todo: we may need to do some checking here */
-	elog(WARNING, "no special handling to convert numeric (%s) to byte"
-			"type. May fail to apply if it contains non-byte character.",
-			in);
+	/*
+	 * no special handling to convert numeric to byte. May fail to apply
+	 * if it contains non-byte numerics
+	 */
 	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
 }
 
@@ -3297,10 +3293,10 @@ handle_numeric_to_interval(const char * in, bool addquote, int timerep, int type
 static char *
 handle_string_to_interval(const char * in, bool addquote)
 {
-	/* todo: we may need to do some checking here */
-	elog(WARNING, "no special handling to convert string ('%s') to interval"
-			"type. May fail to apply if it contains incorrect interval format",
-			in);
+	/*
+	 * no special handling to convert string to interval. May fail to apply
+	 * if it contains incorrect interval format
+	 */
 	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
 }
 
@@ -3424,7 +3420,6 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 						out = escapeSingleQuote(in, addquote);
 					else
 						out = pstrdup(in);
-					/* will fail on illegal string characters */
 					break;
 				}
 			}
@@ -4543,7 +4538,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							}
 						break;
 						default:
-							elog(WARNING, "Unknown token: %d", r);
 							break;
 					}
 
@@ -4703,7 +4697,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							}
 						break;
 						default:
-							elog(WARNING, "Unknown token: %d", r);
 							break;
 					}
 
@@ -4886,7 +4879,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 								}
 							break;
 							default:
-								elog(WARNING, "Unknown token: %d", r);
 								break;
 						}
 
