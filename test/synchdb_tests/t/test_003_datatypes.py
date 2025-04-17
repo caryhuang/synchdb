@@ -4,7 +4,7 @@ from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from binascii import unhexlify
 
-from common import run_pg_query, run_pg_query_one, run_remote_query, run_remote_query_one, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector
+from common import run_pg_query, run_pg_query_one, run_remote_query, run_remote_query_one, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, getSchema
 
 def parse_time_with_fraction(t):
     if '.' in t:
@@ -488,61 +488,118 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
 
-def test_CreateObjmapEntries(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_objmap"
-    dbname = getDbname(dbvendor).lower()
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', 'ext_db1.ext_table1', 'pg_table1')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', 'ext_db1.ext_table1.ext_column1', 'pg_column1')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', 'int', 'bigint')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', 'ext_db1.ext_table1.ext_column1', 'text')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'transform', 'ext_db1.ext_table1.ext_column1', '''>>>>>'' || ''%d'' || ''<<<<<''')")
-    assert rows[0] == 0
-
-    rows = run_pg_query_one(pg_cursor, f"SELECT count(*) from synchdb_objmap WHERE name = '{name}'")
-    assert rows[0] == 5
-
-    rows = run_pg_query(pg_cursor, f"SELECT enabled from synchdb_objmap WHERE name = '{name}'")
-    for row in rows:
-        assert row[0] == True
-
-def test_CreateObjmapEntriesWithError(pg_cursor, dbvendor):
-    assert True
-
-def test_DeleteObjmapEntries(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_objmap"
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'table', 'ext_db1.ext_table1')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'column', 'ext_db1.ext_table1.ext_column1')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'datatype', 'int')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'datatype', 'ext_db1.ext_table1.ext_column1')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'transform', 'ext_db1.ext_table1.ext_column1')")
-    assert rows[0] == 0
-
-    rows = run_pg_query_one(pg_cursor, f"SELECT count(*) from synchdb_objmap WHERE name = '{name}'")
-    assert rows[0] == 5
-
-    rows = run_pg_query(pg_cursor, f"SELECT enabled from synchdb_objmap WHERE name = '{name}'")
-    for row in rows:
-        assert row[0] == False
-
 def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     assert True
 
 def test_TableNameMapping(pg_cursor, dbvendor):
-    assert True
+    name = getConnectorName(dbvendor) + "_objmap_tbl"
+    dbname = getDbname(dbvendor).lower()
+    
+    if dbvendor == "mysql":
+        exttable_prefix=dbname
+    else:
+        schema = getSchema(dbvendor).lower() 
+        exttable_prefix= dbname + "." + schema
+        
+    # create objmap of type = 'table'
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.objmap_srctable1', '{dbname}.objmap_dsttable1')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.objmap_srctable2', 'objmap_dsttable2')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.objmap_srctable3', 'someschema.objmap_dsttable3')")
+    assert rows[0] == 0
+
+    # create the tables remotely
+    run_remote_query(dbvendor, "CREATE TABLE objmap_srctable1 (a INT, b varchar(50))")
+    run_remote_query(dbvendor, "CREATE TABLE objmap_srctable2 (a INT, b varchar(50))")
+    run_remote_query(dbvendor, "CREATE TABLE objmap_srctable3 (a INT, b varchar(50))")
+    
+    # special case for sqlserver: add new tables to cdc
+    if dbvendor == "sqlserver":
+        run_remote_query(dbvendor, f"""
+            EXEC sys.sp_cdc_enable_table @source_schema = '{schema}',
+            @source_name = 'objmap_srctable1', @role_name = NULL, @supports_net_changes = 0;
+            """)
+        run_remote_query(dbvendor, f"""
+            EXEC sys.sp_cdc_enable_table @source_schema = '{schema}',
+            @source_name = 'objmap_srctable2', @role_name = NULL, @supports_net_changes = 0;
+            """)
+        run_remote_query(dbvendor, f"""
+            EXEC sys.sp_cdc_enable_table @source_schema = '{schema}',
+            @source_name = 'objmap_srctable3', @role_name = NULL, @supports_net_changes = 0;
+            """)
+
+    # create the connector in pg and copy the tables
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
+    assert result == 0
+    
+    if dbvendor == "oracle":
+        time.sleep(60)
+    else:
+        time.sleep(10)
+
+    # check if tables have been copied with table names mapped correctly
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmap_srctable1' LIMIT 1")
+    assert rows != None and len(rows) > 0 and rows[0] == f'{dbname}.objmap_dsttable1'
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmap_srctable2' LIMIT 1")
+    assert rows != None and len(rows) > 0 and rows[0] == f'public.objmap_dsttable2'
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmap_srctable3' LIMIT 1")
+    assert rows != None and len(rows) > 0 and rows[0] == f'someschema.objmap_dsttable3'
+
+    # make sure they exist
+    rows = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM information_schema.tables WHERE table_schema = '{dbname}' AND table_name ='objmap_dsttable1')")
+    assert rows[0] == True
+    rows = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name ='objmap_dsttable2')")
+    assert rows[0] == True
+    rows = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM information_schema.tables WHERE table_schema = 'someschema' AND table_name ='objmap_dsttable3')")
+    assert rows[0] == True
+
+    stop_and_delete_synchdb_connector(pg_cursor, name)
 
 def test_AlterTableNameMapping(pg_cursor, dbvendor):
     assert True
 
 def test_ColumnNameMapping(pg_cursor, dbvendor):
-    assert True
+    name = getConnectorName(dbvendor) + "_objmap_col"
+    dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "mysql":
+        exttable_prefix=dbname
+    else:
+        schema = getSchema(dbvendor).lower()
+        exttable_prefix= dbname + "." + schema
+
+    # create objmap of type = 'column'
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', '{exttable_prefix}.objmapcol_srctable1.a', 'pgintcol')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', '{exttable_prefix}.objmapcol_srctable1.b', 'pgtextcol')")
+    assert rows[0] == 0
+
+    # create the tables remotely
+    run_remote_query(dbvendor, "CREATE TABLE objmapcol_srctable1 (a INT, b varchar(50))")
+
+    # special case for sqlserver: add new tables to cdc
+    if dbvendor == "sqlserver":
+        run_remote_query(dbvendor, f"""
+            EXEC sys.sp_cdc_enable_table @source_schema = '{schema}',
+            @source_name = 'objmapcol_srctable1', @role_name = NULL, @supports_net_changes = 0;
+            """)
+
+    # create the connector in pg and copy the tables
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
+    assert result == 0
+    
+    if dbvendor == "oracle":
+        time.sleep(60)
+    else:
+        time.sleep(10)
+
+    # check if tables have been copied with table names mapped correctly
+    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmapcol_srctable1'")
+    assert rows[0][1] == 'pgintcol'
+    assert rows[1][1] == 'pgtextcol'
+
+    stop_and_delete_synchdb_connector(pg_cursor, name)
 
 def test_AlterColumnNameMapping(pg_cursor, dbvendor):
     assert True

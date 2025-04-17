@@ -37,6 +37,15 @@ def getDbname(dbvendor):
     else:
         return ORACLE_DB
 
+def getSchema(dbvendor):
+    # returns the remote schema name in example databases
+    if dbvendor == "mysql":
+        return None
+    elif dbvendor == "sqlserver":
+        return "dbo"
+    else:
+        return "c##dbzuser"
+
 def run_pg_query(cursor, query):
     cursor.execute(query)
     if cursor.description:  # Only fetch if query returns results
