@@ -630,9 +630,6 @@ def test_DataTypeMapping(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
 
-def test_DataTypeMappingWithError(pg_cursor, dbvendor):
-    assert True
-
 def test_TransformExpression(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_te"
     dbname = getDbname(dbvendor).lower()
