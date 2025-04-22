@@ -768,7 +768,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(60)
     else:
-        time.sleep(5)
+        time.sleep(10)
         
     rows = run_pg_query(pg_cursor, f"SELECT the_number, the_date, quantity FROM {dbname}.invoices WHERE the_number > 1000000")
     assert len(rows) > 0
