@@ -39,6 +39,8 @@ SELECT synchdb_add_objmap('oracleconn', 'datatype', 'number', 'bigint');
 SELECT synchdb_add_objmap('oracleconn', 'datatype', 'ext_db1.ext_table3.ext_column1', 'varchar');
 SELECT synchdb_add_objmap('oracleconn', 'transform', 'ext_db1.ext_table3.ext_column1', '''>>>>>'' || ''%d'' || ''<<<<<''');
 
+SELECT synchdb_add_objmap('oracleconn', 'notexit', 'notexist', 'notexist');
+
 SELECT * FROM synchdb_objmap;
 
 SELECT synchdb_del_objmap('mysqlconn', 'table', 'ext_db1.ext_table1');

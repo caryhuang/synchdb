@@ -185,6 +185,8 @@ SELECT synchdb_add_objmap('oracleconn', 'transform', 'ext_db1.ext_table3.ext_col
                   0
 (1 row)
 
+SELECT synchdb_add_objmap('oracleconn', 'notexit', 'notexist', 'notexist');
+ERROR:  unsupported object type notexit
 SELECT * FROM synchdb_objmap;
      name      |  objtype  | enabled |             srcobj             |           dstobj           
 ---------------+-----------+---------+--------------------------------+----------------------------
