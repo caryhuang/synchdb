@@ -33,9 +33,18 @@ function teardown_sqlserver()
 function teardown_oracle()
 {
 	echo "tearing down oracle..."
-	id=$(docker ps | grep oracle | awk '{print $1}')
-	docker stop $id
-	docker remove $id
+	docker-compose -f testenv/oracle/synchdb-oracle-test.yaml down
+	#id=$(docker ps | grep oracle | awk '{print $1}')
+	#docker stop $id
+	#docker remove $id
+	exit 0
+}
+
+function teardown_hammerdb()
+{
+	echo "tearing down hammerdb..."
+	docker stop	hammerdb
+	docker rm hammerdb
 	exit 0
 }
 
@@ -52,6 +61,9 @@ function teardown_remotedb()
 			;;
 		"oracle")
 			teardown_oracle
+			;;
+		"hammerdb")
+			teardown_hammerdb
 			;;
 		*)
 			echo "$dbtype not supported"

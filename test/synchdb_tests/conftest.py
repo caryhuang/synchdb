@@ -25,7 +25,11 @@ def pg_instance(request):
     
     conf_file = os.path.join(data_dir, "postgresql.conf")
     with open(conf_file, "a") as f:
-        f.write("\nlog_min_messages = debug1\n")
+#        f.write("\nlog_min_messages = debug1\n")
+        f.write("\nsynchdb.naptime = 10\n")
+        f.write("\nsynchdb.dbz_batch_size= 16384\n")
+        f.write("\nsynchdb.dbz_queue_size= 32768\n")
+        f.write("\nsynchdb.jvm_max_heap_size= 2048\n")
 
     # Start Postgres
     #print("[setup] setting up postgresql for test...")
@@ -85,18 +89,27 @@ def pg_cursor(pg_instance):
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--dbvendor", action="store", default="all",
+        "--dbvendor", action="store", default="mysql",
         help="Source database vendor to test against (mysql, sqlserver, oracle)"
+    )
+    parser.addoption(
+        "--tpccmode", action="store", default="serial",
+        help="tpcc running mode, serial or parallel"
     )
 
 @pytest.fixture(scope="session")
 def dbvendor(pytestconfig):
     return pytestconfig.getoption("dbvendor")
 
+@pytest.fixture(scope="session")
+def tpccmode(pytestconfig):
+    return pytestconfig.getoption("tpccmode")
+
 @pytest.fixture(scope="session", autouse=True)
 def setup_remote_instance(dbvendor, request):
     env = os.environ.copy()
     env["DBTYPE"] = dbvendor
+    env["WHICH"] = "n/a"
 
     #print(f"[setup] setting up heterogeneous database {dbvendor}...")
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
@@ -105,8 +118,29 @@ def setup_remote_instance(dbvendor, request):
 
     teardown_remote_instance(dbvendor)
 
+@pytest.fixture(scope="session")
+def hammerdb(dbvendor):
+    env = os.environ.copy()
+    env["DBTYPE"] = "hammerdb"
+    env["WHICH"] = dbvendor
+
+    subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "network", "create", "tpccnet"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "network", "connect", "tpccnet", f"{dbvendor}"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "network", "connect", "tpccnet", "hammerdb"], check=True, stdout=subprocess.DEVNULL)
+    
+    yield
+    
+    subprocess.run(["docker", "network", "disconnect", "tpccnet", f"{dbvendor}"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "network", "disconnect", "tpccnet", "hammerdb"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "network", "rm", "tpccnet"], check=True, stdout=subprocess.DEVNULL)
+    teardown_remote_instance("hammerdb")
+
 def teardown_remote_instance(dbvendor):
     env = os.environ.copy()
     env["DBTYPE"] = dbvendor
 
     subprocess.run(["bash", "./ci/teardown-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
+
+
+

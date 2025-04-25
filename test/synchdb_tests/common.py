@@ -150,15 +150,7 @@ def run_remote_query(where, query):
                 rows.append(tuple(cols))
         
         elif where == "sqlserver":
-            container_id = subprocess.check_output(
-            "docker ps | grep sqlserver | awk '{print $1}'",
-            shell=True, text=True
-            ).strip()
-
-            if not container_id:
-                raise RuntimeError("No running SQL Server container found.")
-
-            result = subprocess.check_output(["docker", "exec", "-i", f"{container_id}", "/opt/mssql-tools18/bin/sqlcmd", f"-U{SQLSERVER_USER}", f"-P{SQLSERVER_PASS}", "-d", f"{SQLSERVER_DB}", "-C", "-h", "-1", "-W", "-s", "\t", "-Q", f"{query}"], text=True).strip()
+            result = subprocess.check_output(["docker", "exec", "-i", "sqlserver", "/opt/mssql-tools18/bin/sqlcmd", f"-U{SQLSERVER_USER}", f"-P{SQLSERVER_PASS}", "-d", f"{SQLSERVER_DB}", "-C", "-h", "-1", "-W", "-s", "\t", "-Q", f"{query}"], text=True).strip()
             
             rows = []
             for line in result.splitlines():
@@ -168,14 +160,6 @@ def run_remote_query(where, query):
                 cols = line.split("\t")
                 rows.append(tuple(cols))
         else:
-            container_id = subprocess.check_output(
-            "docker ps | grep oracle | awk '{print $1}'",
-            shell=True, text=True
-            ).strip()
-
-            if not container_id:
-                raise RuntimeError("No running SQL Server container found.")
-            
             sql = f"""
             SET HEADING OFF;
             SET FEEDBACK OFF;
@@ -188,7 +172,7 @@ def run_remote_query(where, query):
             exit
             """
             
-            result = subprocess.check_output(["docker", "exec", "-i", f"{container_id}", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_DB}"], input=sql, text=True).strip()
+            result = subprocess.check_output(["docker", "exec", "-i", "oracle", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_DB}"], input=sql, text=True).strip()
 
             rows = []
             for line in result.splitlines():
@@ -205,87 +189,29 @@ def run_remote_query(where, query):
     except Exception as ex:
         print(f"[ERROR] Unexpected error: {ex}")
         raise
-
     
     return rows
 
-def run_remote_query_one(where, query):
+def create_synchdb_connector(cursor, vendor, name, srcdb=None):
+    db = srcdb or {
+        "mysql": MYSQL_DB,
+        "sqlserver": SQLSERVER_DB,
+        "oracle": ORACLE_DB
+    }[vendor]
 
-    print(f"send query to {where}")
-    try:
-        if where == "mysql":
-            container_id = subprocess.check_output(
-            "docker ps | grep mysql | awk '{print $1}'",
-            shell=True, text=True
-            ).strip()
-
-            if not container_id:
-                raise RuntimeError("No running MySQL container found.")
-
-            result = subprocess.check_output(["docker", "exec", "-i", "mysql", "mysql", f"-u{MYSQL_USER}", f"-p{MYSQL_PASS}", "-D", f"{MYSQL_DB}", "-sN", "-e", f"{query}"], text=True).strip()
-            cleanres = result.strip().replace("\r", "").replace("\n", "\t")
-            fields = cleanres.split("\t")
-
-        elif where == "sqlserver":
-            container_id = subprocess.check_output(
-            "docker ps | grep sqlserver | awk '{print $1}'",
-            shell=True, text=True
-            ).strip()
-
-            if not container_id:
-                raise RuntimeError("No running SQL Server container found.")
-
-            result = subprocess.check_output(["docker", "exec", "-i", f"{container_id}", "/opt/mssql-tools18/bin/sqlcmd", f"-U{SQLSERVER_USER}", f"-P{SQLSERVER_PASS}", "-d", f"{SQLSERVER_DB}", "-C", "-h", "-1", "-W", "-s", "\t", "-Q", f"{query}"], text=True).strip()
-            cleanres = "".join(line for line in result.splitlines()if "rows affected" not in line.lower())
-            fields = cleanres.strip().split("\t")
-
-        else:
-            container_id = subprocess.check_output(
-            "docker ps | grep oracle | awk '{print $1}'",
-            shell=True, text=True
-            ).strip()
-
-            if not container_id:
-                raise RuntimeError("No running Oracle container found.")
-            
-            sql = f"""
-            SET HEADING OFF;
-            SET FEEDBACK OFF;
-            SET PAGESIZE 0;
-            {query};
-            exit
-            """
-            
-            result = subprocess.check_output(["docker", "exec", "-i", f"{container_id}", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_DB}"], input=sql, text=True).strip()
-            
-            cleanres=result
-            fields = cleanres.split()
-
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Command failed with return code {e.returncode}")
-        print(f"[ERROR] Output:\n{e.output}")
-        raise
-
-    except Exception as ex:
-        print(f"[ERROR] Unexpected error: {ex}")
-        raise
-
-    return tuple(fields)
-
-def create_synchdb_connector(cursor, vendor, name):
     if vendor == "mysql":
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{MYSQL_HOST}', {MYSQL_PORT}, '{MYSQL_USER}', '{MYSQL_PASS}', '{MYSQL_DB}', 'postgres', 'null', 'mysql');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{MYSQL_HOST}', {MYSQL_PORT}, '{MYSQL_USER}', '{MYSQL_PASS}', '{db}', 'postgres', 'null', 'mysql');")
 
     elif vendor == "sqlserver":
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{SQLSERVER_HOST}', {SQLSERVER_PORT}, '{SQLSERVER_USER}', '{SQLSERVER_PASS}', '{SQLSERVER_DB}', 'postgres', 'null', 'sqlserver');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{SQLSERVER_HOST}', {SQLSERVER_PORT}, '{SQLSERVER_USER}', '{SQLSERVER_PASS}', '{db}', 'postgres', 'null', 'sqlserver');")
 
     else:
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{ORACLE_DB}', 'postgres', 'null', 'oracle');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', 'postgres', 'null', 'oracle');")
 
     return result
 
-def create_and_start_synchdb_connector(cursor, vendor, name, mode):
-    create_synchdb_connector(cursor, vendor, name)
+def create_and_start_synchdb_connector(cursor, vendor, name, mode, srcdb=None):
+    create_synchdb_connector(cursor, vendor, name, srcdb)
     row = run_pg_query_one(cursor, f"SELECT synchdb_start_engine_bgw('{name}', '{mode}')")
     return row[0]
 
@@ -301,4 +227,3 @@ def drop_default_pg_schema(cursor, vendor):
         row = run_pg_query_one(cursor, f"DROP SCHEMA testdb CASCADE")
     else:
         row = run_pg_query_one(cursor, f"DROP SCHEMA free CASCADE")
-
