@@ -38,6 +38,7 @@ def test_Insert(pg_cursor, dbvendor):
         time.sleep(10)
    
     run_remote_query(dbvendor, "INSERT INTO inserttable (a, b) VALUES (1, 'Hello');")
+    run_remote_query(dbvendor, "COMMIT")
 
     if dbvendor == "oracle":
         time.sleep(60)
@@ -99,6 +100,7 @@ def test_Update(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "INSERT INTO updatetable (a, b) VALUES (1, 'Hello');")
     run_remote_query(dbvendor, "UPDATE updatetable SET a = 2")
     run_remote_query(dbvendor, "UPDATE updatetable SET b = 'olleH'")
+    run_remote_query(dbvendor, "COMMIT")
 
     if dbvendor == "oracle":
         time.sleep(60)
@@ -160,6 +162,7 @@ def test_Delete(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (1, 'Hello');")
     run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (2, 'SynchDB');")
     run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (3, 'Pytest');")
+    run_remote_query(dbvendor, "COMMIT")
 
     if dbvendor == "oracle":
         time.sleep(60)
