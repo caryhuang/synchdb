@@ -18,7 +18,7 @@ def test_Insert(pg_cursor, dbvendor):
     elif dbvendor == "sqlserver":
         query = """
         CREATE TABLE inserttable(
-            a NUMBER PRIMARY KEY,
+            a INT NOT NULL PRIMARY KEY,
             b VARCHAR(255));
         EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'inserttable', @role_name = NULL,
@@ -36,8 +36,9 @@ def test_Insert(pg_cursor, dbvendor):
         time.sleep(30)
     else:
         time.sleep(10)
-
+   
     run_remote_query(dbvendor, "INSERT INTO inserttable (a, b) VALUES (1, 'Hello');")
+
     if dbvendor == "oracle":
         time.sleep(60)
     else:
@@ -76,7 +77,7 @@ def test_Update(pg_cursor, dbvendor):
     elif dbvendor == "sqlserver":
         query = """
         CREATE TABLE updatetable(
-            a NUMBER PRIMARY KEY,
+            a INT NOT NULL PRIMARY KEY,
             b VARCHAR(255));
         EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'updatetable', @role_name = NULL,
@@ -94,7 +95,7 @@ def test_Update(pg_cursor, dbvendor):
         time.sleep(30)
     else:
         time.sleep(10)
-
+    
     run_remote_query(dbvendor, "INSERT INTO updatetable (a, b) VALUES (1, 'Hello');")
     run_remote_query(dbvendor, "UPDATE updatetable SET a = 2")
     run_remote_query(dbvendor, "UPDATE updatetable SET b = 'olleH'")
@@ -137,7 +138,7 @@ def test_Delete(pg_cursor, dbvendor):
     elif dbvendor == "sqlserver":
         query = """
         CREATE TABLE deletetable(
-            a NUMBER PRIMARY KEY,
+            a INT NOT NULL PRIMARY KEY,
             b VARCHAR(255));
         EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'deletetable', @role_name = NULL,
