@@ -373,8 +373,8 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
                 bfile_col, blob_col, clob_col, nclob_col, rowid_col, urowid_col 
                 FROM mytable
                 """)
-    assert len(rows) > 0
     assert len(extrows) > 0
+    assert len(rows) > 0
     assert len(rows) == len(extrows)
     if dbvendor == "mysql":
         for row, extrow in zip(rows, extrows):

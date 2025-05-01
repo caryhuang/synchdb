@@ -37,9 +37,8 @@ def test_Insert(pg_cursor, dbvendor):
     else:
         time.sleep(10)
    
-    run_remote_query(dbvendor, "INSERT INTO inserttable (a, b) VALUES (1, 'Hello');")
-    run_remote_query(dbvendor, "COMMIT")
-
+    out=run_remote_query(dbvendor, "INSERT INTO inserttable (a, b) VALUES (1, 'Hello')")
+    out=run_remote_query(dbvendor, "COMMIT")
     if dbvendor == "oracle":
         time.sleep(60)
     else:
@@ -47,8 +46,8 @@ def test_Insert(pg_cursor, dbvendor):
     
     extrows = run_remote_query(dbvendor, f"SELECT a, b FROM inserttable")
     rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.inserttable")
-    assert len(rows) > 0
     assert len(extrows) > 0
+    assert len(rows) > 0
     assert len(extrows) == len(rows)
 
     for row, extrow in zip(rows, extrows):
@@ -93,11 +92,12 @@ def test_Update(pg_cursor, dbvendor):
 
     run_remote_query(dbvendor, query)
     if dbvendor == "oracle":
+        run_remote_query(dbvendor, "ALTER TABLE updatetable ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
         time.sleep(30)
     else:
         time.sleep(10)
     
-    run_remote_query(dbvendor, "INSERT INTO updatetable (a, b) VALUES (1, 'Hello');")
+    run_remote_query(dbvendor, "INSERT INTO updatetable (a, b) VALUES (1, 'Hello')")
     run_remote_query(dbvendor, "UPDATE updatetable SET a = 2")
     run_remote_query(dbvendor, "UPDATE updatetable SET b = 'olleH'")
     run_remote_query(dbvendor, "COMMIT")
@@ -109,8 +109,8 @@ def test_Update(pg_cursor, dbvendor):
 
     extrows = run_remote_query(dbvendor, f"SELECT * FROM updatetable")
     rows = run_pg_query(pg_cursor, f"SELECT * FROM {dbname}.updatetable")
-    assert len(rows) > 0
     assert len(extrows) > 0
+    assert len(rows) > 0
     assert len(extrows) == len(rows)
 
     for row, extrow in zip(rows, extrows):
@@ -159,9 +159,9 @@ def test_Delete(pg_cursor, dbvendor):
     else:
         time.sleep(10)
 
-    run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (1, 'Hello');")
-    run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (2, 'SynchDB');")
-    run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (3, 'Pytest');")
+    run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (1, 'Hello')")
+    run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (2, 'SynchDB')")
+    run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (3, 'Pytest')")
     run_remote_query(dbvendor, "COMMIT")
 
     if dbvendor == "oracle":
@@ -171,8 +171,8 @@ def test_Delete(pg_cursor, dbvendor):
 
     extrows = run_remote_query(dbvendor, f"SELECT * FROM deletetable")
     rows = run_pg_query(pg_cursor, f"SELECT * FROM {dbname}.deletetable")
-    assert len(rows) > 0 and len(rows) == 3
     assert len(extrows) > 0 and len(extrows) == 3
+    assert len(rows) > 0 and len(rows) == 3
     assert len(extrows) == len(rows)
 
     for row, extrow in zip(rows, extrows):
