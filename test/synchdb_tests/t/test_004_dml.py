@@ -155,6 +155,7 @@ def test_Delete(pg_cursor, dbvendor):
 
     run_remote_query(dbvendor, query)
     if dbvendor == "oracle":
+        run_remote_query(dbvendor, "ALTER TABLE deletetable ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
         time.sleep(30)
     else:
         time.sleep(10)
