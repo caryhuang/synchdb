@@ -107,8 +107,8 @@ def test_Update(pg_cursor, dbvendor):
     else:
         time.sleep(5)
 
-    extrows = run_remote_query(dbvendor, f"SELECT * FROM updatetable")
-    rows = run_pg_query(pg_cursor, f"SELECT * FROM {dbname}.updatetable")
+    extrows = run_remote_query(dbvendor, f"SELECT a, b FROM updatetable")
+    rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.updatetable")
     assert len(extrows) > 0
     assert len(rows) > 0
     assert len(extrows) == len(rows)
@@ -170,8 +170,8 @@ def test_Delete(pg_cursor, dbvendor):
     else:
         time.sleep(5)
 
-    extrows = run_remote_query(dbvendor, f"SELECT * FROM deletetable")
-    rows = run_pg_query(pg_cursor, f"SELECT * FROM {dbname}.deletetable")
+    extrows = run_remote_query(dbvendor, f"SELECT a, b FROM deletetable")
+    rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.deletetable")
     assert len(extrows) > 0 and len(extrows) == 3
     assert len(rows) > 0 and len(rows) == 3
     assert len(extrows) == len(rows)
@@ -186,8 +186,8 @@ def test_Delete(pg_cursor, dbvendor):
     else:
         time.sleep(5)
 
-    extrows = run_remote_query(dbvendor, f"SELECT * FROM deletetable")
-    rows = run_pg_query(pg_cursor, f"SELECT * FROM {dbname}.deletetable")
+    extrows = run_remote_query(dbvendor, f"SELECT a, b FROM deletetable")
+    rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.deletetable")
     assert len(rows) > 0 and len(rows) == 2
     assert len(extrows) > 0 and len(extrows) == 2
     assert len(extrows) == len(rows)
