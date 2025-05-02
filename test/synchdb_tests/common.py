@@ -139,18 +139,23 @@ def verify_default_type_mappings(exttype, pgtype, dbvendor):
     print(f"type unmatched: {exttype} : {pgtype} for {dbvendor}")
     return False
 
-def run_remote_query(where, query):
-    
+def run_remote_query(where, query, srcdb=None):
+    db = srcdb or {
+        "mysql": MYSQL_DB,
+        "sqlserver": SQLSERVER_DB,
+        "oracle": ORACLE_DB
+    }[where]
+
     try:
         if where == "mysql":
-            result = subprocess.check_output(["docker", "exec", "-i", "mysql", "mysql", f"-u{MYSQL_USER}", f"-p{MYSQL_PASS}", "-D", f"{MYSQL_DB}", "-sN", "-e", f"{query}"], text=True , env={"LC_ALL": "C"}).strip()
+            result = subprocess.check_output(["docker", "exec", "-i", "mysql", "mysql", f"-u{MYSQL_USER}", f"-p{MYSQL_PASS}", "-D", f"{db}", "-sN", "-e", f"{query}"], text=True , env={"LC_ALL": "C"}).strip()
             rows = []
             for line in result.splitlines():
                 cols = line.strip().split("\t")
                 rows.append(tuple(cols))
         
         elif where == "sqlserver":
-            result = subprocess.check_output(["docker", "exec", "-i", "sqlserver", "/opt/mssql-tools18/bin/sqlcmd", f"-U{SQLSERVER_USER}", f"-P{SQLSERVER_PASS}", "-d", f"{SQLSERVER_DB}", "-C", "-h", "-1", "-W", "-s", "\t", "-Q", f"{query}"], text=True).strip()
+            result = subprocess.check_output(["docker", "exec", "-i", "sqlserver", "/opt/mssql-tools18/bin/sqlcmd", f"-U{SQLSERVER_USER}", f"-P{SQLSERVER_PASS}", "-d", f"{db}", "-C", "-h", "-1", "-W", "-s", "\t", "-Q", f"{query}"], text=True).strip()
             
             rows = []
             for line in result.splitlines():
@@ -172,7 +177,7 @@ def run_remote_query(where, query):
             exit
             """
             
-            result = subprocess.check_output(["docker", "exec", "-i", "oracle", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_DB}"], input=sql, text=True).strip()
+            result = subprocess.check_output(["docker", "exec", "-i", "oracle", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
 
             rows = []
             for line in result.splitlines():

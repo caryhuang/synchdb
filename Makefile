@@ -84,7 +84,7 @@ install_dbz:
 	install -d $(libdir)/dbz_engine
 	cp -rp $(DBZ_ENGINE_PATH)/target/* $(libdir)/dbz_engine
 
-.PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck dbcheck-tpcc mysqlcheck-tpcc sqlserver-tpcc oracle-tpcc
+.PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck dbcheck-tpcc mysqlcheck-tpcc sqlservercheck-tpcc oraclecheck-tpcc
 dbcheck:
 	@command -v pytest >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
@@ -110,11 +110,11 @@ sqlservercheck:
 oraclecheck:
 	$(MAKE) dbcheck DB=oracle
 
-mysqlcheck-tpcc:
+mysqlcheck-benchmark:
 	$(MAKE) dbcheck-tpcc DB=mysql
 
-sqlserver-tpcc:
+sqlservercheck-benchmark:
 	$(MAKE) dbcheck-tpcc DB=sqlserver
 
-oracle-tpcc:
+oraclecheck-benchmark:
 	$(MAKE) dbcheck-tpcc DB=oracle

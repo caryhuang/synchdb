@@ -1,6 +1,6 @@
 dbset db mssqls
 diset connection mssqls_server sqlserver
-diset connection mssqls_port 1433
+diset connection mssqls_linux_server sqlserver
 diset connection mssqls_port 1433
 diset connection mssqls_uid sa
 diset connection mssqls_pass Password!
