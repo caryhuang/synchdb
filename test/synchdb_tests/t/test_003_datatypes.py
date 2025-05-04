@@ -4,7 +4,7 @@ from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from binascii import unhexlify
 
-from common import run_pg_query, run_pg_query_one, run_remote_query, run_remote_query_one, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, getSchema, drop_default_pg_schema
+from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, getSchema, drop_default_pg_schema
 
 def parse_time_with_fraction(t):
     if '.' in t:
@@ -373,8 +373,8 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
                 bfile_col, blob_col, clob_col, nclob_col, rowid_col, urowid_col 
                 FROM mytable
                 """)
-    assert len(rows) > 0
     assert len(extrows) > 0
+    assert len(rows) > 0
     assert len(rows) == len(extrows)
     if dbvendor == "mysql":
         for row, extrow in zip(rows, extrows):

@@ -84,7 +84,7 @@ install_dbz:
 	install -d $(libdir)/dbz_engine
 	cp -rp $(DBZ_ENGINE_PATH)/target/* $(libdir)/dbz_engine
 
-.PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck
+.PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck dbcheck-tpcc mysqlcheck-tpcc sqlservercheck-tpcc oraclecheck-tpcc
 dbcheck:
 	@command -v pytest >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
@@ -92,6 +92,14 @@ dbcheck:
 	@echo "Running tests against dbvendor=$(DB)"
 	PYTHONPATH=./test/synchdb_tests/ pytest -v -s --dbvendor=$(DB) --capture=tee-sys ./test/synchdb_tests/
 	rm -r .pytest_cache ./test/synchdb_tests/__pycache__ ./test/synchdb_tests/t/__pycache__
+
+dbcheck-tpcc:
+	@command -v pytest >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
+	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
+	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo >&2 "❌ docker-compose not found in PATH"; exit 1; }
+	@echo "Running hammerdb based tpcc tests against dbvendor=$(DB)"
+	PYTHONPATH=./test/synchdb_tests/ pytest -v -s --dbvendor=$(DB) --tpccmode=serial --capture=tee-sys ./test/hammerdb/
+	rm -r .pytest_cache ./test/hammerdb/__pycache__
 
 mysqlcheck:
 	$(MAKE) dbcheck DB=mysql
@@ -101,3 +109,12 @@ sqlservercheck:
 
 oraclecheck:
 	$(MAKE) dbcheck DB=oracle
+
+mysqlcheck-benchmark:
+	$(MAKE) dbcheck-tpcc DB=mysql
+
+sqlservercheck-benchmark:
+	$(MAKE) dbcheck-tpcc DB=sqlserver
+
+oraclecheck-benchmark:
+	$(MAKE) dbcheck-tpcc DB=oracle

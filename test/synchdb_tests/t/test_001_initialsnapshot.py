@@ -1,7 +1,7 @@
 import common
 import time
 from datetime import datetime
-from common import run_pg_query, run_pg_query_one, run_remote_query, run_remote_query_one, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings
+from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings
 
 def test_ConnectorCreate(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)

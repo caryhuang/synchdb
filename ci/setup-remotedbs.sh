@@ -6,6 +6,7 @@ IFS=$'\n\t'
 
 # read pg major version, error if not provided
 DBTYPE=${DBTYPE:?please provide database type}
+WHICH=${WHICH:?please provide which hammerdb type, or n/a}
 
 # get codename from release file
 . /etc/os-release
@@ -26,6 +27,7 @@ function setup_mysql()
 GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'mysqluser'@'%';
 GRANT replication client ON *.* TO 'mysqluser'@'%';
 GRANT replication slave ON *.* TO 'mysqluser'@'%';
+GRANT all privileges on tpcc.* to mysqluser;
 GRANT RELOAD ON *.* TO 'mysqluser'@'%';
 FLUSH PRIVILEGES;
 EOF
@@ -39,27 +41,25 @@ function setup_sqlserver()
 	docker-compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml up -d
 	echo "sleep to give container time to startup..."
 	sleep 30  # Give containers time to fully start
-	id=$(docker ps | grep sqlserver | awk '{print $1}')
-	docker cp ./testenv/sqlserver/inventory.sql $id:/
-	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION" > /dev/null
-	docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql > /dev/null
+	docker cp ./testenv/sqlserver/inventory.sql sqlserver:/
+	docker exec -i sqlserver /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION" > /dev/null
+	docker exec -i sqlserver /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql > /dev/null
 	exit 0
 }
 
 function setup_oracle()
 {
 	echo "setting up oracle..."
-	docker run -d -p 1521:1521 container-registry.oracle.com/database/free:latest
+	docker-compose -f testenv/oracle/synchdb-oracle-test.yaml up -d
 	echo "sleep to give container time to startup..."
     sleep 30  # Give containers time to fully start
-	id=$(docker ps | grep oracle | awk '{print $1}')
-	docker exec -i $id mkdir /opt/oracle/oradata/recovery_area
-	docker exec -i $id sqlplus / as sysdba <<EOF
+	docker exec -i oracle mkdir /opt/oracle/oradata/recovery_area
+	docker exec -i oracle sqlplus / as sysdba <<EOF
 Alter user sys identified by oracle;
 exit;
 EOF
 	sleep 1
-	docker exec -i $id sqlplus /nolog <<EOF
+	docker exec -i oracle sqlplus /nolog <<EOF
 CONNECT sys/oracle as sysdba;
 alter system set db_recovery_file_dest_size = 30G;
 alter system set db_recovery_file_dest = '/opt/oracle/oradata/recovery_area' scope=spfile;
@@ -71,20 +71,20 @@ archive log list;
 exit;
 EOF
 	sleep 1
-	docker exec -i $id sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<EOF
+	docker exec -i oracle sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<EOF
 ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
 ALTER PROFILE DEFAULT LIMIT FAILED_LOGIN_ATTEMPTS UNLIMITED;
 exit;
 EOF
-	docker exec -i $id sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<EOF
+	docker exec -i oracle sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<EOF
 CREATE TABLESPACE LOGMINER_TBS DATAFILE '/opt/oracle/oradata/FREE/logminer_tbs.dbf' SIZE 25M REUSE AUTOEXTEND ON MAXSIZE UNLIMITED;
 exit;
 EOF
-	docker exec -i $id sqlplus sys/oracle@//localhost:1521/FREEPDB1 as sysdba <<EOF
+	docker exec -i oracle sqlplus sys/oracle@//localhost:1521/FREEPDB1 as sysdba <<EOF
 CREATE TABLESPACE LOGMINER_TBS DATAFILE '/opt/oracle/oradata/FREE/FREEPDB1/logminer_tbs.dbf' SIZE 25M REUSE AUTOEXTEND ON MAXSIZE UNLIMITED;
 exit;
 EOF
-	docker exec -i $id sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<'EOF'
+	docker exec -i oracle sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<'EOF'
 CREATE USER c##dbzuser IDENTIFIED BY dbz DEFAULT TABLESPACE LOGMINER_TBS QUOTA UNLIMITED ON LOGMINER_TBS CONTAINER=ALL;
 GRANT CREATE SESSION TO c##dbzuser CONTAINER=ALL;
 GRANT SET CONTAINER TO c##dbzuser CONTAINER=ALL;
@@ -121,7 +121,7 @@ ALTER DATABASE ADD LOGFILE GROUP 6 ('/opt/oracle/oradata/FREE/redo06.log') SIZE 
 exit;
 EOF
 
-	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
+	docker exec -i oracle sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
 CREATE TABLE orders (
 order_number NUMBER PRIMARY KEY,
 order_date DATE,
@@ -133,7 +133,7 @@ ALTER TABLE orders ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
 exit;
 EOF
 
-	docker exec -i $id sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
+	docker exec -i oracle sqlplus 'c##dbzuser/dbz@//localhost:1521/FREE' <<EOF
 INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10001, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
 INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10002, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
 INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10003, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
@@ -144,9 +144,22 @@ EOF
 	exit 0
 }
 
+function setup_hammerdb()
+{
+	echo "setting up hammerdb for $which..."
+	docker run -d --name hammerdb tpcorg/hammerdb
+	echo "sleep to give container time to startup..."
+	sleep 5
+	
+	docker cp ./testenv/hammerdb/${which}_buildschema.tcl hammerdb:/buildschema.tcl
+	docker cp ./testenv/hammerdb/${which}_runtpcc.tcl hammerdb:/runtpcc.tcl
+	exit 0
+}
+
 function setup_remotedb()
 {
 	dbtype="$1"
+	which="$2"
 
 	case "$dbtype" in
 		"mysql")
@@ -158,6 +171,9 @@ function setup_remotedb()
 		"oracle")
 			setup_oracle
 			;;
+		"hammerdb")
+			setup_hammerdb $which
+			;;
 		*)
 			echo "$dbtype not supported"
 			exit 1
@@ -165,4 +181,4 @@ function setup_remotedb()
 	esac
 }
 
-setup_remotedb "${DBTYPE}"
+setup_remotedb "${DBTYPE}" "${WHICH}"
