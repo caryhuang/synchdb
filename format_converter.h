@@ -158,6 +158,7 @@ typedef struct dataCacheEntry
 	Oid tableoid;
 	HTAB * typeidhash;
 	HTAB * namejsonposhash;
+	int natts;
 } DataCacheEntry;
 
 typedef struct datatypeHashKey
