@@ -4338,6 +4338,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 		typeidhash = cacheentry->typeidhash;
 		dbzdml->tableoid = cacheentry->tableoid;
 		namejsonposhash = cacheentry->namejsonposhash;
+		dbzdml->natts = cacheentry->natts;
 	}
 	else
 	{
@@ -4396,6 +4397,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 		/* cache tupdesc and save natts for later use */
 		cacheentry->tupdesc = CreateTupleDescCopy(tupdesc);
 		dbzdml->natts = tupdesc->natts;
+		cacheentry->natts = dbzdml->natts;
 
 		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 		{
