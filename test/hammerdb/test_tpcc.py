@@ -29,6 +29,8 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
 
     if dbvendor == "mysql":
         subprocess.run(["docker", "exec", "hammerdb", "./hammerdbcli", "auto", "/buildschema.tcl"], check=True) 
+        result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial", srcdb="tpcc")
+        assert result == 0
     elif dbvendor == "sqlserver":
         subprocess.run(["docker", "exec", "-e", "LD_LIBRARY_PATH=/usr/local/unixODBC/lib:/home/instantclient_21_5/", "-e", "TMP=/tmp", "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/mssql-tools18/bin:/opt/mssql-tools18/bin:/usr/local/unixODBC/bin", "hammerdb", "./hammerdbcli", "auto", "/buildschema.tcl"], check=True)
 
@@ -42,12 +44,27 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
         run_remote_query(dbvendor, "EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'orders', @role_name = NULL, @supports_net_changes = 0", srcdb="tpcc")
         run_remote_query(dbvendor, "EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'stock', @role_name = NULL, @supports_net_changes = 0", srcdb="tpcc")
         run_remote_query(dbvendor, "EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'warehouse', @role_name = NULL, @supports_net_changes = 0", srcdb="tpcc")
+        result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial", srcdb="tpcc")
+        assert result == 0
     else:
+        # oracle: drop orders table that were creasted as default. Hammerdb has aconflicting table
+        run_remote_query(dbvendor, "DROP TABLE orders")
+
         subprocess.run(["docker", "exec", "-e", "LD_LIBRARY_PATH=/usr/local/unixODBC/lib:/home/instantclient_21_5/", "-e", "TMP=/tmp", "hammerdb", "./hammerdbcli", "auto", "/buildschema.tcl"], check=True) 
 
-    
-    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial", srcdb="tpcc")
-    assert result == 0
+        # enable update and delete by enabling supplemental log data on all columns
+        run_remote_query(dbvendor, "ALTER TABLE customer ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
+        run_remote_query(dbvendor, "ALTER TABLE district ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
+        run_remote_query(dbvendor, "ALTER TABLE history ADD SUPPLEMENTAL LOG DATA (ALL) COLUMN")
+        run_remote_query(dbvendor, "ALTER TABLE item ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
+        run_remote_query(dbvendor, "ALTER TABLE new_order ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
+        run_remote_query(dbvendor, "ALTER TABLE order_line ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
+        run_remote_query(dbvendor, "ALTER TABLE orders ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
+        run_remote_query(dbvendor, "ALTER TABLE stock ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
+        run_remote_query(dbvendor, "ALTER TABLE warehouse ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
+
+        result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial", srcdb="FREE")
+        assert result == 0
     
     # try to get the first non-zero timestammps from synchdb_stats_view
     loopcnt=0
