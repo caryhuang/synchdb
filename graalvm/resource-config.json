@@ -1,0 +1,8 @@
+{
+  "resources": [
+    {
+      "pattern": "com/mysql/cj/LocalizedErrorMessages.*"
+    }
+  ]
+}
+

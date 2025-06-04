@@ -1,0 +1,79 @@
+[
+  {
+    "name": "org.apache.kafka.connect.json.JsonConverter",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "io.debezium.storage.file.history.FileSchemaHistory",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true
+  },
+  {
+    "name": "org.apache.kafka.connect.storage.FileOffsetBackingStore",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true
+  },
+  {
+    "name": "com.mysql.cj.exceptions.WrongArgumentException",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "com.mysql.cj.exceptions.CJException",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "io.debezium.connector.oracle.OracleConnector",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "io.debezium.storage.kafka.history.KafkaSchemaHistory",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "io.debezium.schema.SchemaTopicNamingStrategy",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "io.debezium.connector.oracle.OracleSourceInfoStructMaker",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "io.debezium.connector.oracle.logminer.LogMinerAdapter",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "oracle.jdbc.OracleDriver",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "oracle.jdbc.driver.OracleDriver",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "io.debezium.engine.spi.OffsetCommitPolicy$PeriodicCommitOffsetPolicy",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "io.debezium.connector.oracle.OracleConnectorTask",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  }
+]
+
