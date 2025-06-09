@@ -181,6 +181,7 @@ typedef struct _ConnectionInfo
 	char srcdb[SYNCHDB_CONNINFO_DB_NAME_SIZE];
 	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE];
     char table[SYNCHDB_CONNINFO_TABLELIST_SIZE];
+    char snapshottable[SYNCHDB_CONNINFO_TABLELIST_SIZE];
     bool active;
     bool isShcemaSync;
     bool isOraCompat; /* added to support ivorysql's oracle compatible mode */

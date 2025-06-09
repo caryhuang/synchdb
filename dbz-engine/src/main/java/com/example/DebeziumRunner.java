@@ -96,9 +96,10 @@ public class DebeziumRunner {
 		private String sslTruststore;
 		private String sslTruststorePass;
 		private int logLevel;
+		private String snapshottable;
 
 		/* constructor requires all required parameters for a connector to work */
-		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshotMode)
+		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode)
 		{
 			this.connectorName = connectorName;
 			this.connectorType = connectorType;
@@ -108,6 +109,7 @@ public class DebeziumRunner {
 			this.password = password;
 			this.database = database;
 			this.table = table;
+			this.snapshottable = snapshottable;
 			this.snapshotMode = snapshotMode;
 		}
 		public MyParameters setBatchSize(int batchSize)
@@ -231,6 +233,7 @@ public class DebeziumRunner {
 			logger.warn("sslTruststore = " + this.sslTruststore);
 			logger.warn("sslTruststorePass = " + this.sslTruststorePass);
 			logger.warn("logLevel = " + this.logLevel);
+			logger.warn("snapshottable = " + this.snapshottable);
 		}
 
 	}
@@ -530,6 +533,51 @@ public class DebeziumRunner {
 		else
 			props.setProperty("snapshot.fetch.size", String.valueOf(myParameters.snapshotFetchSize));
 
+		if (myParameters.snapshottable.equals("null"))
+			logger.warn("snapshottable is null - skip setting snapshot.include.collection.list property");
+		else if (myParameters.table.startsWith("file:"))
+        {
+            logger.warn("reading snapshot table list from file...");
+            String filepath = myParameters.table.substring(5);
+            File tablefile = new File(filepath);
+            if (tablefile.exists())
+            {
+                ObjectMapper objmapper = new ObjectMapper();
+                try
+                {
+                    JsonNode js = objmapper.readTree(tablefile);
+                    if (js.has("snapshot_table_list") && js.get("snapshot_table_list").isArray())
+                    {
+                        JsonNode tableListNode = js.get("snapshot_table_list");
+                        StringBuilder snapshottablelist = new StringBuilder();
+                        for (JsonNode table : tableListNode)
+                        {
+                            snapshottablelist.append(table.asText()).append(",");
+                        }
+                        if (snapshottablelist.length() > 0)
+                            snapshottablelist.setLength(snapshottablelist.length() - 1);
+
+                        logger.warn("snapshot tables to set: " + snapshottablelist.toString());
+                        props.setProperty("snapshot.include.collection.list", snapshottablelist.toString());
+                    }
+                    else
+                    {
+                        logger.warn("file has no array named 'snapshot_table_list' - skip setting snapshot.include.collection.list property");
+                    }
+                }
+                catch (IOException e)
+                {
+                    logger.warn("snapshot table file fails to parse - skip setting snapshot.include.collection.list property");
+                }
+            }
+            else
+            {
+                logger.warn("snapshot table file does not exist - skip setting snapshot.include.collection.list property");
+            }
+        }
+		else
+			props.setProperty("snapshot.include.collection.list", myParameters.snapshottable);
+
 		props.setProperty("database.hostname", myParameters.hostname);
 		props.setProperty("database.port", String.valueOf(myParameters.port));
 		props.setProperty("database.user", myParameters.user);
@@ -557,7 +605,7 @@ public class DebeziumRunner {
 		props.setProperty("min.row.count.to.stream.results", String.valueOf(myParameters.snapshotMinRowToStreamResults));
 
 		//props.setProperty("read.only", "true");
-		//props.setProperty("snapshot.include.collection.list", "");
+		
 
 		logger.info("Hello from DebeziumRunner class!");
 
