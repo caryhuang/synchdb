@@ -869,7 +869,7 @@ static int
 dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode)
 {
 	jmethodID mid, paramConstruct;
-	jstring jHostname, jUser, jPassword, jDatabase, jTable, jName, jSnapshot;
+	jstring jHostname, jUser, jPassword, jDatabase, jTable, jSnapshotTable, jName, jSnapshot;
 	jthrowable exception;
 	jclass myParametersClass;
 	jobject myParametersObj;
@@ -896,7 +896,8 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 
 	paramConstruct = (*env)->GetMethodID(env, myParametersClass, "<init>",
 			"(Lcom/example/DebeziumRunner;Ljava/lang/String;ILjava/lang/String;ILjava/lang/String;"
-			"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+			"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
+			"Ljava/lang/String;)V");
 	if (paramConstruct == NULL)
 	{
 		elog(WARNING, "failed to find myParameters Constructor");
@@ -909,12 +910,13 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	jPassword = (*env)->NewStringUTF(env, connInfo->pwd);
 	jDatabase = (*env)->NewStringUTF(env, connInfo->srcdb);
 	jTable = (*env)->NewStringUTF(env, connInfo->table);
+	jSnapshotTable = (*env)->NewStringUTF(env, connInfo->snapshottable);
 	jName = (*env)->NewStringUTF(env, connInfo->name);
 	jSnapshot = (*env)->NewStringUTF(env, snapshotMode);
 
 	myParametersObj = (*env)->NewObject(env, myParametersClass, paramConstruct, obj,
 			jName, connectorType, jHostname, connInfo->port, jUser, jPassword,
-			jDatabase, jTable, jSnapshot);
+			jDatabase, jTable, jSnapshotTable, jSnapshot);
 	if (!myParametersObj)
 	{
 		elog(WARNING, "failed to create MyParameters object");
@@ -1665,13 +1667,14 @@ setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char 
 	}
 
 	elog(LOG, "obtained conninfo from shm: myConnectorId %d, name %s, host %s, port %u, "
-			"user %s, src_db %s, dst_db %s, table %s, connectorType %u (%s), conninfo_name %s"
+			"user %s, src_db %s, dst_db %s, table %s, snapshottable %s, connectorType %u (%s), conninfo_name %s"
 			" snapshotMode %s",
 			myConnectorId, conninfo->name,
 			conninfo->hostname, conninfo->port, conninfo->user,
 			strlen(conninfo->srcdb) > 0 ? conninfo->srcdb : "N/A",
 			conninfo->dstdb,
 			strlen(conninfo->table) > 0 ? conninfo->table : "N/A",
+			strlen(conninfo->snapshottable) > 0 ? conninfo->snapshottable : "N/A",
 			*connectorType, connectorTypeToString(*connectorType),
 			conninfo->name, *snapshotMode);
 
@@ -3543,7 +3546,8 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	text *src_db_text = PG_GETARG_TEXT_PP(5);
 	text *dst_db_text = PG_GETARG_TEXT_PP(6);
 	text *table_text = PG_GETARG_TEXT_PP(7);
-	text *connector_text = PG_GETARG_TEXT_PP(8);
+	text *snapshottable_text = PG_GETARG_TEXT_PP(8);
+	text *connector_text = PG_GETARG_TEXT_PP(9);
 	char *connector = NULL;
 
 	ConnectionInfo connInfo = {0};
@@ -3632,6 +3636,18 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	else
 		strlcpy(connInfo.table, text_to_cstring(table_text), SYNCHDB_CONNINFO_TABLELIST_SIZE);
 
+	/* snapshot table can be empty or NULL */
+	if (VARSIZE(snapshottable_text) - VARHDRSZ == 0)
+		strlcpy(connInfo.snapshottable, "null", SYNCHDB_CONNINFO_TABLELIST_SIZE);
+	else if (VARSIZE(snapshottable_text) - VARHDRSZ > SYNCHDB_CONNINFO_TABLELIST_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("snapshot table cannot be longer than %d",
+						 SYNCHDB_CONNINFO_TABLELIST_SIZE)));
+	else
+		strlcpy(connInfo.snapshottable, text_to_cstring(snapshottable_text),
+				SYNCHDB_CONNINFO_TABLELIST_SIZE);
+
 	if (VARSIZE(connector_text) - VARHDRSZ == 0)
 	{
 		ereport(ERROR,
@@ -3649,7 +3665,8 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	appendStringInfo(&strinfo, "INSERT INTO %s (name, isactive, data)"
 			" VALUES ('%s', %s, jsonb_build_object('hostname', '%s', "
 			"'port', %d, 'user', '%s', 'pwd', pgp_sym_encrypt('%s', '%s'), "
-			"'srcdb', '%s', 'dstdb', '%s', 'table', '%s', 'connector', '%s') );",
+			"'srcdb', '%s', 'dstdb', '%s', 'table', '%s', 'snapshottable', '%s', "
+			"'connector', '%s') );",
 			SYNCHDB_CONNINFO_TABLE,
 			connInfo.name,
 			"false",
@@ -3661,6 +3678,7 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 			connInfo.srcdb,
 			connInfo.dstdb,
 			connInfo.table,
+			connInfo.snapshottable,
 			connector);
 
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));

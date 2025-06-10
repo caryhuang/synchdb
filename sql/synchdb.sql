@@ -2,12 +2,12 @@ CREATE EXTENSION synchdb CASCADE;
 
 \d
 
-SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'mysql');
-SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'postgres', '', 'sqlserver');
-SELECT synchdb_add_conninfo('oracleconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'mydb', 'postgres', '', 'oracle');
-SELECT synchdb_add_conninfo('errorconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'mydb', 'postgres', '', 'nonexist');
+SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'null', 'mysql');
+SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'postgres', 'null', 'null', 'sqlserver');
+SELECT synchdb_add_conninfo('oracleconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'mydb', 'postgres', 'null', 'null', 'oracle');
+SELECT synchdb_add_conninfo('errorconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'mydb', 'postgres', 'null', 'null', 'nonexist');
 
-SELECT name, isactive, data->'hostname', data->'port', data->'user', data->'srcdb', data->'table', data->'connector' FROM synchdb_conninfo;
+SELECT name, isactive, data->'hostname' AS hostname, data->'port' AS port, data->'user' AS user, data->'srcdb' AS srcdb, data->'table' AS table, data->'snapshottable' AS snapshottable, data->'connector' AS connector FROM synchdb_conninfo;
 
 SELECT synchdb_add_extra_conninfo('mysqlconn', 'verufy_ca', 'keystore1', 'keystorepass', 'truststore1', 'truststorepass');
 SELECT synchdb_add_extra_conninfo('sqlserverconn', 'verufy_ca', 'keystore2', 'keystorepass', 'truststore2', 'truststorepass');
@@ -17,9 +17,9 @@ SELECT synchdb_del_extra_conninfo('mysqlconn');
 SELECT synchdb_del_extra_conninfo('sqlserverconn');
 SELECT synchdb_del_extra_conninfo('oracleconn');
 
-SELECT name, isactive, data->'hostname', data->'port', data->'user', data->'srcdb', data->'table', data->'connector' FROM synchdb_conninfo;
+SELECT name, isactive, data->'hostname' AS hostname, data->'port' AS port, data->'user' AS user, data->'srcdb' AS srcdb, data->'table' AS table, data->'snapshottable' AS snapshottable, data->'connector' AS connector FROM synchdb_conninfo;
 
-SELECT data->'ssl_mode', data->'ssl_keystore', data->'ssl_truststore' FROM synchdb_conninfo;
+SELECT data->'ssl_mode' AS ssl_mode, data->'ssl_keystore' AS ssl_keystore, data->'ssl_truststore' AS ssl_truststore FROM synchdb_conninfo;
 
 SELECT synchdb_add_objmap('mysqlconn', 'table', 'ext_db1.ext_table1', 'pg_table1');
 SELECT synchdb_add_objmap('mysqlconn', 'column', 'ext_db1.ext_table1.ext_column1', 'pg_column1');
@@ -67,7 +67,7 @@ SELECT synchdb_del_conninfo('mysqlconn');
 SELECT synchdb_del_conninfo('sqlserverconn');
 SELECT synchdb_del_conninfo('oracleconn');
 
-SELECT name, isactive, data->'hostname', data->'port', data->'user', data->'srcdb', data->'table', data->'connector' FROM synchdb_conninfo;
+SELECT name, isactive, data->'hostname' AS hostname, data->'port' AS port, data->'user' AS user, data->'srcdb' AS srcdb, data->'table' AS table, data->'snapshottable' AS snapshottable, data->'connector' AS connector FROM synchdb_conninfo;
 SELECT * FROM synchdb_objmap;
 
 DROP EXTENSION synchdb;

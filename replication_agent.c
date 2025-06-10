@@ -892,6 +892,7 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"coalesce(data->>'srcdb', 'null'), "
 			"coalesce(data->>'dstdb', 'null'), "
 			"coalesce(data->>'table', 'null'), "
+			"coalesce(data->>'snapshottable', 'null'), "
 			"coalesce(data->>'connector', 'null'), "
 			"isactive,"
 			"coalesce(data->>'ssl_mode', 'null'), "
@@ -915,19 +916,20 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	strlcpy(conninfo->srcdb, TextDatumGetCString(res[4]), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 	strlcpy(conninfo->dstdb, TextDatumGetCString(res[5]), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 	strlcpy(conninfo->table, TextDatumGetCString(res[6]) ,SYNCHDB_CONNINFO_TABLELIST_SIZE);
-	*connector = pstrdup(TextDatumGetCString(res[7]));
-	conninfo->active = DatumGetBool(res[8]);
-	strlcpy(conninfo->extra.ssl_mode, TextDatumGetCString(res[9]), SYNCHDB_CONNINFO_NAME_SIZE);
-	strlcpy(conninfo->extra.ssl_keystore, TextDatumGetCString(res[10]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
-	strlcpy(conninfo->extra.ssl_keystore_pass, TextDatumGetCString(res[11]), SYNCHDB_CONNINFO_PASSWORD_SIZE);
-	strlcpy(conninfo->extra.ssl_truststore, TextDatumGetCString(res[12]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
-	strlcpy(conninfo->extra.ssl_truststore_pass, TextDatumGetCString(res[13]) ,SYNCHDB_CONNINFO_PASSWORD_SIZE);
+	strlcpy(conninfo->snapshottable, TextDatumGetCString(res[7]) ,SYNCHDB_CONNINFO_TABLELIST_SIZE);
+	*connector = pstrdup(TextDatumGetCString(res[8]));
+	conninfo->active = DatumGetBool(res[9]);
+	strlcpy(conninfo->extra.ssl_mode, TextDatumGetCString(res[10]), SYNCHDB_CONNINFO_NAME_SIZE);
+	strlcpy(conninfo->extra.ssl_keystore, TextDatumGetCString(res[11]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	strlcpy(conninfo->extra.ssl_keystore_pass, TextDatumGetCString(res[12]), SYNCHDB_CONNINFO_PASSWORD_SIZE);
+	strlcpy(conninfo->extra.ssl_truststore, TextDatumGetCString(res[13]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	strlcpy(conninfo->extra.ssl_truststore_pass, TextDatumGetCString(res[14]) ,SYNCHDB_CONNINFO_PASSWORD_SIZE);
 
 	elog(DEBUG1, "name %s hostname %s, port %d, user %s pwd %s srcdb %s "
-			"dstdb %s table %s connector %s extras(%s %s %s %s %s)",
+			"dstdb %s table %s snapshottable %s connector %s extras(%s %s %s %s %s)",
 			conninfo->name, conninfo->hostname, conninfo->port,
 			conninfo->user, conninfo->pwd, conninfo->srcdb,
-			conninfo->dstdb, conninfo->table, *connector,
+			conninfo->dstdb, conninfo->table, conninfo->snapshottable, *connector,
 			conninfo->extra.ssl_mode, conninfo->extra.ssl_keystore, conninfo->extra.ssl_keystore_pass,
 			conninfo->extra.ssl_truststore, conninfo->extra.ssl_truststore_pass);
 	pfree(res);
