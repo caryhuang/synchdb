@@ -34,10 +34,14 @@ function teardown_oracle()
 {
 	echo "tearing down oracle..."
 	docker-compose -f testenv/oracle/synchdb-oracle-test.yaml down
-	#id=$(docker ps | grep oracle | awk '{print $1}')
-	#docker stop $id
-	#docker remove $id
 	exit 0
+}
+
+function teardown_ora19c()
+{
+	echo "tearing down ora19c..."
+	docker stop ora19c
+	docker rm ora19c
 }
 
 function teardown_hammerdb()
@@ -61,6 +65,9 @@ function teardown_remotedb()
 			;;
 		"oracle")
 			teardown_oracle
+			;;
+		"ora19c")
+			teardown_ora19c
 			;;
 		"hammerdb")
 			teardown_hammerdb
