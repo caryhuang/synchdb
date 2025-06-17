@@ -22,6 +22,7 @@
 #include "utils/builtins.h"
 #include <jni.h>
 #include <unistd.h>
+#include <arpa/inet.h>
 #include "format_converter.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
@@ -124,9 +125,6 @@ static JNIEnv *env = NULL; /* represents JNI run-time environment */
 static jclass cls;		   /* represents debezium runner java class */
 static jobject obj;		   /* represents debezium runner java class object */
 static jmethodID getChangeEvents;
-static jmethodID sizeMethod;
-static jmethodID getMethod;
-static jclass listClass;
 static jmethodID markBatchComplete;
 static jmethodID getoffsets;
 
@@ -607,52 +605,6 @@ dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj)
 }
 
 /*
- * processCompletionMessage - completion message processor
- *
- * This function processes the completion message sent from the Debezium runner
- * in the event of an connector exit
- *
- * @param eventStr: the completion message string
- * @param myConnectorId: Connector ID of interest
- * @param dbzExitSignal: Set by the function to indicate connector has exited
- *
- * @return: void
- */
-static void
-processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExitSignal)
-{
-	char * msgcopy = pstrdup(eventStr + 2); /* skip K- */
-	char * successflag = NULL;
-	char * message = NULL;
-
-	elog(DEBUG1, "completion message: %s", msgcopy);
-
-	/*
-	 * success flag indicates if worker exits successfully or due to an error.
-	 * Currently not used
-	 */
-	successflag = strtok(msgcopy, ";");
-
-	/* remove compiler warning */
-	if (successflag && strlen(successflag) > 0)
-	{
-		/* presence of successflag indicates that the DBZ connector in java has exited */
-		*dbzExitSignal = true;
-	}
-
-	/*
-	 * message is the last error or exit message the connector produced before
-	 * it exited
-	 */
-	message = strtok(NULL, ";");
-	if (message)
-	{
-		/* save it to shm for display to use */
-		set_shm_connector_errmsg(myConnectorId, message);
-	}
-}
-
-/*
  * dbz_engine_get_change - Retrieve and process change events from the Debezium engine
  *
  * This function retrieves change events from the Debezium engine and processes them.
@@ -673,10 +625,10 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		bool * dbzExitSignal, BatchInfo * batchinfo, SynchdbStatistics * myBatchStats,
 		bool schemasync)
 {
-	jobject changeEventsList;
-	jint size;
-	jobject event;
-	const char *eventStr;
+	jobject jbytebuffer;
+	int offset = 0;
+	unsigned char * data;
+	jsize datalen = 0;
 
 	/* Validate input parameters */
 	if (!jvm || !env || !cls || !obj)
@@ -688,7 +640,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	/* Get the getChangeEvents method if needed */
 	if (!getChangeEvents)
 	{
-		getChangeEvents = (*env)->GetMethodID(env, *cls, "getChangeEvents", "()Ljava/util/List;");
+		getChangeEvents = (*env)->GetMethodID(env, *cls, "getChangeEvents", "()Ljava/nio/ByteBuffer;");
 		if (getChangeEvents == NULL)
 		{
 			elog(WARNING, "Failed to find getChangeEvents method");
@@ -697,7 +649,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	}
 
 	/* Call getChangeEvents method */
-	changeEventsList = (*env)->CallObjectMethod(env, *obj, getChangeEvents);
+	jbytebuffer = (*env)->CallObjectMethod(env, *obj, getChangeEvents);
 	if ((*env)->ExceptionCheck(env))
 	{
 		(*env)->ExceptionDescribe(env);
@@ -705,152 +657,121 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		elog(WARNING, "Exception occurred while calling getChangeEvents");
 		return -1;
 	}
-	if (changeEventsList == NULL)
+	if (jbytebuffer == NULL)
 	{
 		return -1;
 	}
 
-	/* Get List class, size and get methods if needed */
-	if (!listClass)
-	{
-		listClass = (*env)->FindClass(env, "java/util/List");
-		if (listClass == NULL)
-		{
-			elog(WARNING, "Failed to find java list class");
-			(*env)->DeleteLocalRef(env, changeEventsList);
-			return -1;
-		}
-	}
-	if (!sizeMethod)
-	{
-		sizeMethod = (*env)->GetMethodID(env, listClass, "size", "()I");
-		if (sizeMethod == NULL)
-		{
-			elog(WARNING, "Failed to find java list.size method");
-			(*env)->DeleteLocalRef(env, changeEventsList);
-			return -1;
-		}
-	}
-	if (!getMethod)
-	{
-		getMethod = (*env)->GetMethodID(env, listClass, "get", "(I)Ljava/lang/Object;");
-		if (getMethod == NULL)
-		{
-			elog(WARNING, "Failed to find java list.get method");
-			return -1;
-		}
-	}
+	data = (*env)->GetDirectBufferAddress(env, jbytebuffer);
+	datalen = (*env)->GetDirectBufferCapacity(env, jbytebuffer);
 
-	/* Process change event size */
-	size = (*env)->CallIntMethod(env, changeEventsList, sizeMethod);
-	if (size == 0 || size < 0)
-	{
-		/* nothing to process, set proper stage and return */
-		if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
-			set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+	elog(DEBUG1, "datalen %d", datalen);
 
-		(*env)->DeleteLocalRef(env, changeEventsList);
-		return -1;
-	}
-	batchinfo->batchSize = size - 1;	/* minus the metadata record */
-
-	/* fetch special metadata element at index 0 and convert it to string */
-	event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, 0);
-	if (event == NULL)
+	if (data[0] == 'B')
 	{
-		elog(WARNING, "change event is missing metadata element at index 0. Skipping");
-		(*env)->DeleteLocalRef(env, changeEventsList);
-		return -1;
-	}
-	eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
-	if (eventStr == NULL)
-	{
-		elog(WARNING, "Failed to convert metadata element to string. Skipping");
-		(*env)->DeleteLocalRef(env, event);
-		(*env)->DeleteLocalRef(env, changeEventsList);
-		return -1;
-	}
+		int batchsize = 0;
+		int curr = 0;
 
-	/* check if it is a completion message */
-	if (eventStr[0] == 'K' && eventStr[1] == '-')
-	{
-		/*
-		 * connector completion/error message, consume it right here
-		 * This may also indicates that the dbz connector on java side
-		 * has exited and we may need to exit later as well.
-		 */
-		processCompletionMessage(eventStr, myConnectorId, dbzExitSignal);
-        (*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
-        (*env)->DeleteLocalRef(env, event);
-        (*env)->DeleteLocalRef(env, changeEventsList);
-		return 0;
-	}
-	/* check if it is a batch change request */
-	else if (eventStr[0] == 'B' && eventStr[1] == '-')
-	{
-		int firstgoodevent = 1;
-		/*
-		 * obtain the batch id as we will need it to commit debezium offsets
-		 * as we process the batch
-		 */
-		batchinfo->batchId = atoi(&eventStr[2]);
+		offset += 1;
+		memcpy(&(batchinfo->batchId), data + offset, 4);
+		batchinfo->batchId =  ntohl(batchinfo->batchId);
+		offset += 4;
 
-		/* free reference to metadata element at index 0 */
-		(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
-		(*env)->DeleteLocalRef(env, event);
+		memcpy(&batchsize, data + offset, 4);
+		batchsize =  ntohl(batchsize);
+		offset += 4;
 
+		elog(DEBUG1, "batch id %d contains %d change events", batchinfo->batchId, batchsize);
+		
 		StartTransactionCommand();
 		PushActiveSnapshot(GetTransactionSnapshot());
 
-		/* now process the rest of the changes in the batch */
-		for (int i = 1; i < size; i++)
+		while (offset + 4 <= datalen && curr < batchsize)
 		{
-			event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, i);
-			if (event == NULL)
+			int json_len = 0;
+			memcpy(&json_len, data + offset, 4);
+			offset += 4;
+			json_len = ntohl(json_len);
+
+			/* json_len includes the null terminator */
+			elog(DEBUG1,"json len %d", json_len);
+			if (offset + json_len > datalen)
 			{
-				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-				firstgoodevent++;
+				elog(WARNING, "Invalid JSON length %d at offset %d (buffer length = %d)",
+						json_len, offset, datalen);
+				break;
+			}
+			if (json_len == 0)
+			{
+				/* should not happen as dbz also skips empty change events */
+				elog(WARNING, "empty json skipped");
+				offset += 4;
+				curr++;
 				continue;
 			}
 
-			eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
-			if (eventStr == NULL)
-			{
-				elog(WARNING, "Failed to convert event string at index %d", i);
-				(*env)->DeleteLocalRef(env, event);
-				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-				firstgoodevent++;
-				continue;
-			}
-
+			/* data + offset is already null-terminated */
 			if (synchdb_log_event_on_error)
-				g_eventStr = eventStr;
+				g_eventStr = (char *)(data + offset);
 
-			/* change event message, send to format converter */
-			if (fc_processDBZChangeEvent(eventStr, myBatchStats, schemasync,
+			fc_processDBZChangeEvent((char *)(data + offset), myBatchStats, schemasync,
 					get_shm_connector_name_by_id(myConnectorId),
-					(i == firstgoodevent), (i == size - 1)))
-			{
-				firstgoodevent++;
-			}
+					(curr == 0), (curr == batchsize - 1));
 
-			(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
-			(*env)->DeleteLocalRef(env, event);
+			offset += json_len;
+			curr++;
 		}
 
 		PopActiveSnapshot();
 		CommitTransactionCommand();
-		increment_connector_statistics(myBatchStats, STATS_TOTAL_CHANGE_EVENT, size-1);
+		increment_connector_statistics(myBatchStats, STATS_TOTAL_CHANGE_EVENT, batchsize);
+	}
+	else if (data[0] == 'K')
+	{
+		int msg_len = 0;
+		char * successflag = NULL, * dbzmsg = NULL;
 
-		/* read offset currently flushed to file for displaying to user */
-		set_shm_dbz_offset(myConnectorId);
+		offset += 1;
+
+		/* success flag length */
+		memcpy(&msg_len, data + offset, 4);
+		offset += 4;
+		msg_len = ntohl(msg_len);
+
+		/* success flag */
+		successflag = palloc0(msg_len + 1);
+		memcpy(successflag, data + offset, msg_len);
+		offset += msg_len;
+
+		/* dbz message length */
+		memcpy(&msg_len, data + offset, 4);
+		offset += 4;
+		msg_len = ntohl(msg_len);
+
+		/* dbz message */
+		dbzmsg = palloc0(msg_len + 1);
+		memcpy(dbzmsg, data + offset, msg_len);
+		offset += msg_len;
+
+		/* process the payload */
+		if (successflag && strlen(successflag) > 0)
+			*dbzExitSignal = true;
+
+		if (dbzmsg && strlen(dbzmsg) > 0)
+			set_shm_connector_errmsg(myConnectorId, dbzmsg);
+
+		if (successflag)
+			pfree(successflag);
+
+		if (dbzmsg)
+			pfree(dbzmsg);
 	}
 	else
 	{
 		elog(WARNING, "unknown change request");
 	}
 
-	(*env)->DeleteLocalRef(env, changeEventsList);
+	(*env)->DeleteLocalRef(env, jbytebuffer);
 	return 0;
 }
 
