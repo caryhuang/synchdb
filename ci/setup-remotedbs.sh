@@ -16,6 +16,40 @@ codename=${codename%)*}
 # we'll do everything with absolute paths
 basedir="$(pwd)"
 
+MAX_TRIES=200
+
+function wait_for_container_ready()
+{
+	name=$1
+	keyword=$2
+	ready=0
+
+	set +e
+	docker ps | grep $name
+	if [ $? -ne 0 ]; then
+		echo "$name is not running or failed to start!"
+	fi	
+
+	for ((i=1; i<=MAX_TRIES; i++));
+	do
+		docker logs "$name" 2>&1 | grep "$keyword"
+		if [ $? -eq 0 ]; then
+			echo "$name is ready to use"
+			ready=1
+			break
+		else
+			echo "Still waiting for $name to become ready..."
+			sleep 10
+		fi
+	done
+
+	if [ $ready -ne 1 ]; then
+		echo "giving up after $MAX_TRIES on $name..."
+		exit 1
+	fi
+	set -e
+}
+
 function setup_mysql()
 {
 	echo "setting up mysql..."
@@ -49,10 +83,37 @@ function setup_sqlserver()
 
 function setup_oracle()
 {
+	needsetup=0
+
+	set +e
 	echo "setting up oracle..."
-	docker-compose -f testenv/oracle/synchdb-oracle-test.yaml up -d
-	echo "sleep to give container time to startup..."
-    sleep 30  # Give containers time to fully start
+	docker ps -a | grep "oracle"
+	if [ $? -ne 0 ]; then
+        # container has not run before. Run a new one
+        docker-compose -f testenv/oracle/synchdb-oracle-test.yaml up -d
+		wait_for_container_ready "oracle" "DATABASE IS READY TO USE"
+        needsetup=1
+    else
+        docker ps -a | grep "oracle" | grep -i "Exited"
+        if [ $? -eq 0 ]; then
+            # container has been run before but stopped. Start it
+            docker start oracle
+            wait_for_container_ready "oracle" "DATABASE IS READY TO USE"
+        else
+            docker ps -a | grep "oracle" | grep -i "Up"
+            if [ $? -eq 0 ]; then
+                # container is running. Just use it
+                echo "using exisitng oracle 19c container..."
+            fi
+        fi
+    fi
+
+	if [ $needsetup -ne 1 ]; then
+        echo "skip setting up oracle, assuming it done..."
+        exit 0
+    fi
+    set -e
+
 	docker exec -i oracle mkdir /opt/oracle/oradata/recovery_area
 	docker exec -i oracle sqlplus / as sysdba <<EOF
 Alter user sys identified by oracle;
@@ -164,10 +225,104 @@ EOF
 	exit 0
 }
 
+function setup_ora19c()
+{
+	needsetup=0
+
+	set +e
+	echo "setting up oracle 19c..."
+	docker ps -a | grep "ora19c"
+	if [ $? -ne 0 ]; then
+		# container has not run before. Run a new one
+    	docker run -d --name ora19c -p 1521:1521 -e ORACLE_SID=FREE -e ORACLE_PWD=oracle -e ORACLE_CHARACTERSET=AL32UTF8 doctorkirk/oracle-19c
+		wait_for_container_ready "ora19c" "DATABASE IS READY TO USE"
+		needsetup=1	
+	else
+		docker ps -a | grep "ora19c" | grep -i "Exited"
+		if [ $? -eq 0 ]; then
+			# container has been run before but stopped. Start it
+			docker start 19c-oracle
+			wait_for_container_ready "ora19c" "DATABASE IS READY TO USE"
+		else
+			docker ps -a | grep "ora19c" | grep -i "Up"
+			if [ $? -eq 0 ]; then
+				# container is running. Just use it
+				echo "using exisitng oracle 19c container..."
+			fi
+		fi
+	fi
+
+	if [ $needsetup -ne 1 ]; then
+		echo "skip setting up oracle 19c, assuming it done..."
+		exit 0
+	fi
+	set -e
+
+	docker exec -i ora19c mkdir /opt/oracle/oradata/recovery_area
+	sleep 1
+	docker exec -i ora19c sqlplus /nolog <<EOF
+CONNECT sys/oracle as sysdba;
+alter system set db_recovery_file_dest_size = 30G;
+alter system set db_recovery_file_dest = '/opt/oracle/oradata/recovery_area' scope=spfile;
+shutdown immediate;
+startup mount;
+alter database archivelog;
+alter database open;
+archive log list;
+exit;
+EOF
+
+	sleep 1
+	docker exec -i ora19c sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<EOF
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
+ALTER PROFILE DEFAULT LIMIT FAILED_LOGIN_ATTEMPTS UNLIMITED;
+exit;
+EOF
+
+docker exec -i ora19c sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<EOF
+CREATE TABLESPACE LOGMINER_TBS DATAFILE '/opt/oracle/oradata/FREE/logminer_tbs.dbf' SIZE 25M REUSE AUTOEXTEND ON MAXSIZE UNLIMITED;
+exit;
+EOF
+
+docker exec -i ora19c sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<'EOF'
+CREATE USER DBZUSER IDENTIFIED BY dbz DEFAULT TABLESPACE LOGMINER_TBS QUOTA UNLIMITED ON LOGMINER_TBS;
+GRANT CREATE SESSION TO DBZUSER;
+GRANT SET CONTAINER TO DBZUSER;
+GRANT SELECT ON V_$DATABASE TO DBZUSER;
+GRANT FLASHBACK ANY TABLE TO DBZUSER;
+GRANT SELECT ANY TABLE TO DBZUSER;
+GRANT SELECT_CATALOG_ROLE TO DBZUSER;
+GRANT EXECUTE_CATALOG_ROLE TO DBZUSER;
+GRANT SELECT ANY TRANSACTION TO DBZUSER;
+GRANT LOGMINING TO DBZUSER;
+GRANT SELECT ANY DICTIONARY TO DBZUSER;
+GRANT CREATE TABLE TO DBZUSER;
+GRANT LOCK ANY TABLE TO DBZUSER;
+GRANT CREATE SEQUENCE TO DBZUSER;	
+GRANT EXECUTE ON DBMS_LOGMNR TO DBZUSER;
+GRANT EXECUTE ON DBMS_LOGMNR_D TO DBZUSER;	
+GRANT SELECT ON V_$LOG TO DBZUSER;
+GRANT SELECT ON V_$LOG_HISTORY TO DBZUSER;	
+GRANT SELECT ON V_$LOGMNR_LOGS TO DBZUSER ;
+GRANT SELECT ON V_$LOGMNR_CONTENTS TO DBZUSER ;
+GRANT SELECT ON V_$LOGMNR_PARAMETERS TO DBZUSER;
+GRANT SELECT ON V_$LOGFILE TO DBZUSER ;
+GRANT SELECT ON V_$ARCHIVED_LOG TO DBZUSER ;
+GRANT SELECT ON V_$ARCHIVE_DEST_STATUS TO DBZUSER;
+GRANT SELECT ON V_$TRANSACTION TO DBZUSER; 
+GRANT SELECT ON V_$MYSTAT TO DBZUSER;
+GRANT SELECT ON V_$STATNAME TO DBZUSER; 	
+GRANT EXECUTE ON DBMS_WORKLOAD_REPOSITORY TO DBZUSER;
+GRANT SELECT ON DBA_HIST_SNAPSHOT TO DBZUSER;
+GRANT EXECUTE ON DBMS_WORKLOAD_REPOSITORY TO PUBLIC;	
+GRANT CREATE ANY DIRECTORY TO DBZUSER;
+EOF
+}
+
 function setup_hammerdb()
 {
 	echo "setting up hammerdb for $which..."
-	docker run -d --name hammerdb tpcorg/hammerdb
+	docker run -d --name hammerdb hgneon/hammerdb:5.0
 	echo "sleep to give container time to startup..."
 	sleep 5
 	
@@ -190,6 +345,9 @@ function setup_remotedb()
 			;;
 		"oracle")
 			setup_oracle
+			;;
+		"ora19c")
+			setup_ora19c
 			;;
 		"hammerdb")
 			setup_hammerdb $which

@@ -34,6 +34,7 @@ import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 
 public class DebeziumRunner {
 	private static Logger logger = Logger.getRootLogger();
@@ -700,9 +701,8 @@ public class DebeziumRunner {
 		logger.warn("done...");
 	}
 
-	public List<String> getChangeEvents()
+	public ByteBuffer getChangeEvents()
 	{
-		List<String> listCopy = null;
 		if (activeBatchHash == null)
 		{
 			activeBatchHash = new HashMap<>();
@@ -712,7 +712,7 @@ public class DebeziumRunner {
 			batchManager = new BatchManager();
 		}
 
-		//checkMemoryStatus();
+		ByteBuffer buffer = null;
         if (!future.isDone())
 		{
 			int i = 0;
@@ -720,35 +720,87 @@ public class DebeziumRunner {
 			myNextBatch = batchManager.getNextBatch();
 			if (myNextBatch != null)
 			{
-				listCopy = new ArrayList<>(myNextBatch.records.size() + 1);
+				int totalSize = 0;
+				int numskipped = 0;
+		        int headerSize = 1 + 4 + 4; //B followed by batchid and num batches
 				logger.info("Debezium -> Synchdb: sent batchid(" + myNextBatch.batchid + ") with size(" + myNextBatch.records.size() + ")");
-				/* first element: batch id */
-				listCopy.add("B-" + String.valueOf(myNextBatch.batchid));
 
-				/* remaining elements: individual changes*/
+				/* first for loop to calculate total size */
 				for (i = 0; i < myNextBatch.records.size(); i++)
 				{
-					listCopy.add(myNextBatch.records.get(i).value());
+					String val = myNextBatch.records.get(i).value();
+					if (val == null)
+					{
+						numskipped += 1;
+						continue;
+					}
+					byte[] bytes = val.getBytes(StandardCharsets.UTF_8);
+					totalSize += 4 + bytes.length + 1; /* 4 byte size + 1 null terminator */
 				}
+				totalSize += headerSize;
+				logger.info("total direct buffer size " + totalSize);
 
+				/* second for loop to fill the buffer */
+				buffer = ByteBuffer.allocateDirect(totalSize);
+
+				/* marker - 1 byte */
+				buffer.put((byte) 'B');
+
+				/* batch id - 4 bytes */
+				buffer.putInt(myNextBatch.batchid);
+
+				/* num batches - 4 bytes */
+				buffer.putInt(myNextBatch.records.size() - numskipped);
+
+				for (i = 0; i < myNextBatch.records.size(); i++)
+				{
+					String val = myNextBatch.records.get(i).value();
+					if (val == null)
+						continue;
+					byte[] bytes = val.getBytes(StandardCharsets.UTF_8);
+					/* json length - 4 bytes */
+					buffer.putInt(bytes.length + 1);
+
+					/* json data - x bytes */
+					buffer.put(bytes);
+
+					/* null terminator - 1 byte to prevent palloc and memcpy on C side */
+					buffer.put((byte) 0);
+				}
+				buffer.flip();
 				/* save this batch in active batch hash struct */
 				activeBatchHash.put(myNextBatch.batchid, myNextBatch);
 			}
 		}
 		else
 		{
+			int totalSize = 0;
+			int headerSize = 1;
+
 			/* conector task is not running, get exit messages */
 			logger.warn("connector is no longer running");
 			logger.info("success flag = " + lastDbzSuccess + " | message = " + lastDbzMessage + " | error = " + lastDbzError);
+			totalSize = String.valueOf(lastDbzSuccess).getBytes(StandardCharsets.UTF_8).length + 4
+				+ lastDbzMessage.getBytes(StandardCharsets.UTF_8).length + 4
+				+ headerSize;
+			buffer = ByteBuffer.allocateDirect(totalSize);
+			/* marker - 1 byte */
+            buffer.put((byte) 'K');
 
-			/*
-			 * add the last captured connector exit message and send it to synchdb
-			 * the K- prefix indicated an error rather than a change event
-			 */
-			listCopy = new ArrayList<>();
-			listCopy.add("K-" + lastDbzSuccess + ";" + lastDbzMessage);
+			/* length of success message - 4 bytes */
+			buffer.putInt(String.valueOf(lastDbzSuccess).getBytes(StandardCharsets.UTF_8).length);
+
+			/* success message - x bytes */
+			buffer.put(String.valueOf(lastDbzSuccess).getBytes(StandardCharsets.UTF_8));
+
+			/* length of dbz message - 4 bytes */
+			buffer.putInt(lastDbzMessage.getBytes(StandardCharsets.UTF_8).length);
+
+			/* dbz message - x bytes */
+			buffer.put(lastDbzMessage.getBytes(StandardCharsets.UTF_8));
+			buffer.flip();
 		}
-		return listCopy;
+		return buffer;
     }
 
 	/* 
