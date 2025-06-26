@@ -125,6 +125,7 @@ spi_execute_select_one(const char * query, int * numcols)
 	Datum * rowval;
 	bool isnull;
 	bool skiptx = false;
+	MemoryContext oldcontext;
 
 	/*
 	 * if we are already in transaction or transaction block, we can skip
@@ -190,6 +191,7 @@ spi_execute_select_one(const char * query, int * numcols)
 	tupdesc = SPI_tuptable->tupdesc;
 	*numcols = tupdesc->natts;
 
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 	rowval = (Datum *) palloc0(*numcols * sizeof(Datum));
 
 	for (i = 0; i < *numcols; i++)
@@ -200,6 +202,7 @@ spi_execute_select_one(const char * query, int * numcols)
 		else
 			rowval[i] = colval;
 	}
+	MemoryContextSwitchTo(oldcontext);
 
 	/* Close the connection */
 	SPI_finish();
