@@ -168,6 +168,36 @@ typedef struct _ExtraConnectionInfo
 } ExtraConnectionInfo;
 
 /**
+ * JMXConnectionInfo - Extra JMX Connector parameters are put here.
+ */
+typedef struct _JMXConnectionInfo
+{
+	/* JMX server options */
+	char jmx_listenaddr[SYNCHDB_CONNINFO_HOSTNAME_SIZE];
+	unsigned int jmx_port;
+	char jmx_rmiserveraddr[SYNCHDB_CONNINFO_HOSTNAME_SIZE];
+	unsigned int jmx_rmiport;
+
+	/* JMX auth options */
+	bool jmx_auth;
+	char jmx_auth_passwdfile[SYNCHDB_METADATA_PATH_SIZE];
+	char jmx_auth_accessfile[SYNCHDB_METADATA_PATH_SIZE];
+
+	/* JMX ssl options */
+	bool jmx_ssl;
+	char jmx_ssl_keystore[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char jmx_ssl_keystore_pass[SYNCHDB_CONNINFO_PASSWORD_SIZE];
+	char jmx_ssl_truststore[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char jmx_ssl_truststore_pass[SYNCHDB_CONNINFO_PASSWORD_SIZE];
+
+	/* JMX exporter options */
+	char jmx_exporter[SYNCHDB_METADATA_PATH_SIZE];
+	unsigned int jmx_exporter_port;
+	char jmx_exporter_conf[SYNCHDB_METADATA_PATH_SIZE];
+
+} JMXConnectionInfo;
+
+/**
  * ConnectionInfo - DBZ Connection info. These are put in shared memory so
  * connector background workers can access when they are spawned.
  */
@@ -186,6 +216,7 @@ typedef struct _ConnectionInfo
     bool isShcemaSync;
     bool isOraCompat; /* added to support ivorysql's oracle compatible mode */
     ExtraConnectionInfo extra;
+    JMXConnectionInfo jmx;
 } ConnectionInfo;
 
 /**

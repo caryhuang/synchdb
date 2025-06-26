@@ -64,6 +64,10 @@ PG_FUNCTION_INFO_V1(synchdb_add_extra_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_extra_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_objmap);
+PG_FUNCTION_INFO_V1(synchdb_add_jmx_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_del_jmx_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_add_jmx_exporter_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_del_jmx_exporter_conninfo);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -150,7 +154,7 @@ static void reset_shm_request_state(int connectorId);
 static int dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file);
 static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId, const char * snapshotMode);
 static void setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode);
-static void initialize_jvm(void);
+static void initialize_jvm(JMXConnectionInfo * jmx);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
 static void main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
@@ -1610,25 +1614,20 @@ setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char 
  * creates a Java VM, and initializes the Debezium engine.
  */
 static void
-initialize_jvm(void)
+initialize_jvm(JMXConnectionInfo * jmx)
 {
 	JavaVMInitArgs vm_args;
-	JavaVMOption options[3];
-	char javaopt[MAX_JAVA_OPTION_LENGTH] = {0};
-	char jvmheapmax[MAX_JAVA_OPTION_LENGTH] = {0};
+	JavaVMOption options[30];	/* ensure we do not exceed this max number of java options */
 	char jar_path[MAX_PATH_LENGTH] = {0};
 	const char *dbzpath = getenv("DBZ_ENGINE_DIR");
-	int ret;
+	MemoryContext jvmContext, oldContext;
+	int ret, optcount = 0, i = 0;
 
 	/* Determine the path to the Debezium engine JAR file */
 	if (dbzpath)
-	{
 		snprintf(jar_path, sizeof(jar_path), "%s/%s", dbzpath, DBZ_ENGINE_JAR_FILE);
-	}
 	else
-	{
 		snprintf(jar_path, sizeof(jar_path), "%s/dbz_engine/%s", pkglib_path, DBZ_ENGINE_JAR_FILE);
-	}
 
 	/* Check if the JAR file exists */
 	if (access(jar_path, F_OK) == -1)
@@ -1637,21 +1636,67 @@ initialize_jvm(void)
 		elog(ERROR, "Cannot find DBZ engine jar file at %s", jar_path);
 	}
 
-	/* Set up Java classpath and heap size */
-	snprintf(javaopt, sizeof(javaopt), "-Djava.class.path=%s", jar_path);
-	if (jvm_max_heap_size == 0)
-		snprintf(jvmheapmax, sizeof(javaopt), "-Xmx0");
-	else
-		snprintf(jvmheapmax, sizeof(javaopt), "-Xmx%dm", jvm_max_heap_size);
-
-	elog(WARNING, "Initializing JVM with options: -Xrs %s %s", javaopt, jvmheapmax);
+	jvmContext = AllocSetContextCreate(TopMemoryContext, "JVMINIT", ALLOCSET_DEFAULT_SIZES);
+	oldContext = MemoryContextSwitchTo(jvmContext);
 
 	/* Configure JVM options */
-	options[0].optionString = javaopt;
-	options[1].optionString = "-Xrs"; // Reduce use of OS signals by JVM
-	options[2].optionString = jvmheapmax;
+	options[optcount++].optionString = psprintf("-Djava.class.path=%s", jar_path);
+	options[optcount++].optionString = "-Xrs"; // Reduce use of OS signals by JVM
+	options[optcount++].optionString = psprintf("-Xmx%dm", jvm_max_heap_size == 0 ? 0 : jvm_max_heap_size);
+
+	/* jmx parameters if enabled */
+	if (jmx && strcasecmp(jmx->jmx_listenaddr, "null") &&
+			strcasecmp(jmx->jmx_rmiserveraddr, "null"))
+	{
+		options[optcount++].optionString = "-Dcom.sun.management.jmxremote";
+		options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.host=%s", jmx->jmx_listenaddr);
+		options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.port=%u", jmx->jmx_port);
+		options[optcount++].optionString = psprintf("-Djava.rmi.server.hostname=%s", jmx->jmx_rmiserveraddr);
+		options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.rmi.port=%u", jmx->jmx_rmiport);
+
+		/* optional jmx auth options */
+		if (jmx->jmx_auth)
+		{
+			options[optcount++].optionString = "-Dcom.sun.management.jmxremote.authenticate=true";
+			options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.password.file=%s",
+					jmx->jmx_auth_passwdfile);
+			options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.access.file=%s",
+					jmx->jmx_auth_accessfile);
+		}
+		else
+			options[optcount++].optionString = "-Dcom.sun.management.jmxremote.authenticate=false";
+
+		/* optional jmx ssl options */
+		if (jmx->jmx_ssl)
+		{
+			options[optcount++].optionString = "-Dcom.sun.management.jmxremote.ssl=true";
+			options[optcount++].optionString = psprintf("-Djavax.net.ssl.keyStore=%s", jmx->jmx_ssl_keystore);
+			options[optcount++].optionString = psprintf("-Djavax.net.ssl.keyStorePassword=%s", jmx->jmx_ssl_keystore_pass);
+
+			/* optional truststore options for authenticating clients */
+			if (strcasecmp(jmx->jmx_ssl_truststore, "null"))
+			{
+				options[optcount++].optionString = psprintf("-Djavax.net.ssl.trustStore=%s", jmx->jmx_ssl_truststore);
+				options[optcount++].optionString = psprintf("-Djavax.net.ssl.trustStorePassword=%s", jmx->jmx_ssl_truststore_pass);
+			}
+		}
+		else
+			options[optcount++].optionString = "-Dcom.sun.management.jmxremote.ssl=false";
+	}
+
+	/* jmx exporter settings - for prometheus and graphana */
+	if (jmx && strcasecmp(jmx->jmx_exporter_conf, "null") && strcasecmp(jmx->jmx_exporter, "null"))
+	{
+		options[optcount++].optionString = psprintf("-javaagent:%s=%u:%s",jmx->jmx_exporter,
+				jmx->jmx_exporter_port, jmx->jmx_exporter_conf);
+	}
+
+	elog(LOG, "Initialize JVM with %d options:", optcount);
+	for (i = 0; i < optcount; i++)
+		elog(LOG, "options[%d]=%s", i, options[i].optionString);
+
 	vm_args.version = JNI_VERSION_10;
-	vm_args.nOptions = 3;
+	vm_args.nOptions = optcount;
 	vm_args.options = options;
 	vm_args.ignoreUnrecognized = JNI_FALSE;
 
@@ -1674,6 +1719,9 @@ initialize_jvm(void)
 	}
 
 	elog(INFO, "Debezium engine initialized successfully");
+
+	MemoryContextSwitchTo(oldContext);
+	MemoryContextDelete(jvmContext);
 }
 
 /*
@@ -2834,7 +2882,7 @@ synchdb_engine_main(Datum main_arg)
 	fc_load_objmap(connInfo.name, connectorType);
 
 	/* Initialize JVM */
-	initialize_jvm();
+	initialize_jvm(&connInfo.jmx);
 
 	/* read current offset and update shm */
 	memset(sdb_state->connectors[myConnectorId].dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
@@ -3584,10 +3632,16 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 				 errmsg("unsupported connector")));
 
 	appendStringInfo(&strinfo, "INSERT INTO %s (name, isactive, data)"
-			" VALUES ('%s', %s, jsonb_build_object('hostname', '%s', "
-			"'port', %d, 'user', '%s', 'pwd', pgp_sym_encrypt('%s', '%s'), "
-			"'srcdb', '%s', 'dstdb', '%s', 'table', '%s', 'snapshottable', '%s', "
-			"'connector', '%s') );",
+			" VALUES ('%s', %s, jsonb_build_object("
+			"'hostname', '%s', "
+			"'port', %d, "
+			"'user', '%s', "
+			"'pwd', pgp_sym_encrypt('%s', '%s'), "
+			"'srcdb', '%s', "
+			"'dstdb', '%s', "
+			"'table', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'snapshottable', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'connector', '%s'));",
 			SYNCHDB_CONNINFO_TABLE,
 			connInfo.name,
 			"false",
@@ -3599,6 +3653,8 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 			connInfo.srcdb,
 			connInfo.dstdb,
 			connInfo.table,
+			connInfo.table,
+			connInfo.snapshottable,
 			connInfo.snapshottable,
 			connector);
 
@@ -3922,17 +3978,21 @@ synchdb_add_extra_conninfo(PG_FUNCTION_ARGS)
 
 	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
 			"'ssl_mode', '%s', "
-			"'ssl_keystore', '%s', "
-			"'ssl_keystore_pass', pgp_sym_encrypt('%s', '%s'), "
-			"'ssl_truststore', '%s', "
-			"'ssl_truststore_pass', pgp_sym_encrypt('%s', '%s') )::jsonb "
+			"'ssl_keystore',  (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'ssl_keystore_pass', (CASE WHEN '%s' = 'null' THEN null ELSE pgp_sym_encrypt('%s', '%s') END), "
+			"'ssl_truststore', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'ssl_truststore_pass', (CASE WHEN '%s' = 'null' THEN null ELSE pgp_sym_encrypt('%s', '%s') END))::jsonb "
 			"WHERE name = '%s'",
 			SYNCHDB_CONNINFO_TABLE,
 			extraconninfo.ssl_mode,
 			extraconninfo.ssl_keystore,
+			extraconninfo.ssl_keystore,
+			extraconninfo.ssl_keystore_pass,
 			extraconninfo.ssl_keystore_pass,
 			SYNCHDB_SECRET,
 			extraconninfo.ssl_truststore,
+			extraconninfo.ssl_truststore,
+			extraconninfo.ssl_truststore_pass,
 			extraconninfo.ssl_truststore_pass,
 			SYNCHDB_SECRET,
 			NameStr(*name));
@@ -3965,7 +4025,315 @@ synchdb_del_extra_conninfo(PG_FUNCTION_ARGS)
 }
 
 /*
+ * synchdb_add_jmx_conninfo
+ *
+ * This function configures extra JMX related parameters to a connector
+ */
+Datum
+synchdb_add_jmx_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+
+	/* jmx and rmi server addresses and ports (for jconsole and similar) */
+	text * jmx_listenaddr_text = PG_GETARG_TEXT_PP(1);
+	unsigned int jmx_port = PG_GETARG_UINT32(2);
+	text * jmx_rmiserver_text = PG_GETARG_TEXT_PP(3);
+	unsigned int jmx_rmiport = PG_GETARG_UINT32(4);
+
+	/* jmx authentication options */
+	bool jmx_authenticate = PG_GETARG_BOOL(5);
+	text * jmx_passwdfile_text = PG_GETARG_TEXT_PP(6);
+	text * jmx_accessfile_text = PG_GETARG_TEXT_PP(7);
+
+	/* jmx ssl options */
+	bool jmx_ssl = PG_GETARG_BOOL(8);
+	text * jmx_keystore_text = PG_GETARG_TEXT_PP(9);
+	text * jmx_keystore_pass_text = PG_GETARG_TEXT_PP(10);
+	text * jmx_truststore_text = PG_GETARG_TEXT_PP(11);
+	text * jmx_truststore_pass_text = PG_GETARG_TEXT_PP(12);
+
+	JMXConnectionInfo jmxconninfo = {0};
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	if (VARSIZE(jmx_listenaddr_text) - VARHDRSZ == 0 ||
+			VARSIZE(jmx_listenaddr_text) - VARHDRSZ > SYNCHDB_CONNINFO_HOSTNAME_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("jmx listen address cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_HOSTNAME_SIZE)));
+	}
+	strlcpy(jmxconninfo.jmx_listenaddr, text_to_cstring(jmx_listenaddr_text), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
+
+	jmxconninfo.jmx_port = jmx_port;
+	if (jmxconninfo.jmx_port == 0 || jmxconninfo.jmx_port > 65535)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid port number")));
+	}
+
+	if (VARSIZE(jmx_rmiserver_text) - VARHDRSZ == 0 ||
+			VARSIZE(jmx_rmiserver_text) - VARHDRSZ > SYNCHDB_CONNINFO_HOSTNAME_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("jmx rmi server address cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_HOSTNAME_SIZE)));
+	}
+	strlcpy(jmxconninfo.jmx_rmiserveraddr, text_to_cstring(jmx_rmiserver_text), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
+
+	jmxconninfo.jmx_rmiport = jmx_rmiport;
+	if (jmxconninfo.jmx_rmiport == 0 || jmxconninfo.jmx_rmiport > 65535)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid port number")));
+	}
+
+	jmxconninfo.jmx_auth = jmx_authenticate;
+	if (jmxconninfo.jmx_auth)
+	{
+		if (VARSIZE(jmx_passwdfile_text) - VARHDRSZ == 0 ||
+				VARSIZE(jmx_passwdfile_text) - VARHDRSZ > SYNCHDB_METADATA_PATH_SIZE)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("jmx auth password file cannot be empty or longer than %d",
+							 SYNCHDB_METADATA_PATH_SIZE)));
+		}
+		strlcpy(jmxconninfo.jmx_auth_passwdfile, text_to_cstring(jmx_passwdfile_text), SYNCHDB_METADATA_PATH_SIZE);
+
+		if (VARSIZE(jmx_accessfile_text) - VARHDRSZ == 0 ||
+				VARSIZE(jmx_accessfile_text) - VARHDRSZ > SYNCHDB_METADATA_PATH_SIZE)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("jmx auth password file cannot be empty or longer than %d",
+							 SYNCHDB_METADATA_PATH_SIZE)));
+		}
+		strlcpy(jmxconninfo.jmx_auth_accessfile, text_to_cstring(jmx_accessfile_text), SYNCHDB_METADATA_PATH_SIZE);
+	}
+	else
+	{
+		strlcpy(jmxconninfo.jmx_auth_passwdfile, "null", SYNCHDB_METADATA_PATH_SIZE);
+		strlcpy(jmxconninfo.jmx_auth_accessfile, "null", SYNCHDB_METADATA_PATH_SIZE);
+	}
+
+	jmxconninfo.jmx_ssl = jmx_ssl;
+	if (jmxconninfo.jmx_ssl)
+	{
+		if (VARSIZE(jmx_keystore_text) - VARHDRSZ == 0)
+			strlcpy(jmxconninfo.jmx_ssl_keystore, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+		else if (VARSIZE(jmx_keystore_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("ssl_keystore cannot be longer than %d",
+							 SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+		else
+			strlcpy(jmxconninfo.jmx_ssl_keystore, text_to_cstring(jmx_keystore_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+
+		if (VARSIZE(jmx_keystore_pass_text) - VARHDRSZ == 0)
+			strlcpy(jmxconninfo.jmx_ssl_keystore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
+		else if (VARSIZE(jmx_keystore_pass_text) - VARHDRSZ > SYNCHDB_CONNINFO_PASSWORD_SIZE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("ssl_keystore_pass cannot be longer than %d",
+							 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
+		else
+			strlcpy(jmxconninfo.jmx_ssl_keystore_pass, text_to_cstring(jmx_keystore_pass_text), SYNCHDB_CONNINFO_PASSWORD_SIZE);
+
+		if (VARSIZE(jmx_truststore_text) - VARHDRSZ == 0)
+			strlcpy(jmxconninfo.jmx_ssl_truststore, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+		else if (VARSIZE(jmx_truststore_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("ssl_truststore cannot be longer than %d",
+							 SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+		else
+			strlcpy(jmxconninfo.jmx_ssl_truststore, text_to_cstring(jmx_truststore_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+
+		if (VARSIZE(jmx_truststore_pass_text) - VARHDRSZ == 0)
+			strlcpy(jmxconninfo.jmx_ssl_truststore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
+		else if (VARSIZE(jmx_truststore_pass_text) - VARHDRSZ > SYNCHDB_CONNINFO_PASSWORD_SIZE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("ssl_truststore_pass cannot be longer than %d",
+							 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
+		else
+			strlcpy(jmxconninfo.jmx_ssl_truststore_pass, text_to_cstring(jmx_truststore_pass_text), SYNCHDB_CONNINFO_PASSWORD_SIZE);
+	}
+	else
+	{
+		strlcpy(jmxconninfo.jmx_ssl_keystore, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+		strlcpy(jmxconninfo.jmx_ssl_keystore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
+		strlcpy(jmxconninfo.jmx_ssl_truststore, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+		strlcpy(jmxconninfo.jmx_ssl_truststore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
+	}
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
+			"'jmx_listenaddr', '%s', "
+			"'jmx_port', %u, "
+			"'jmx_rmi_address', '%s', "
+			"'jmx_rmi_port', %u, "
+			"'jmx_auth', %s, "
+			"'jmx_auth_passwdfile', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'jmx_auth_accessfile', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'jmx_ssl', %s, "
+			"'jmx_ssl_keystore', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'jmx_ssl_keystore_pass', (CASE WHEN '%s' = 'null' THEN null ELSE pgp_sym_encrypt('%s', '%s') END), "
+			"'jmx_ssl_truststore', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'jmx_ssl_truststore_pass', (CASE WHEN '%s' = 'null' THEN null ELSE pgp_sym_encrypt('%s', '%s') END))::jsonb "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			jmxconninfo.jmx_listenaddr,
+			jmxconninfo.jmx_port,
+			jmxconninfo.jmx_rmiserveraddr,
+			jmxconninfo.jmx_rmiport,
+			jmxconninfo.jmx_auth ? "true" : "false",
+			jmxconninfo.jmx_auth_passwdfile,
+			jmxconninfo.jmx_auth_passwdfile,
+			jmxconninfo.jmx_auth_accessfile,
+			jmxconninfo.jmx_auth_accessfile,
+			jmxconninfo.jmx_ssl ? "true" : "false",
+			jmxconninfo.jmx_ssl_keystore,
+			jmxconninfo.jmx_ssl_keystore,
+			jmxconninfo.jmx_ssl_keystore_pass,
+			jmxconninfo.jmx_ssl_keystore_pass,
+			SYNCHDB_SECRET,
+			jmxconninfo.jmx_ssl_truststore,
+			jmxconninfo.jmx_ssl_truststore,
+			jmxconninfo.jmx_ssl_truststore_pass,
+			jmxconninfo.jmx_ssl_truststore_pass,
+			SYNCHDB_SECRET,
+			NameStr(*name));
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
  * synchdb_del_extra_conninfo
+ *
+ * This function deletes all extra connector parameters created by synchdb_add_extra_conninfo()
+ */
+Datum
+synchdb_del_jmx_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
+			"'jmx_listenaddr', "
+			"'jmx_port', "
+			"'jmx_rmi_address', "
+			"'jmx_rmi_port', "
+			"'jmx_auth', "
+			"'jmx_auth_passwdfile', "
+			"'jmx_auth_accessfile', "
+			"'jmx_ssl', "
+			"'jmx_ssl_keystore', "
+			"'jmx_ssl_keystore_pass', "
+			"'jmx_ssl_truststore', "
+			"'jmx_ssl_truststore_pass', "
+			"'jmx_exporter', "
+			"'jmx_exporter_port', "
+			"'jmx_exporter_conf'] "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			NameStr(*name));
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_add_jmx_exporter_conninfo
+ *
+ * This function configures extra JMX exporter related parameters to a connector
+ */
+Datum
+synchdb_add_jmx_exporter_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+
+	/* jmx exporter options (for prometheus and graphana) */
+	text * jmx_exporterpath_text = PG_GETARG_TEXT_PP(1);
+	unsigned int jmx_exporterport =  PG_GETARG_UINT32(2);
+	text * jmx_exporterconf_text = PG_GETARG_TEXT_PP(3);
+
+	JMXConnectionInfo jmxconninfo = {0};
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	/* Sanity check on input arguments */
+	if (VARSIZE(jmx_exporterpath_text) - VARHDRSZ == 0 ||
+			VARSIZE(jmx_exporterpath_text) - VARHDRSZ > SYNCHDB_METADATA_PATH_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("jmx exporter jar library path cannot be empty or longer than %d",
+						 SYNCHDB_METADATA_PATH_SIZE)));
+	}
+	strlcpy(jmxconninfo.jmx_exporter, text_to_cstring(jmx_exporterpath_text),
+			SYNCHDB_METADATA_PATH_SIZE);
+
+	jmxconninfo.jmx_exporter_port = jmx_exporterport;
+	if (jmxconninfo.jmx_exporter_port == 0 || jmxconninfo.jmx_exporter_port > 65535)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid jmx exporter port number")));
+	}
+
+	if (VARSIZE(jmx_exporterconf_text) - VARHDRSZ == 0 ||
+			VARSIZE(jmx_exporterconf_text) - VARHDRSZ > SYNCHDB_METADATA_PATH_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("jmx exporter conf file path cannot be empty or longer than %d",
+						 SYNCHDB_METADATA_PATH_SIZE)));
+	}
+	strlcpy(jmxconninfo.jmx_exporter_conf, text_to_cstring(jmx_exporterconf_text),
+			SYNCHDB_METADATA_PATH_SIZE);
+
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
+			"'jmx_exporter', '%s', "
+			"'jmx_exporter_port', %u, "
+			"'jmx_exporter_conf', '%s')::jsonb "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			jmxconninfo.jmx_exporter,
+			jmxconninfo.jmx_exporter_port,
+			jmxconninfo.jmx_exporter_conf,
+			NameStr(*name));
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_del_extra_conninfo
+ *
+ * This function deletes all extra connector parameters created by synchdb_add_extra_conninfo()
+ */
+Datum
+synchdb_del_jmx_exporter_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
+			"'jmx_exporter', "
+			"'jmx_exporter_port', "
+			"'jmx_exporter_conf'] "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			NameStr(*name));
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+/*
+ * synchdb_del_conninfo
  *
  * This function deletes a connector info record created by synchdb_add_conninfo()
  */
