@@ -31,6 +31,7 @@
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "storage/ipc.h"
+#include "utils/datum.h"
 
 /* external global variables */
 extern bool synchdb_dml_use_spi;
@@ -115,7 +116,7 @@ swap_tokens(const char * expression, const char * data, const char * wkb, const 
  * how to process this array of Datums
  */
 static Datum *
-spi_execute_select_one(const char * query, int * numcols)
+spi_execute_select_one(const char * query, int * numcols, MemoryContext ctx)
 {
 	int ret = -1, i = 0;
 	int numrows = -1;
@@ -191,16 +192,28 @@ spi_execute_select_one(const char * query, int * numcols)
 	tupdesc = SPI_tuptable->tupdesc;
 	*numcols = tupdesc->natts;
 
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	oldcontext = MemoryContextSwitchTo(ctx);
 	rowval = (Datum *) palloc0(*numcols * sizeof(Datum));
 
 	for (i = 0; i < *numcols; i++)
 	{
-		colval = SPI_getbinval(tuple, tupdesc, i+1, &isnull);
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+		colval = SPI_getbinval(tuple, tupdesc, i + 1, &isnull);
 		if (isnull)
 			rowval[i] = (Datum) 0;
 		else
-			rowval[i] = colval;
+		{
+			if (!attr->attbyval)
+			{
+				// Ensure detoasted, then deep copy
+				Datum detoasted = PointerGetDatum(PG_DETOAST_DATUM_COPY(colval));
+				rowval[i] = datumCopy(detoasted, false, attr->attlen);
+			}
+			else
+			{
+				rowval[i] = datumCopy(colval, true, attr->attlen);
+			}
+		}
 	}
 	MemoryContextSwitchTo(oldcontext);
 
@@ -884,8 +897,10 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	int numcols = -1;
 	StringInfoData strinfo;
 	Datum * res;
+	MemoryContext conninfoContext;
 
 	initStringInfo(&strinfo);
+	conninfoContext = AllocSetContextCreate(TopMemoryContext, "CONNINIT", ALLOCSET_DEFAULT_SIZES);
 
 	appendStringInfo(&strinfo, "SELECT "
 			"coalesce(data->>'hostname', 'null'), "
@@ -922,7 +937,7 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"synchdb_conninfo WHERE name = '%s'",
 			SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, name);
 
-	res = spi_execute_select_one(strinfo.data, &numcols);
+	res = spi_execute_select_one(strinfo.data, &numcols, conninfoContext);
 	if (!res)
 		return -1;
 
@@ -979,7 +994,8 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			conninfo->jmx.jmx_ssl_keystore_pass, conninfo->jmx.jmx_ssl_truststore,
 			conninfo->jmx.jmx_ssl_truststore_pass, conninfo->jmx.jmx_exporter,
 			conninfo->jmx.jmx_exporter_port, conninfo->jmx.jmx_exporter_conf);
-	pfree(res);
+
+	MemoryContextDelete(conninfoContext);
 	return 0;
 }
 
