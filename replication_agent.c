@@ -31,6 +31,7 @@
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "storage/ipc.h"
+#include "utils/datum.h"
 
 /* external global variables */
 extern bool synchdb_dml_use_spi;
@@ -115,7 +116,7 @@ swap_tokens(const char * expression, const char * data, const char * wkb, const 
  * how to process this array of Datums
  */
 static Datum *
-spi_execute_select_one(const char * query, int * numcols)
+spi_execute_select_one(const char * query, int * numcols, MemoryContext ctx)
 {
 	int ret = -1, i = 0;
 	int numrows = -1;
@@ -191,16 +192,28 @@ spi_execute_select_one(const char * query, int * numcols)
 	tupdesc = SPI_tuptable->tupdesc;
 	*numcols = tupdesc->natts;
 
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	oldcontext = MemoryContextSwitchTo(ctx);
 	rowval = (Datum *) palloc0(*numcols * sizeof(Datum));
 
 	for (i = 0; i < *numcols; i++)
 	{
-		colval = SPI_getbinval(tuple, tupdesc, i+1, &isnull);
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+		colval = SPI_getbinval(tuple, tupdesc, i + 1, &isnull);
 		if (isnull)
 			rowval[i] = (Datum) 0;
 		else
-			rowval[i] = colval;
+		{
+			if (!attr->attbyval)
+			{
+				// Ensure detoasted, then deep copy
+				Datum detoasted = PointerGetDatum(PG_DETOAST_DATUM_COPY(colval));
+				rowval[i] = datumCopy(detoasted, false, attr->attlen);
+			}
+			else
+			{
+				rowval[i] = datumCopy(colval, true, attr->attlen);
+			}
+		}
 	}
 	MemoryContextSwitchTo(oldcontext);
 
@@ -884,8 +897,10 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	int numcols = -1;
 	StringInfoData strinfo;
 	Datum * res;
+	MemoryContext conninfoContext;
 
 	initStringInfo(&strinfo);
+	conninfoContext = AllocSetContextCreate(TopMemoryContext, "CONNINIT", ALLOCSET_DEFAULT_SIZES);
 
 	appendStringInfo(&strinfo, "SELECT "
 			"coalesce(data->>'hostname', 'null'), "
@@ -902,12 +917,27 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"coalesce(data->>'ssl_keystore', 'null'), "
 			"coalesce(pgp_sym_decrypt((data->>'ssl_keystore_pass')::bytea, '%s'), 'null'), "
 			"coalesce(data->>'ssl_truststore', 'null'), "
-			"coalesce(pgp_sym_decrypt((data->>'ssl_truststore_pass')::bytea, '%s'), 'null') "
+			"coalesce(pgp_sym_decrypt((data->>'ssl_truststore_pass')::bytea, '%s'), 'null'), "
+			"coalesce(data->>'jmx_listenaddr', 'null'), "
+			"coalesce(data->>'jmx_port', 'null'), "
+			"coalesce(data->>'jmx_rmi_address', 'null'), "
+			"coalesce(data->>'jmx_rmi_port', 'null'), "
+			"(data->>'jmx_auth')::boolean, "
+			"coalesce(data->>'jmx_auth_passwdfile', 'null'), "
+			"coalesce(data->>'jmx_auth_accessfile', 'null'), "
+			"(data->>'jmx_ssl')::boolean, "
+			"coalesce(data->>'jmx_ssl_keystore', 'null'), "
+			"coalesce(pgp_sym_decrypt((data->>'jmx_ssl_keystore_pass')::bytea, '%s'), 'null'), "
+			"coalesce(data->>'jmx_ssl_truststore', 'null'), "
+			"coalesce(pgp_sym_decrypt((data->>'jmx_ssl_truststore_pass')::bytea, '%s'), 'null'), "
+			"coalesce(data->>'jmx_exporter', 'null'), "
+			"coalesce(data->>'jmx_exporter_port', 'null'), "
+			"coalesce(data->>'jmx_exporter_conf', 'null') "
 			"FROM "
 			"synchdb_conninfo WHERE name = '%s'",
-			SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, name);
+			SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, name);
 
-	res = spi_execute_select_one(strinfo.data, &numcols);
+	res = spi_execute_select_one(strinfo.data, &numcols, conninfoContext);
 	if (!res)
 		return -1;
 
@@ -928,14 +958,44 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	strlcpy(conninfo->extra.ssl_truststore, TextDatumGetCString(res[13]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
 	strlcpy(conninfo->extra.ssl_truststore_pass, TextDatumGetCString(res[14]) ,SYNCHDB_CONNINFO_PASSWORD_SIZE);
 
-	elog(DEBUG1, "name %s hostname %s, port %d, user %s pwd %s srcdb %s "
-			"dstdb %s table %s snapshottable %s connector %s extras(%s %s %s %s %s)",
+	strlcpy(conninfo->jmx.jmx_listenaddr, TextDatumGetCString(res[15]), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
+	conninfo->jmx.jmx_port = atoi(TextDatumGetCString(res[16]));
+	strlcpy(conninfo->jmx.jmx_rmiserveraddr, TextDatumGetCString(res[17]), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
+	conninfo->jmx.jmx_rmiport = atoi(TextDatumGetCString(res[18]));
+	conninfo->jmx.jmx_auth = DatumGetBool(res[19]);
+	strlcpy(conninfo->jmx.jmx_auth_passwdfile, TextDatumGetCString(res[20]), SYNCHDB_METADATA_PATH_SIZE);
+	strlcpy(conninfo->jmx.jmx_auth_accessfile, TextDatumGetCString(res[21]), SYNCHDB_METADATA_PATH_SIZE);
+	conninfo->jmx.jmx_ssl = DatumGetBool(res[22]);
+	strlcpy(conninfo->jmx.jmx_ssl_keystore, TextDatumGetCString(res[23]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	strlcpy(conninfo->jmx.jmx_ssl_keystore_pass, TextDatumGetCString(res[24]), SYNCHDB_CONNINFO_PASSWORD_SIZE);
+	strlcpy(conninfo->jmx.jmx_ssl_truststore, TextDatumGetCString(res[25]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	strlcpy(conninfo->jmx.jmx_ssl_truststore_pass, TextDatumGetCString(res[26]), SYNCHDB_CONNINFO_PASSWORD_SIZE);
+	strlcpy(conninfo->jmx.jmx_exporter, TextDatumGetCString(res[27]), SYNCHDB_METADATA_PATH_SIZE);
+	conninfo->jmx.jmx_exporter_port = atoi(TextDatumGetCString(res[28]));
+	strlcpy(conninfo->jmx.jmx_exporter_conf, TextDatumGetCString(res[29]), SYNCHDB_METADATA_PATH_SIZE);
+
+	elog(LOG, "name=%s hostname=%s, port=%d, user=%s pwd=%s srcdb=%s "
+			"dstdb=%s table=%s snapshottable=%s connector=%s extras(ssl_mode=%s ssl_keystore=%s "
+			"ssl_keystore_pass=%s ssl_truststore=%s ssl_truststore_pass=%s) "
+			"jmx(jmx_listenaddr=%s jmx_port=%d jmx_rmiserveraddr=%s jmx_rmiport=%d "
+			"jmx_auth=%s jmx_auth_passwdfile=%s jmx_auth_accessfile=%s jmx_ssl=%s "
+			"jmx_ssl_keystore=%s jmx_ssl_keystore_pass=%s jmx_ssl_truststore=%s "
+			"jmx_ssl_truststore_pass=%s jmx_exporter=%s jmx_exporter_port=%d "
+			"jmx_exporter_conf=%s)",
 			conninfo->name, conninfo->hostname, conninfo->port,
 			conninfo->user, conninfo->pwd, conninfo->srcdb,
 			conninfo->dstdb, conninfo->table, conninfo->snapshottable, *connector,
 			conninfo->extra.ssl_mode, conninfo->extra.ssl_keystore, conninfo->extra.ssl_keystore_pass,
-			conninfo->extra.ssl_truststore, conninfo->extra.ssl_truststore_pass);
-	pfree(res);
+			conninfo->extra.ssl_truststore, conninfo->extra.ssl_truststore_pass,
+			conninfo->jmx.jmx_listenaddr, conninfo->jmx.jmx_port, conninfo->jmx.jmx_rmiserveraddr,
+			conninfo->jmx.jmx_rmiport, conninfo->jmx.jmx_auth ? "true" : "false",
+			conninfo->jmx.jmx_auth_passwdfile, conninfo->jmx.jmx_auth_accessfile,
+			conninfo->jmx.jmx_ssl ? "true" : "false", conninfo->jmx.jmx_ssl_keystore,
+			conninfo->jmx.jmx_ssl_keystore_pass, conninfo->jmx.jmx_ssl_truststore,
+			conninfo->jmx.jmx_ssl_truststore_pass, conninfo->jmx.jmx_exporter,
+			conninfo->jmx.jmx_exporter_port, conninfo->jmx.jmx_exporter_conf);
+
+	MemoryContextDelete(conninfoContext);
 	return 0;
 }
 

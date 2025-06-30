@@ -80,9 +80,9 @@ clean_dbz:
 	cd $(DBZ_ENGINE_PATH) && mvn clean
 
 install_dbz:
-	rm -rf $(libdir)/dbz_engine
-	install -d $(libdir)/dbz_engine
-	cp -rp $(DBZ_ENGINE_PATH)/target/* $(libdir)/dbz_engine
+	rm -rf $(pkglibdir)/dbz_engine
+	install -d $(pkglibdir)/dbz_engine
+	cp -rp $(DBZ_ENGINE_PATH)/target/* $(pkglibdir)/dbz_engine
 
 .PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck dbcheck-tpcc mysqlcheck-tpcc sqlservercheck-tpcc oraclecheck-tpcc
 dbcheck:
