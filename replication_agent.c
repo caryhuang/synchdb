@@ -291,6 +291,7 @@ spi_execute(const char * query, ConnectorType type)
 	}
 	PG_CATCH();
 	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
 		ErrorData  *errdata = CopyErrorData();
 
 		if (errdata)
@@ -301,6 +302,7 @@ spi_execute(const char * query, ConnectorType type)
 			elog(LOG, "%s", g_eventStr);
 
 		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
 		SPI_finish();
 		ret = -1;
 		PG_RE_THROW();
@@ -410,6 +412,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 	}
 	PG_CATCH();
 	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
 		ErrorData  *errdata = CopyErrorData();
 		if (errdata)
 		{
@@ -423,6 +426,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 			pfree(msg);
 		}
 		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
 
 		/* dump the JSON change event as additional detail if available */
 		if (synchdb_log_event_on_error && g_eventStr != NULL)
@@ -601,6 +605,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 	}
 	PG_CATCH();
 	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
 		ErrorData  *errdata = CopyErrorData();
 		if (errdata)
 		{
@@ -614,6 +619,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			pfree(msg);
 		}
 		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
 
 		/* dump the JSON change event as additional detail if available */
 		if (synchdb_log_event_on_error && g_eventStr != NULL)
@@ -764,6 +770,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 	}
 	PG_CATCH();
 	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
 		ErrorData  *errdata = CopyErrorData();
 		if (errdata)
 		{
@@ -777,6 +784,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 			pfree(msg);
 		}
 		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
 
 		/* dump the JSON change event as additional detail if available */
 		if (synchdb_log_event_on_error && g_eventStr != NULL)
