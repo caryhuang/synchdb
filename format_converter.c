@@ -921,7 +921,7 @@ build_schema_jsonpos_hash(Jsonb * jb)
 	jsonposhash = hash_create("Name to jsonpos Hash Table",
 							512,
 							&hash_ctl,
-							HASH_ELEM | HASH_CONTEXT);
+							HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
 	schemadata = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 4, &isnull, false));
 	if (schemadata)
@@ -2310,14 +2310,14 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 		elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", schema, table, tableoid);
 
-		rel = table_open(tableoid, NoLock);
+		rel = table_open(tableoid, AccessShareLock);
 		tupdesc = RelationGetDescr(rel);
 #if SYNCHDB_PG_MAJOR_VERSION >= 1800
 		pkoid = RelationGetPrimaryKeyIndex(rel, true);
 #else
 		pkoid = RelationGetPrimaryKeyIndex(rel);
 #endif
-		table_close(rel, NoLock);
+		table_close(rel, AccessShareLock);
 
 		/*
 		 * DBZ supplies more columns than what PostreSQL have. This means ALTER
@@ -4378,7 +4378,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 		cacheentry->typeidhash = hash_create("Name to OID Hash Table",
 											 512,
 											 &hash_ctl,
-											 HASH_ELEM | HASH_CONTEXT);
+											 HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
 		/* point to the cached datatype hash */
 		typeidhash = cacheentry->typeidhash;
@@ -4388,7 +4388,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 		 * The type IDs are stored in typeidhash temporarily for the parser
 		 * below to look up
 		 */
-		rel = table_open(dbzdml->tableoid, NoLock);
+		rel = table_open(dbzdml->tableoid, AccessShareLock);
 		tupdesc = RelationGetDescr(rel);
 
 		/* get primary key bitmapset */
@@ -4416,7 +4416,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			}
 		}
 		bms_free(pkattrs);
-		table_close(rel, NoLock);
+		table_close(rel, AccessShareLock);
 
 		/*
 		 * build another hash to store json value's locations of schema data for correct additional param lookups

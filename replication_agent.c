@@ -336,7 +336,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 	 */
 	PG_TRY();
 	{
-		rel = table_open(tableoid, NoLock);
+		rel = table_open(tableoid, AccessShareLock);
 
 		/* initialize estate */
 		estate = CreateExecutorState();
@@ -403,7 +403,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
 
-		table_close(rel, NoLock);
+		table_close(rel, AccessShareLock);
 
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
@@ -431,7 +431,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
 		{
 			ExecCloseIndices(resultRelInfo);
-			table_close(rel, NoLock);
+			table_close(rel, AccessShareLock);
 			ExecResetTupleTable(estate->es_tupleTable, false);
 			FreeExecutorState(estate);
 			FlushErrorState();
@@ -473,7 +473,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 	 */
 	PG_TRY();
 	{
-		rel = table_open(tableoid, NoLock);
+		rel = table_open(tableoid, AccessShareLock);
 
 		/* initialize estate */
 		estate = CreateExecutorState();
@@ -597,7 +597,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		EvalPlanQualEnd(&epqstate);
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
-		table_close(rel, NoLock);
+		table_close(rel, AccessShareLock);
 	}
 	PG_CATCH();
 	{
@@ -625,7 +625,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			EvalPlanQualEnd(&epqstate);
 			ExecResetTupleTable(estate->es_tupleTable, false);
 			FreeExecutorState(estate);
-			table_close(rel, NoLock);
+			table_close(rel, AccessShareLock);
 			FlushErrorState();
 			return -1;
 		}
@@ -664,7 +664,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 	 */
 	PG_TRY();
 	{
-		rel = table_open(tableoid, NoLock);
+		rel = table_open(tableoid, AccessShareLock);
 
 		/* initialize estate */
 		estate = CreateExecutorState();
@@ -760,7 +760,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 		EvalPlanQualEnd(&epqstate);
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
-		table_close(rel, NoLock);
+		table_close(rel, AccessShareLock);
 	}
 	PG_CATCH();
 	{
@@ -788,7 +788,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 			EvalPlanQualEnd(&epqstate);
 			ExecResetTupleTable(estate->es_tupleTable, false);
 			FreeExecutorState(estate);
-			table_close(rel, NoLock);
+			table_close(rel, AccessShareLock);
 			FlushErrorState();
 			return -1;
 		}
