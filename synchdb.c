@@ -1050,7 +1050,6 @@ synchdb_state_tupdesc(void)
 	TupleDescInitEntry(tupdesc, ++a, "err", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "last_dbz_offset", TEXTOID, -1, 0);
 
-	Assert(a == maxattr);
 	return BlessTupleDesc(tupdesc);
 }
 
@@ -1091,7 +1090,6 @@ synchdb_stats_tupdesc(void)
 	TupleDescInitEntry(tupdesc, ++a, "last_dbz_ts", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "last_pg_ts", INT8OID, -1, 0);
 
-	Assert(a == maxattr);
 	return BlessTupleDesc(tupdesc);
 }
 

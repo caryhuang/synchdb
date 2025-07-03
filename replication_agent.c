@@ -291,6 +291,7 @@ spi_execute(const char * query, ConnectorType type)
 	}
 	PG_CATCH();
 	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
 		ErrorData  *errdata = CopyErrorData();
 
 		if (errdata)
@@ -301,6 +302,7 @@ spi_execute(const char * query, ConnectorType type)
 			elog(LOG, "%s", g_eventStr);
 
 		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
 		SPI_finish();
 		ret = -1;
 		PG_RE_THROW();
@@ -336,7 +338,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 	 */
 	PG_TRY();
 	{
-		rel = table_open(tableoid, NoLock);
+		rel = table_open(tableoid, AccessShareLock);
 
 		/* initialize estate */
 		estate = CreateExecutorState();
@@ -403,13 +405,14 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
 
-		table_close(rel, NoLock);
+		table_close(rel, AccessShareLock);
 
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
 	}
 	PG_CATCH();
 	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
 		ErrorData  *errdata = CopyErrorData();
 		if (errdata)
 		{
@@ -423,6 +426,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 			pfree(msg);
 		}
 		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
 
 		/* dump the JSON change event as additional detail if available */
 		if (synchdb_log_event_on_error && g_eventStr != NULL)
@@ -431,7 +435,7 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
 		{
 			ExecCloseIndices(resultRelInfo);
-			table_close(rel, NoLock);
+			table_close(rel, AccessShareLock);
 			ExecResetTupleTable(estate->es_tupleTable, false);
 			FreeExecutorState(estate);
 			FlushErrorState();
@@ -473,7 +477,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 	 */
 	PG_TRY();
 	{
-		rel = table_open(tableoid, NoLock);
+		rel = table_open(tableoid, AccessShareLock);
 
 		/* initialize estate */
 		estate = CreateExecutorState();
@@ -597,10 +601,11 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		EvalPlanQualEnd(&epqstate);
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
-		table_close(rel, NoLock);
+		table_close(rel, AccessShareLock);
 	}
 	PG_CATCH();
 	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
 		ErrorData  *errdata = CopyErrorData();
 		if (errdata)
 		{
@@ -614,6 +619,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			pfree(msg);
 		}
 		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
 
 		/* dump the JSON change event as additional detail if available */
 		if (synchdb_log_event_on_error && g_eventStr != NULL)
@@ -625,7 +631,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			EvalPlanQualEnd(&epqstate);
 			ExecResetTupleTable(estate->es_tupleTable, false);
 			FreeExecutorState(estate);
-			table_close(rel, NoLock);
+			table_close(rel, AccessShareLock);
 			FlushErrorState();
 			return -1;
 		}
@@ -664,7 +670,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 	 */
 	PG_TRY();
 	{
-		rel = table_open(tableoid, NoLock);
+		rel = table_open(tableoid, AccessShareLock);
 
 		/* initialize estate */
 		estate = CreateExecutorState();
@@ -760,10 +766,11 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 		EvalPlanQualEnd(&epqstate);
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
-		table_close(rel, NoLock);
+		table_close(rel, AccessShareLock);
 	}
 	PG_CATCH();
 	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
 		ErrorData  *errdata = CopyErrorData();
 		if (errdata)
 		{
@@ -777,6 +784,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 			pfree(msg);
 		}
 		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
 
 		/* dump the JSON change event as additional detail if available */
 		if (synchdb_log_event_on_error && g_eventStr != NULL)
@@ -788,7 +796,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 			EvalPlanQualEnd(&epqstate);
 			ExecResetTupleTable(estate->es_tupleTable, false);
 			FreeExecutorState(estate);
-			table_close(rel, NoLock);
+			table_close(rel, AccessShareLock);
 			FlushErrorState();
 			return -1;
 		}
