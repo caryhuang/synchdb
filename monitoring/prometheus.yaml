@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'debezium-jvm'
+    static_configs:
+      - targets: ['10.55.13.17:9404']  # Replace with your host IP if not using Docker Desktop
+
