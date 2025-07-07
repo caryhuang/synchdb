@@ -98,9 +98,10 @@ public class DebeziumRunner {
 		private String sslTruststorePass;
 		private int logLevel;
 		private String snapshottable;
+		private String dstdb;
 
 		/* constructor requires all required parameters for a connector to work */
-		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode)
+		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb)
 		{
 			this.connectorName = connectorName;
 			this.connectorType = connectorType;
@@ -112,6 +113,7 @@ public class DebeziumRunner {
 			this.table = table;
 			this.snapshottable = snapshottable;
 			this.snapshotMode = snapshotMode;
+			this.dstdb = dstdb;
 		}
 		public MyParameters setBatchSize(int batchSize)
 		{
@@ -215,6 +217,7 @@ public class DebeziumRunner {
 			logger.warn("database = " + this.database);
 			logger.warn("table = " + this.table);
 			logger.warn("snapshotMode = " + this.snapshotMode);
+			logger.warn("dstdb = " + this.dstdb);
 
 			logger.warn("batchSize = " + this.batchSize);
 			logger.warn("queueSize = " + this.queueSize);
@@ -393,16 +396,16 @@ public class DebeziumRunner {
 			case TYPE_MYSQL:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.mysql.MySqlConnector");
-				int hash = myParameters.connectorName.hashCode();
+				int hash = (myParameters.connectorName + myParameters.dstdb).hashCode();
 				long unsignedhash = Integer.toUnsignedLong(hash);
 				long serverid = 1 + (unsignedhash % (4294967295L - 1));
 
 				logger.warn("derived server id " + serverid);
 				props.setProperty("database.server.id", String.valueOf(serverid));	/* todo: make configurable */
 
-				offsetfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_schemahistory.dat";
-				signalfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_signal.dat";
+				offsetfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+				signalfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
 
 				if (myParameters.database.equals("null"))
 					logger.warn("database is null - skip setting database.include.list property");
@@ -428,9 +431,9 @@ public class DebeziumRunner {
 			case TYPE_ORACLE:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
-				offsetfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_schemahistory.dat";
-				signalfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_signal.dat";
+				offsetfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+				signalfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
 
                 props.setProperty("database.dbname", myParameters.database);
 				if (myParameters.database.equals("null"))
@@ -448,9 +451,9 @@ public class DebeziumRunner {
 			case TYPE_SQLSERVER:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");
-				offsetfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_schemahistory.dat";
-				signalfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_signal.dat";
+				offsetfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+				signalfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
 				
 				if (myParameters.database.equals("null"))
 					logger.warn("database is null - skip setting database.include.list property");

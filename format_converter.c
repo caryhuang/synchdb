@@ -5294,6 +5294,14 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 		return;
 	}
 
+	/*
+	 * regardless of the operation, always insert extra query to clean up
+	 * synchdb_attribute table in case some relations have been removed by user
+	 * manually.
+	 */
+	appendStringInfo(&strinfo, "DELETE FROM %s WHERE attrelid NOT IN "
+			"(SELECT oid FROM pg_class);", SYNCHDB_ATTRIBUTE_TABLE);
+
 	/* execute the query using SPI */
 	ra_executeCommand(strinfo.data);
 }
