@@ -68,6 +68,8 @@ PG_FUNCTION_INFO_V1(synchdb_add_jmx_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_jmx_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_add_jmx_exporter_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_jmx_exporter_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_add_olr_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_del_olr_conninfo);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -158,7 +160,8 @@ static void initialize_jvm(JMXConnectionInfo * jmx);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
 static void main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
-static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo);
+static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass,
+		const ExtraConnectionInfo * extraConnInfo, const OLRConnectionInfo * olrConnInfo);
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
 
 /*
@@ -189,16 +192,18 @@ count_active_connectors(void)
  *
  * @return: void
  */
-static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo)
+static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo,
+		const OLRConnectionInfo * olrConnInfo)
 {
 	jmethodID setBatchSize, setQueueSize, setSkippedOperations, setConnectTimeout, setQueryTimeout;
 	jmethodID setSnapshotThreadNum, setSnapshotFetchSize, setSnapshotMinRowToStreamResults;
 	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
 	jmethodID setOffsetFlushIntervalMs, setCaptureOnlySelectedTableDDL;
 	jmethodID setSslmode, setSslKeystore, setSslKeystorePass, setSslTruststore, setSslTruststorePass;
-	jmethodID setLogLevel;
+	jmethodID setLogLevel, setOlr;
 	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
 	jstring jdbz_sslmode, jdbz_sslkeystore, jdbz_sslkeystorepass, jdbz_ssltruststore, jdbz_ssltruststorepass;
+	jstring jolrHost, jolrSource;
 
 	setBatchSize = (*env)->GetMethodID(env, myParametersClass, "setBatchSize",
 			"(I)Lcom/example/DebeziumRunner$MyParameters;");
@@ -502,6 +507,32 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 	}
 	else
 		elog(WARNING, "failed to find setLogLevel method");
+
+	/* Openlog Replicator Options for Oracle */
+	if (strcasecmp(olrConnInfo->olr_host, "null") && olrConnInfo->olr_port != 0)
+	{
+		jolrHost = (*env)->NewStringUTF(env, olrConnInfo->olr_host);
+		jolrSource = (*env)->NewStringUTF(env, olrConnInfo->olr_source);
+
+		setOlr = (*env)->GetMethodID(env, myParametersClass, "setOlr",
+				"(Ljava/lang/String;ILjava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setOlr)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setOlr, jolrHost,
+					olrConnInfo->olr_port, jolrSource);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setOlr method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setOlr method");
+
+		if (jolrHost)
+				(*env)->DeleteLocalRef(env, jolrHost);
+		if (jolrSource)
+				(*env)->DeleteLocalRef(env, jolrSource);
+	}
 	/*
 	 * additional parameters that we want to pass to Debezium on the java side
 	 * will be added here, Make sure to add the matching methods in the MyParameters
@@ -850,7 +881,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	}
 
 	/* set extra parameters */
-	set_extra_dbz_parameters(myParametersObj, myParametersClass, &(connInfo->extra));
+	set_extra_dbz_parameters(myParametersObj, myParametersClass, &(connInfo->extra), &(connInfo->olr));
 
 	/* Find the startEngine method */
 	mid = (*env)->GetMethodID(env, cls, "startEngine", "(Lcom/example/DebeziumRunner$MyParameters;)V");
@@ -4356,6 +4387,90 @@ synchdb_del_jmx_exporter_conninfo(PG_FUNCTION_ARGS)
 			NameStr(*name));
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
 }
+
+/*
+ * synchdb_add_olr_conninfo
+ *
+ * This function configures optional Openlog Replicator parameters to a Oracle
+ * connector. Having this enables Openlog Replicator adapter instead of the default
+ * Logminer.
+ */
+Datum
+synchdb_add_olr_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	text * olr_host_text = PG_GETARG_TEXT_PP(1);
+	unsigned int olr_port = PG_GETARG_UINT32(2);
+	text * olr_source_text = PG_GETARG_TEXT_PP(3);
+
+	OLRConnectionInfo olrconninfo = {0};
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	if (VARSIZE(olr_host_text) - VARHDRSZ == 0 ||
+			VARSIZE(olr_host_text) - VARHDRSZ > SYNCHDB_CONNINFO_HOSTNAME_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Openlog Replicator host address cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_HOSTNAME_SIZE)));
+	}
+	strlcpy(olrconninfo.olr_host, text_to_cstring(olr_host_text), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
+
+	olrconninfo.olr_port = olr_port;
+	if (olrconninfo.olr_port == 0 || olrconninfo.olr_port > 65535)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid port number")));
+	}
+
+	if (VARSIZE(olr_source_text) - VARHDRSZ == 0 ||
+			VARSIZE(olr_source_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Openlog Replicator data source cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_NAME_SIZE)));
+	}
+	strlcpy(olrconninfo.olr_source, text_to_cstring(olr_source_text), SYNCHDB_CONNINFO_NAME_SIZE);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
+			"'olr_host', '%s', "
+			"'olr_port', %u, "
+			"'olr_source', '%s')::jsonb "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			olrconninfo.olr_host,
+			olrconninfo.olr_port,
+			olrconninfo.olr_source,
+			NameStr(*name));
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_del_olr_conninfo
+ *
+ * This function deletes all Openlog Replicator parameters created by synchdb_add_olr_conninfo()
+ */
+Datum
+synchdb_del_olr_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
+			"'olr_host', "
+			"'olr_port', "
+			"'olr_source'] "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			NameStr(*name));
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
 /*
  * synchdb_del_conninfo
  *

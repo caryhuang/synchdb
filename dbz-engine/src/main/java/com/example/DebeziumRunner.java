@@ -99,6 +99,9 @@ public class DebeziumRunner {
 		private int logLevel;
 		private String snapshottable;
 		private String dstdb;
+		private String olrHost;
+		private int olrPort;
+		private String olrSource;
 
 		/* constructor requires all required parameters for a connector to work */
 		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb)
@@ -205,6 +208,13 @@ public class DebeziumRunner {
 			this.logLevel = logLevel;
 			return this;
 		}
+		public MyParameters setOlr(String olrHost, int olrPort, String olrSource)
+		{
+			this.olrHost = olrHost;
+			this.olrPort = olrPort;
+			this.olrSource = olrSource;
+			return this;
+		}
 
 		/* add more setters here to incrementally set parameters */
 		public void print()
@@ -238,6 +248,11 @@ public class DebeziumRunner {
 			logger.warn("sslTruststorePass = " + this.sslTruststorePass);
 			logger.warn("logLevel = " + this.logLevel);
 			logger.warn("snapshottable = " + this.snapshottable);
+			
+			logger.warn("olrHost = " + this.olrHost);
+			logger.warn("olrPort = " + this.olrPort);
+			logger.warn("olrSource = " + this.olrSource);
+
 		}
 
 	}
@@ -446,6 +461,18 @@ public class DebeziumRunner {
 				props.setProperty("schema.include.list", myParameters.user);
 				props.setProperty("lob.enabled", "true");
 				props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
+
+				/* openlog replicator */
+				if (myParameters.olrHost != null && myParameters.olrSource != null && myParameters.olrPort > 0)
+				{
+					props.setProperty("openlogreplicator.source", myParameters.olrSource);
+					props.setProperty("openlogreplicator.host", myParameters.olrHost);
+					props.setProperty("openlogreplicator.port", String.valueOf(myParameters.olrPort));
+					props.setProperty("database.connection.adapter", "olr");
+				}
+        		else
+            		logger.warn("olrHost is null - skip setting Openlog Replicator property");
+
 				break;
 			}
 			case TYPE_SQLSERVER:
