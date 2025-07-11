@@ -198,6 +198,17 @@ typedef struct _JMXConnectionInfo
 } JMXConnectionInfo;
 
 /**
+ * OLRConnectionInfo - Extra OLR Connector parameters are put here.
+ */
+typedef struct _OLRConnectionInfo
+{
+	/* OLR server options */
+	char olr_host[SYNCHDB_CONNINFO_HOSTNAME_SIZE];
+	unsigned int olr_port;
+	char olr_source[SYNCHDB_CONNINFO_NAME_SIZE];
+} OLRConnectionInfo;
+
+/**
  * ConnectionInfo - DBZ Connection info. These are put in shared memory so
  * connector background workers can access when they are spawned.
  */
@@ -217,6 +228,7 @@ typedef struct _ConnectionInfo
     bool isOraCompat; /* added to support ivorysql's oracle compatible mode */
     ExtraConnectionInfo extra;
     JMXConnectionInfo jmx;
+    OLRConnectionInfo olr;
 } ConnectionInfo;
 
 /**

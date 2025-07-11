@@ -68,6 +68,8 @@ PG_FUNCTION_INFO_V1(synchdb_add_jmx_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_jmx_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_add_jmx_exporter_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_jmx_exporter_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_add_olr_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_del_olr_conninfo);
 
 /* Constants */
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
@@ -152,13 +154,14 @@ static void prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo
 static const char *connectorStateAsString(ConnectorState state);
 static void reset_shm_request_state(int connectorId);
 static int dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file);
-static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId, const char * snapshotMode);
+static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId);
 static void setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode);
 static void initialize_jvm(JMXConnectionInfo * jmx);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
 static void main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
-static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo);
+static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass,
+		const ExtraConnectionInfo * extraConnInfo, const OLRConnectionInfo * olrConnInfo);
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
 
 /*
@@ -189,16 +192,18 @@ count_active_connectors(void)
  *
  * @return: void
  */
-static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo)
+static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo,
+		const OLRConnectionInfo * olrConnInfo)
 {
 	jmethodID setBatchSize, setQueueSize, setSkippedOperations, setConnectTimeout, setQueryTimeout;
 	jmethodID setSnapshotThreadNum, setSnapshotFetchSize, setSnapshotMinRowToStreamResults;
 	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
 	jmethodID setOffsetFlushIntervalMs, setCaptureOnlySelectedTableDDL;
 	jmethodID setSslmode, setSslKeystore, setSslKeystorePass, setSslTruststore, setSslTruststorePass;
-	jmethodID setLogLevel;
+	jmethodID setLogLevel, setOlr;
 	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
 	jstring jdbz_sslmode, jdbz_sslkeystore, jdbz_sslkeystorepass, jdbz_ssltruststore, jdbz_ssltruststorepass;
+	jstring jolrHost, jolrSource;
 
 	setBatchSize = (*env)->GetMethodID(env, myParametersClass, "setBatchSize",
 			"(I)Lcom/example/DebeziumRunner$MyParameters;");
@@ -502,6 +507,32 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 	}
 	else
 		elog(WARNING, "failed to find setLogLevel method");
+
+	/* Openlog Replicator Options for Oracle */
+	if (strcasecmp(olrConnInfo->olr_host, "null") && olrConnInfo->olr_port != 0)
+	{
+		jolrHost = (*env)->NewStringUTF(env, olrConnInfo->olr_host);
+		jolrSource = (*env)->NewStringUTF(env, olrConnInfo->olr_source);
+
+		setOlr = (*env)->GetMethodID(env, myParametersClass, "setOlr",
+				"(Ljava/lang/String;ILjava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setOlr)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setOlr, jolrHost,
+					olrConnInfo->olr_port, jolrSource);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setOlr method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setOlr method");
+
+		if (jolrHost)
+				(*env)->DeleteLocalRef(env, jolrHost);
+		if (jolrSource)
+				(*env)->DeleteLocalRef(env, jolrSource);
+	}
 	/*
 	 * additional parameters that we want to pass to Debezium on the java side
 	 * will be added here, Make sure to add the matching methods in the MyParameters
@@ -794,7 +825,7 @@ static int
 dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode)
 {
 	jmethodID mid, paramConstruct;
-	jstring jHostname, jUser, jPassword, jDatabase, jTable, jSnapshotTable, jName, jSnapshot;
+	jstring jHostname, jUser, jPassword, jDatabase, jTable, jSnapshotTable, jName, jSnapshot, jdstdb;
 	jthrowable exception;
 	jclass myParametersClass;
 	jobject myParametersObj;
@@ -822,7 +853,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	paramConstruct = (*env)->GetMethodID(env, myParametersClass, "<init>",
 			"(Lcom/example/DebeziumRunner;Ljava/lang/String;ILjava/lang/String;ILjava/lang/String;"
 			"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
-			"Ljava/lang/String;)V");
+			"Ljava/lang/String;Ljava/lang/String;)V");
 	if (paramConstruct == NULL)
 	{
 		elog(WARNING, "failed to find myParameters Constructor");
@@ -838,10 +869,11 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	jSnapshotTable = (*env)->NewStringUTF(env, connInfo->snapshottable);
 	jName = (*env)->NewStringUTF(env, connInfo->name);
 	jSnapshot = (*env)->NewStringUTF(env, snapshotMode);
+	jdstdb = (*env)->NewStringUTF(env, connInfo->dstdb);
 
 	myParametersObj = (*env)->NewObject(env, myParametersClass, paramConstruct, obj,
 			jName, connectorType, jHostname, connInfo->port, jUser, jPassword,
-			jDatabase, jTable, jSnapshotTable, jSnapshot);
+			jDatabase, jTable, jSnapshotTable, jSnapshot, jdstdb);
 	if (!myParametersObj)
 	{
 		elog(WARNING, "failed to create MyParameters object");
@@ -849,7 +881,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	}
 
 	/* set extra parameters */
-	set_extra_dbz_parameters(myParametersObj, myParametersClass, &(connInfo->extra));
+	set_extra_dbz_parameters(myParametersObj, myParametersClass, &(connInfo->extra), &(connInfo->olr));
 
 	/* Find the startEngine method */
 	mid = (*env)->GetMethodID(env, cls, "startEngine", "(Lcom/example/DebeziumRunner$MyParameters;)V");
@@ -890,6 +922,8 @@ cleanup:
 		(*env)->DeleteLocalRef(env, jName);
 	if (jSnapshot)
 		(*env)->DeleteLocalRef(env, jSnapshot);
+	if (jdstdb)
+		(*env)->DeleteLocalRef(env, jdstdb);
 
 	return exception ? -1 : 0;
 }
@@ -1350,7 +1384,7 @@ dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char 
  * @param snapshotMode: The new snapshot mode requested
  */
 static void
-processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId, const char * snapshotMode)
+processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId)
 {
 	SynchdbRequest *req, *reqcopy;
 	ConnectorState *currstate, *currstatecopy;
@@ -1419,7 +1453,11 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 		/* restart dbz engine */
 		elog(DEBUG1, "restart dbz engine...");
 
-		ret = dbz_engine_start(connInfo, type, snapshotMode);
+		/*
+		 * always resumes to initial mode for safety reasons. Users can use the restart
+		 * routine to switch to a different snapshot mode as needed
+		 */
+		ret = dbz_engine_start(connInfo, type, "initial");
 		if (ret < 0)
 		{
 			elog(WARNING, "Failed to restart dbz engine");
@@ -1781,7 +1819,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 			break;
 		}
 
-		processRequestInterrupt(connInfo, connectorType, myConnectorId, snapshotMode);
+		processRequestInterrupt(connInfo, connectorType, myConnectorId);
 
 		currstate = get_shm_connector_state_enum(myConnectorId);
 		switch (currstate)
@@ -1897,7 +1935,7 @@ cleanup(ConnectorType connectorType)
  * no free connector ID is available.
  */
 static int
-assign_connector_id(char * name)
+assign_connector_id(const char * name, const char * dstdb)
 {
 	int i = 0;
 
@@ -1907,7 +1945,8 @@ assign_connector_id(char * name)
 	 */
 	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
-		if (!strcasecmp(sdb_state->connectors[i].conninfo.name, name))
+		if (!strcasecmp(sdb_state->connectors[i].conninfo.name, name) &&
+			!strcasecmp(sdb_state->connectors[i].conninfo.dstdb, dstdb))
 		{
 			return i;
 		}
@@ -1917,7 +1956,8 @@ assign_connector_id(char * name)
 	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
 		if (sdb_state->connectors[i].state == STATE_UNDEF &&
-				strlen(sdb_state->connectors[i].conninfo.name) == 0)
+				strlen(sdb_state->connectors[i].conninfo.name) == 0 &&
+				strlen(sdb_state->connectors[i].conninfo.dstdb) == 0)
 		{
 			return i;
 		}
@@ -1945,7 +1985,7 @@ assign_connector_id(char * name)
  * no free connector ID is available.
  */
 static int
-get_shm_connector_id_by_name(const char * name)
+get_shm_connector_id_by_name(const char * name, const char * dstdb)
 {
 	int i = 0;
 
@@ -1954,7 +1994,8 @@ get_shm_connector_id_by_name(const char * name)
 
 	for (i = 0; i < synchdb_max_connector_workers; i++)
 	{
-		if (!strcmp(sdb_state->connectors[i].conninfo.name, name))
+		if (!strcmp(sdb_state->connectors[i].conninfo.name, name) &&
+			!strcmp(sdb_state->connectors[i].conninfo.dstdb, dstdb))
 		{
 			return i;
 		}
@@ -2946,7 +2987,7 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorid = assign_connector_id(connInfo.name);
+	connectorid = assign_connector_id(connInfo.name, connInfo.dstdb);
 	if (connectorid == -1)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -3035,7 +3076,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorid = assign_connector_id(connInfo.name);
+	connectorid = assign_connector_id(connInfo.name, connInfo.dstdb);
 	if (connectorid == -1)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -3110,7 +3151,7 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
@@ -3181,11 +3222,19 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	funcctx = SRF_PERCALL_SETUP();
 	idx = (int *)funcctx->user_fctx;
 
-	if (*idx < count_active_connectors())
+	while (*idx < count_active_connectors())
 	{
 		Datum values[7];
 		bool nulls[7] = {0};
 		HeapTuple tuple;
+
+		/* we only want to show the connectors created in current database */
+		if (strcasecmp(sdb_state->connectors[*idx].conninfo.dstdb,
+				get_database_name(MyDatabaseId)))
+		{
+	        (*idx)++;
+	        continue;
+		}
 
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
 		values[0] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
@@ -3240,11 +3289,19 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 	funcctx = SRF_PERCALL_SETUP();
 	idx = (int *)funcctx->user_fctx;
 
-	if (*idx < count_active_connectors())
+	while (*idx < count_active_connectors())
 	{
 		Datum values[17];
 		bool nulls[17] = {0};
 		HeapTuple tuple;
+
+		/* we only want to show the connectors created in current database */
+		if (strcasecmp(sdb_state->connectors[*idx].conninfo.dstdb,
+				get_database_name(MyDatabaseId)))
+		{
+	        (*idx)++;
+	        continue;
+		}
 
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
 		values[0] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
@@ -3300,7 +3357,7 @@ synchdb_reset_stats(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
@@ -3339,7 +3396,7 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
@@ -3396,7 +3453,7 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
@@ -3456,7 +3513,7 @@ synchdb_set_offset(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
@@ -3708,7 +3765,7 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
@@ -3780,7 +3837,7 @@ synchdb_log_jvm_meminfo(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
@@ -3881,7 +3938,7 @@ synchdb_reload_objmap(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
-	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
 	if (connectorId < 0)
 		ereport(ERROR,
 				(errmsg("dbz connector (%s) does not have connector ID assigned",
@@ -4330,6 +4387,90 @@ synchdb_del_jmx_exporter_conninfo(PG_FUNCTION_ARGS)
 			NameStr(*name));
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
 }
+
+/*
+ * synchdb_add_olr_conninfo
+ *
+ * This function configures optional Openlog Replicator parameters to a Oracle
+ * connector. Having this enables Openlog Replicator adapter instead of the default
+ * Logminer.
+ */
+Datum
+synchdb_add_olr_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	text * olr_host_text = PG_GETARG_TEXT_PP(1);
+	unsigned int olr_port = PG_GETARG_UINT32(2);
+	text * olr_source_text = PG_GETARG_TEXT_PP(3);
+
+	OLRConnectionInfo olrconninfo = {0};
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	if (VARSIZE(olr_host_text) - VARHDRSZ == 0 ||
+			VARSIZE(olr_host_text) - VARHDRSZ > SYNCHDB_CONNINFO_HOSTNAME_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Openlog Replicator host address cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_HOSTNAME_SIZE)));
+	}
+	strlcpy(olrconninfo.olr_host, text_to_cstring(olr_host_text), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
+
+	olrconninfo.olr_port = olr_port;
+	if (olrconninfo.olr_port == 0 || olrconninfo.olr_port > 65535)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid port number")));
+	}
+
+	if (VARSIZE(olr_source_text) - VARHDRSZ == 0 ||
+			VARSIZE(olr_source_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Openlog Replicator data source cannot be empty or longer than %d",
+						 SYNCHDB_CONNINFO_NAME_SIZE)));
+	}
+	strlcpy(olrconninfo.olr_source, text_to_cstring(olr_source_text), SYNCHDB_CONNINFO_NAME_SIZE);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
+			"'olr_host', '%s', "
+			"'olr_port', %u, "
+			"'olr_source', '%s')::jsonb "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			olrconninfo.olr_host,
+			olrconninfo.olr_port,
+			olrconninfo.olr_source,
+			NameStr(*name));
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_del_olr_conninfo
+ *
+ * This function deletes all Openlog Replicator parameters created by synchdb_add_olr_conninfo()
+ */
+Datum
+synchdb_del_olr_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
+			"'olr_host', "
+			"'olr_port', "
+			"'olr_source'] "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			NameStr(*name));
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
 /*
  * synchdb_del_conninfo
  *
@@ -4351,7 +4492,7 @@ synchdb_del_conninfo(PG_FUNCTION_ARGS)
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
 	/* if connector is running, we will attemppt to shut it down */
-	connectorId = get_shm_connector_id_by_name(NameStr(*name));
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
 	if (connectorId >= 0)
 	{
 		pid = get_shm_connector_pid(connectorId);

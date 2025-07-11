@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets:
+          - localhost:9090
+        labels:
+          app: prometheus
+
+  - job_name: 'debezium-jvm'
+    static_configs:
+      - targets:
+        - 10.55.13.17:9404 # replace with SynchDB MySQL connector endpoint
+        - 10.55.13.17:9405 # replace with SynchDB SQL Server connector endpoint
+        - 10.55.13.17:9406 # replace with SynchDB Oracle connector endpoint

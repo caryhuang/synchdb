@@ -132,3 +132,11 @@ LANGUAGE C IMMUTABLE STRICT;
 CREATE OR REPLACE FUNCTION synchdb_del_jmx_exporter_conninfo(name) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_add_olr_conninfo(name, text, int, text) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_del_olr_conninfo(name) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;

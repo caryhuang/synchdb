@@ -98,9 +98,13 @@ public class DebeziumRunner {
 		private String sslTruststorePass;
 		private int logLevel;
 		private String snapshottable;
+		private String dstdb;
+		private String olrHost;
+		private int olrPort;
+		private String olrSource;
 
 		/* constructor requires all required parameters for a connector to work */
-		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode)
+		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb)
 		{
 			this.connectorName = connectorName;
 			this.connectorType = connectorType;
@@ -112,6 +116,7 @@ public class DebeziumRunner {
 			this.table = table;
 			this.snapshottable = snapshottable;
 			this.snapshotMode = snapshotMode;
+			this.dstdb = dstdb;
 		}
 		public MyParameters setBatchSize(int batchSize)
 		{
@@ -203,6 +208,13 @@ public class DebeziumRunner {
 			this.logLevel = logLevel;
 			return this;
 		}
+		public MyParameters setOlr(String olrHost, int olrPort, String olrSource)
+		{
+			this.olrHost = olrHost;
+			this.olrPort = olrPort;
+			this.olrSource = olrSource;
+			return this;
+		}
 
 		/* add more setters here to incrementally set parameters */
 		public void print()
@@ -215,6 +227,7 @@ public class DebeziumRunner {
 			logger.warn("database = " + this.database);
 			logger.warn("table = " + this.table);
 			logger.warn("snapshotMode = " + this.snapshotMode);
+			logger.warn("dstdb = " + this.dstdb);
 
 			logger.warn("batchSize = " + this.batchSize);
 			logger.warn("queueSize = " + this.queueSize);
@@ -235,6 +248,11 @@ public class DebeziumRunner {
 			logger.warn("sslTruststorePass = " + this.sslTruststorePass);
 			logger.warn("logLevel = " + this.logLevel);
 			logger.warn("snapshottable = " + this.snapshottable);
+			
+			logger.warn("olrHost = " + this.olrHost);
+			logger.warn("olrPort = " + this.olrPort);
+			logger.warn("olrSource = " + this.olrSource);
+
 		}
 
 	}
@@ -393,16 +411,16 @@ public class DebeziumRunner {
 			case TYPE_MYSQL:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.mysql.MySqlConnector");
-				int hash = myParameters.connectorName.hashCode();
+				int hash = (myParameters.connectorName + myParameters.dstdb).hashCode();
 				long unsignedhash = Integer.toUnsignedLong(hash);
 				long serverid = 1 + (unsignedhash % (4294967295L - 1));
 
 				logger.warn("derived server id " + serverid);
 				props.setProperty("database.server.id", String.valueOf(serverid));	/* todo: make configurable */
 
-				offsetfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_schemahistory.dat";
-				signalfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_signal.dat";
+				offsetfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+				signalfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
 
 				if (myParameters.database.equals("null"))
 					logger.warn("database is null - skip setting database.include.list property");
@@ -428,9 +446,9 @@ public class DebeziumRunner {
 			case TYPE_ORACLE:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
-				offsetfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_schemahistory.dat";
-				signalfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_signal.dat";
+				offsetfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+				signalfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
 
                 props.setProperty("database.dbname", myParameters.database);
 				if (myParameters.database.equals("null"))
@@ -443,14 +461,26 @@ public class DebeziumRunner {
 				props.setProperty("schema.include.list", myParameters.user);
 				props.setProperty("lob.enabled", "true");
 				props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
+
+				/* openlog replicator */
+				if (myParameters.olrHost != null && myParameters.olrSource != null && myParameters.olrPort > 0)
+				{
+					props.setProperty("openlogreplicator.source", myParameters.olrSource);
+					props.setProperty("openlogreplicator.host", myParameters.olrHost);
+					props.setProperty("openlogreplicator.port", String.valueOf(myParameters.olrPort));
+					props.setProperty("database.connection.adapter", "olr");
+				}
+        		else
+            		logger.warn("olrHost is null - skip setting Openlog Replicator property");
+
 				break;
 			}
 			case TYPE_SQLSERVER:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");
-				offsetfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_schemahistory.dat";
-				signalfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_signal.dat";
+				offsetfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+				signalfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
 				
 				if (myParameters.database.equals("null"))
 					logger.warn("database is null - skip setting database.include.list property");
