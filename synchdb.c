@@ -42,6 +42,7 @@
 #include "access/xact.h"
 #include "utils/snapmgr.h"
 #include "commands/dbcommands.h"
+#include "olr_client.h"
 
 PG_MODULE_MAGIC;
 
@@ -1826,28 +1827,44 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 		{
 			case STATE_SYNCING:
 			{
-				/* reset batchinfo and batchStats*/
-				myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
-				myBatchInfo.batchSize = 0;
-				memset(&myBatchStats, 0, sizeof(myBatchStats));
-
-				dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
-						&myBatchInfo, &myBatchStats, connInfo->isShcemaSync);
-
-				/*
-				 * if a valid batchid is set by dbz_engine_get_change(), it means we have
-				 * successfully completed a batch change request and we shall notify dbz
-				 * that it's been completed.
-				 */
-				if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
+				if (connectorType == TYPE_OLR)
 				{
-					dbz_mark_batch_complete(myBatchInfo.batchId);
+					/* continuously poll change events via Openlog Replicator */
 
-					/* increment batch connector statistics */
-					increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+					memset(&myBatchStats, 0, sizeof(myBatchStats));
 
-					/* update the batch statistics to shared memory */
-					set_shm_connector_statistics(myConnectorId, &myBatchStats);
+					olr_client_get_change(myConnectorId, &dbzExitSignal, &myBatchStats);
+					sleep(2);
+
+
+					/* todo: send confirm message to OLR if successfully done */
+				}
+				else
+				{
+					/* continuously poll change events via Debezium */
+					/* reset batchinfo and batchStats*/
+					myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
+					myBatchInfo.batchSize = 0;
+					memset(&myBatchStats, 0, sizeof(myBatchStats));
+
+					dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
+							&myBatchInfo, &myBatchStats, connInfo->isShcemaSync);
+
+					/*
+					 * if a valid batchid is set by dbz_engine_get_change(), it means we have
+					 * successfully completed a batch change request and we shall notify dbz
+					 * that it's been completed.
+					 */
+					if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
+					{
+						dbz_mark_batch_complete(myBatchInfo.batchId);
+
+						/* increment batch connector statistics */
+						increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+
+						/* update the batch statistics to shared memory */
+						set_shm_connector_statistics(myConnectorId, &myBatchStats);
+					}
 				}
 				break;
 			}
@@ -1858,24 +1875,31 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 			}
 			case STATE_SCHEMA_SYNC_DONE:
 			{
-				/*
-				 * when schema sync is done, we will put connector into pause state so the user
-				 * can review the table schema and attribute mappings before proceeding.
-				 */
-				elog(DEBUG1, "shut down dbz engine...");
-				if (dbz_engine_stop())
+				if (connectorType == TYPE_OLR)
 				{
-					elog(WARNING, "failed to stop dbz engine...");
+					elog(ERROR, "OLR - schema sync not supported yet");
 				}
-				/* change snapshot mode back to normal */
-				if (snapshotMode)
+				else
 				{
-					pfree(snapshotMode);
-					snapshotMode = pstrdup("initial");
+					/*
+					 * when schema sync is done, we will put connector into pause state so the user
+					 * can review the table schema and attribute mappings before proceeding.
+					 */
+					elog(DEBUG1, "shut down dbz engine...");
+					if (dbz_engine_stop())
+					{
+						elog(WARNING, "failed to stop dbz engine...");
+					}
+					/* change snapshot mode back to normal */
+					if (snapshotMode)
+					{
+						pfree(snapshotMode);
+						snapshotMode = pstrdup("initial");
+					}
+					/* exit schema sync mode */
+					connInfo->isShcemaSync = false;
+					set_shm_connector_state(myConnectorId, STATE_PAUSED);
 				}
-				/* exit schema sync mode */
-				connInfo->isShcemaSync = false;
-				set_shm_connector_state(myConnectorId, STATE_PAUSED);
 				break;
 			}
 			default:
@@ -2187,6 +2211,8 @@ connectorTypeToString(ConnectorType type)
 		return "ORACLE";
 	case TYPE_SQLSERVER:
 		return "SQLSERVER";
+	case TYPE_OLR:
+		return "OLR";
 	default:
 		return "UNKNOWN";
 	}
@@ -2920,24 +2946,72 @@ synchdb_engine_main(Datum main_arg)
 	/* load custom object mappings */
 	fc_load_objmap(connInfo.name, connectorType);
 
-	/* Initialize JVM */
-	initialize_jvm(&connInfo.jmx);
+	if (connectorType != TYPE_OLR)
+	{
+		/* Initialize JVM */
+		initialize_jvm(&connInfo.jmx);
 
-	/* read current offset and update shm */
-	memset(sdb_state->connectors[myConnectorId].dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
-	set_shm_dbz_offset(myConnectorId);
+		/* read current offset and update shm */
+		memset(sdb_state->connectors[myConnectorId].dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
+		set_shm_dbz_offset(myConnectorId);
 
-	/* start Debezium engine */
-	start_debezium_engine(connectorType, &connInfo, snapshotMode);
+		/* start Debezium engine */
+		start_debezium_engine(connectorType, &connInfo, snapshotMode);
 
-	elog(LOG, "Going to main loop .... ");
-	/* Main processing loop */
-	main_loop(connectorType, &connInfo, snapshotMode);
+		elog(LOG, "Going to main loop .... ");
+		/* Main processing loop */
+		main_loop(connectorType, &connInfo, snapshotMode);
+	}
+	else
+	{
+		int ret = -1;
+		/* native open log replicator */
+		ret = olr_client_init(connInfo.hostname, connInfo.port);
+		if (ret)
+		{
+			set_shm_connector_errmsg(myConnectorId, "failed to init and connect to olr server");
+			elog(ERROR, "failed to init and connect to olr server");
+		}
 
-	elog(LOG, "synchdb worker shutting down .... ");
+		ret = olr_client_start_replication("ORACLE", 0, 0);
+		if (ret == -1)
+		{
+			set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+			elog(ERROR, "failed to start replication with olr server");
+		}
+
+		if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
+		{
+			elog(WARNING, "already started or starting - sending continue");
+			ret = olr_client_start_replication("ORACLE", 0, 1);
+			if (ret == -1)
+			{
+				set_shm_connector_errmsg(myConnectorId, "failed to start REDO with olr server");
+				elog(ERROR, "failed to start replication with olr server");
+			}
+		}
+
+		if (ret == RES_REPLICATE)
+		{
+			elog(WARNING, "ready to poll change events");
+			set_shm_connector_state(myConnectorId, STATE_SYNCING);
+
+			elog(LOG, "Going to main loop .... ");
+			/* Main processing loop */
+			main_loop(connectorType, &connInfo, snapshotMode);
+		}
+		else
+		{
+			set_shm_connector_errmsg(myConnectorId, "OLR server is not ready to replicate");
+			elog(ERROR, "OLR server is not ready to replicate, response code %d", ret);
+		}
+		olr_client_shutdown();
+	}
+
 	if (snapshotMode)
 		pfree(snapshotMode);
 
+	elog(LOG, "synchdb worker shutting down .... ");
 	proc_exit(0);
 }
 
@@ -3681,7 +3755,7 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	connector = text_to_cstring(connector_text);
 
 	if (strcasecmp(connector, "mysql") && strcasecmp(connector, "sqlserver")
-			&& strcasecmp(connector, "oracle"))
+			&& strcasecmp(connector, "oracle") && strcasecmp(connector, "olr"))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unsupported connector")));

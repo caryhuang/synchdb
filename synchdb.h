@@ -67,6 +67,7 @@ typedef enum _connectorType
 	TYPE_MYSQL,
 	TYPE_ORACLE,
 	TYPE_SQLSERVER,
+	TYPE_OLR,
 } ConnectorType;
 
 /**

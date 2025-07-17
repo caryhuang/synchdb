@@ -11,7 +11,10 @@ REGRESS_OPTS = --load-extension=pgcrypto
 
 OBJS = synchdb.o \
        format_converter.o \
-       replication_agent.o
+       replication_agent.o \
+       OraProtoBuf.pb-c.o \
+       netio_utils.o \
+       olr_client.o
 
 DBZ_ENGINE_PATH = dbz-engine
 
@@ -38,7 +41,7 @@ JDK_LIB_PATH := $(JDK_HOME_PATH)/lib/server
 
 PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS)
 PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS)
-PG_LDFLAGS = -L$(JDK_LIB_PATH) -ljvm
+PG_LDFLAGS = -L$(JDK_LIB_PATH) -ljvm -lprotobuf-c
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
