@@ -49,12 +49,19 @@
  * ex: 	pg_synchdb/[connector]_[name]_offsets.dat
  * 		pg_synchdb/mysql_mysqlconn_offsets.dat
  */
-#define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_offsets.dat"
+
+#define SYNCHDB_METADATA_DIR "pg_synchdb"
+#define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
+#define MAX_PATH_LENGTH 1024
+#define MAX_JAVA_OPTION_LENGTH 256
+#define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_%s_offsets.dat"
 #define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
 #define SYNCHDB_ATTRIBUTE_TABLE "synchdb_attribute"
 #define SYNCHDB_OBJECT_MAPPING_TABLE "synchdb_objmap"
 #define SYNCHDB_ATTRIBUTE_VIEW "synchdb_att_view"
+
+typedef unsigned long long orascn;
 
 /* Enumerations */
 

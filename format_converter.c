@@ -45,6 +45,7 @@
 #include "utils/typcache.h"
 #include "access/xact.h"
 #include "utils/snapmgr.h"
+#include "olr_client.h"
 
 /* global external variables */
 extern bool synchdb_dml_use_spi;
@@ -1106,7 +1107,7 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 				entry->dbztype = tmprecord.dbztype;
 				entry->timerep = tmprecord.timerep;
 				entry->scale = tmprecord.scale;
-				elog(WARNING, "new jsonpos entry name=%s pos=%d dbztype=%d timerep=%d scale=%d",
+				elog(DEBUG1, "new jsonpos entry name=%s pos=%d dbztype=%d timerep=%d scale=%d",
 						entry->name, entry->jsonpos, entry->dbztype, entry->timerep, entry->scale);
 			}
 		}
@@ -5109,7 +5110,7 @@ end:
  * parseOLREvent
  */
 static OLR_DML *
-parseOLRDML(Jsonb * jb, char op, Jsonb * payload)
+parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn)
 {
 	JsonbValue * v = NULL;
 	JsonbValue vbuf;
@@ -5130,7 +5131,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload)
 	DataCacheKey cachekey = {0};
 	DataCacheEntry * cacheentry;
 	Bitmapset * pkattrs;
-	unsigned long long scn = 0, c_scn = 0;
 	char * db = NULL, * schema = NULL, * table = NULL;
 
 	Datum datum_path_schema[1] = {CStringGetTextDatum("schema")};
@@ -5142,7 +5142,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload)
 		elog(WARNING, "malformed change request - no scn value");
 		return NULL;
 	}
-	scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
+	*scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
 
 	/* commit scn - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "c_scn", strlen("c_scn"), &vbuf);
@@ -5151,7 +5151,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload)
 		elog(WARNING, "malformed change request - no c_scn value");
 		return NULL;
 	}
-	c_scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
+	*c_scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
 
 	/* db - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "db", strlen("db"), &vbuf);
@@ -5162,7 +5162,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload)
 	}
 	db = pnstrdup(v->val.string.val, v->val.string.len);
 
-	elog(WARNING, "scn %llu c_scn %llu db %s op is %c", scn, c_scn, db, op);
+	elog(DEBUG1, "scn %llu c_scn %llu db %s op is %c", *scn, *c_scn, db, op);
 
 	olrdml = palloc0(sizeof(DBZ_DML));
 	olrdml->op = op;
@@ -7361,7 +7361,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
  */
 int
 fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
-		const char * name)
+		const char * name, bool * sendconfirm)
 {
 	Datum jsonb_datum;
 	Jsonb * jb = NULL;
@@ -7372,6 +7372,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	int ret = -1;
 	bool isnull = false;
 	MemoryContext tempContext, oldContext;
+
 	Datum datum_path_payload[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("0")};
 
 	tempContext = AllocSetContextCreate(TopMemoryContext,
@@ -7413,22 +7414,27 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	}
 	op = pnstrdup(v->val.string.val, v->val.string.len);
 
-	elog(WARNING, "op is %s", op);
-
+	elog(DEBUG1, "op is %s", op);
 	if (!strcasecmp(op, "begin") || !strcasecmp(op, "commit"))
 	{
 		/* transaction boundary */
 		if (!strcasecmp(op, "begin"))
 		{
-			elog(WARNING, "start txn");
+			elog(DEBUG1, "begin transaction...");
 			StartTransactionCommand();
 			PushActiveSnapshot(GetTransactionSnapshot());
 		}
 		else if (!strcasecmp(op, "commit"))
 		{
-			elog(WARNING, "commit txn");
+			elog(DEBUG1, "commit transaction...");
 			PopActiveSnapshot();
 			CommitTransactionCommand();
+
+			/*
+			 * at successful commit, we need to signal the caller to also send
+			 * a confirm message to OLR
+			 */
+			* sendconfirm = true;
 		}
 		set_shm_connector_state(myConnectorId, STATE_SYNCING);
 	}
@@ -7437,10 +7443,19 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		/* DMLs */
 		OLR_DML * olrdml = NULL;
 		PG_DML * pgdml = NULL;
+		orascn scn = 0, c_scn = 0;
+
+		if (!IsTransactionState())
+		{
+			elog(WARNING, "not in transaction state. Skip change events");
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
 
 		/* (1) parse */
 		set_shm_connector_state(myConnectorId, STATE_PARSING);
-		olrdml = parseOLRDML(jb, op[0], payload);
+		olrdml = parseOLRDML(jb, op[0], payload, &scn, &c_scn);
     	if (!olrdml)
 		{
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -7478,7 +7493,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	}
 
     	/* (4) record scn and c_scn */
-    	// todo
+    	olr_client_set_scns(scn, c_scn);
 
        	/* (5) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);

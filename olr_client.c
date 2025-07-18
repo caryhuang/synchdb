@@ -10,8 +10,20 @@
 #include "OraProtoBuf.pb-c.h"
 #include "olr_client.h"
 #include "format_converter.h"
+#include "storage/fd.h"
+#include "utils/timestamp.h"
+#include "utils/datetime.h"
 
+/* extern globals */
+extern int myConnectorId;
+extern int dbz_offset_flush_interval_ms;
+extern bool synchdb_log_event_on_error;
+extern char * g_eventStr;
+
+/* static globals */
 static NetioContext g_netioCtx = {0};
+static orascn g_scn = 0;
+static orascn g_c_scn = 0;
 
 int
 olr_client_init(const char * hostname, unsigned int port)
@@ -22,12 +34,12 @@ olr_client_init(const char * hostname, unsigned int port)
 		elog(WARNING, "failed to connect to OLR");
 		return -1;
 	}
-	elog(WARNING, "OLR connected");
+	elog(DEBUG1, "OLR connected");
 	return 0;
 }
 
 int
-olr_client_start_replication(char * source, unsigned long long scn, int which)
+olr_client_start_or_cont_replication(char * source, bool which)
 {
 	StringInfoData strinfo;
 	ssize_t nbytes = 0;
@@ -40,16 +52,16 @@ olr_client_start_replication(char * source, unsigned long long scn, int which)
 
 	if (!g_netioCtx.is_connected)
 	{
-		/* todo: hook up error messages with synchdb state view and use ERROR shutdown */
 		elog(WARNING, "no connection established to openlog replicator");
 		return -1;
 	}
 
-	request.code = which == 0 ? OPEN_LOG_REPLICATOR__PB__REQUEST_CODE__START :
+	request.code = which ? OPEN_LOG_REPLICATOR__PB__REQUEST_CODE__START :
 			OPEN_LOG_REPLICATOR__PB__REQUEST_CODE__CONTINUE;
 	request.database_name = source;
 	request.tm_val_case = OPEN_LOG_REPLICATOR__PB__REDO_REQUEST__TM_VAL_SCN;
-	request.scn = scn;
+	request.scn = olr_client_get_scn();
+	request.c_scn = olr_client_get_c_scn() + 1; /* resume beyond last know c_scn */
 
 	len = open_log_replicator__pb__redo_request__get_packed_size(&request);
 	buf = palloc0(len + 4);
@@ -62,7 +74,7 @@ olr_client_start_replication(char * source, unsigned long long scn, int which)
 
 	/* send encoded message to olr */
 	nbytes = netio_write(&g_netioCtx, buf, len + 4);
-	elog(WARNING, "olr client sent %ld bytes to olr", nbytes);
+	elog(DEBUG1, "olr client sent %ld bytes to olr", nbytes);
 	pfree(buf);
 
 	/* read 4 byte length header from olr first */
@@ -75,7 +87,7 @@ olr_client_start_replication(char * source, unsigned long long scn, int which)
 		memcpy(&size, strinfo.data, sizeof(int));
 		nbytes += netio_read(&g_netioCtx, &strinfo, size);
 	}
-	elog(WARNING, "olr client read %ld bytes from olr", nbytes);
+	elog(DEBUG1, "olr client read %ld bytes from olr", nbytes);
 
 	/* decode received message with protobuf-c */
 	if (nbytes > 4)
@@ -89,31 +101,30 @@ olr_client_start_replication(char * source, unsigned long long scn, int which)
 		if (response)
 		{
 			retcode = response->code;
-			elog(WARNING," response code %d", retcode);
 			return retcode;
 		}
 		else
 		{
-			/* todo: hook up error messages with synchdb state view and use ERROR shutdown */
 			elog(WARNING,"malformed protobuf message - NULL response");
 			return -1;
 		}
 	}
 
-	/* todo: hook up error messages with synchdb state view and use ERROR shutdown */
 	elog(WARNING, "no response or got read error from olr - %ld bytes is read", nbytes);
 	return -1;
 }
 
 int
-olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics * myBatchStats)
+olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics * myBatchStats,
+		bool * sendconfirm)
 {
 	ssize_t nbytes = 0;
 	StringInfoData strinfo;
+	int ret = -1;
 
 	if (!g_netioCtx.is_connected)
 	{
-		/* todo: hook up error messages with synchdb state view and use ERROR shutdown */
+		/* todo: maybe retry connection indefinitely? */
 		elog(WARNING, "no connection established to openlog replicator");
 		return -1;
 	}
@@ -134,25 +145,25 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 	if (nbytes > 4)
 	{
 		/* expected JSON payload - skip 4 bytes size header */
-		elog(WARNING, "%s", strinfo.data + 4);
+		if (synchdb_log_event_on_error)
+			g_eventStr = strinfo.data;
+
+		elog(DEBUG1, "%s", strinfo.data + 4);
 
 		/* process 1 change event */
-		fc_processOLRChangeEvent(strinfo.data + 4, myBatchStats,
-				get_shm_connector_name_by_id(myConnectorId));
+		ret = fc_processOLRChangeEvent(strinfo.data + 4, myBatchStats,
+				get_shm_connector_name_by_id(myConnectorId), sendconfirm);
 
 		if (strinfo.data)
 			pfree(strinfo.data);
 
-		return 0;
+		if (synchdb_log_event_on_error)
+			g_eventStr = NULL;
+
+		return ret;
 	}
 	elog(DEBUG1, "no response or got read error from olr - %ld bytes is read", nbytes);
 	return -1;
-}
-
-void
-olr_client_confirm_scn(unsigned long long scn)
-{
-
 }
 
 void
@@ -164,4 +175,134 @@ olr_client_shutdown(void)
 		elog(WARNING, "OLR disconnected");
 		memset(&g_netioCtx, 0, sizeof(g_netioCtx));
 	}
+}
+
+int
+olr_client_confirm_scn(char * source)
+{
+	ssize_t nbytes = 0;
+	size_t len;
+	unsigned char *buf = NULL;
+	OpenLogReplicator__Pb__RedoRequest request =
+			OPEN_LOG_REPLICATOR__PB__REDO_REQUEST__INIT;
+
+	if (olr_client_get_c_scn() == 0)
+	{
+		elog(WARNING, "no scn to confirm");
+		return -1;
+	}
+
+	if (!g_netioCtx.is_connected)
+	{
+		/* todo: hook up error messages with synchdb state view and use ERROR shutdown */
+		elog(WARNING, "no connection established to openlog replicator");
+		return -1;
+	}
+
+	request.code = OPEN_LOG_REPLICATOR__PB__REQUEST_CODE__CONFIRM;
+	request.database_name = source;
+	request.tm_val_case = OPEN_LOG_REPLICATOR__PB__REDO_REQUEST__TM_VAL_SCN;
+	request.scn = olr_client_get_c_scn();
+
+	len = open_log_replicator__pb__redo_request__get_packed_size(&request);
+	buf = palloc0(len + 4);
+
+	/* message length - 4 bytes */
+	memcpy(buf, &len, 4);
+
+	/* encode message with protobuf-c */
+	open_log_replicator__pb__redo_request__pack(&request, buf + 4);
+
+	/* send encoded message to olr */
+	nbytes = netio_write(&g_netioCtx, buf, len + 4);
+	elog(DEBUG1, "olr client sent %ld bytes to olr", nbytes);
+	pfree(buf);
+
+	return 0;
+}
+
+void
+olr_client_set_scns(orascn scn, orascn c_scn)
+{
+	g_scn = scn > 0? scn : g_scn;
+	g_c_scn = c_scn > 0 ? c_scn : g_c_scn;
+}
+
+orascn
+olr_client_get_c_scn(void)
+{
+	return g_c_scn;
+}
+
+orascn
+olr_client_get_scn(void)
+{
+	return g_scn;
+}
+
+void
+olr_client_write_scn_state(ConnectorType type, const char * name, const char * srcdb, bool force)
+{
+	int fd;
+	static TimestampTz last_flush_time = 0;
+	orascn buf[2] = {g_scn, g_c_scn};
+	char * filename = psprintf(SYNCHDB_OFFSET_FILE_PATTERN,
+			get_shm_connector_name(type), name, srcdb);
+
+	TimestampTz now = GetCurrentTimestamp();
+
+    /* Only return early if !force and not enough time has passed */
+    if (!force && last_flush_time != 0 &&
+        !TimestampDifferenceExceeds(last_flush_time, now, dbz_offset_flush_interval_ms))
+    {
+        return;
+    }
+
+    elog(DEBUG1, "flushing scn file...");
+	fd = OpenTransientFile(filename, O_WRONLY | O_CREAT | O_TRUNC);
+	if (fd < 0)
+	{
+		set_shm_connector_errmsg(myConnectorId, "cannot open scn file to write!");
+		elog(ERROR, "can not open file \"%s\" for writing: %m", filename);
+	}
+
+	if (write(fd, buf, sizeof(buf)) != sizeof(buf))
+	{
+		int save_errno = errno;
+		CloseTransientFile(fd);
+		errno = save_errno;
+		set_shm_connector_errmsg(myConnectorId, "cannot write to scn file");
+		elog(ERROR, "cannot write to file \"%s\": %m", filename);
+	}
+	CloseTransientFile(fd);
+	last_flush_time = now;
+}
+
+bool
+olr_client_init_scn_state(ConnectorType type, const char * name, const char * srcdb)
+{
+	int fd;
+	orascn buf[2];
+	char * filename = psprintf(SYNCHDB_OFFSET_FILE_PATTERN,
+	get_shm_connector_name(type), name, srcdb);
+
+	fd = OpenTransientFile(filename, O_RDONLY);
+	if (fd < 0)
+		return false;
+
+	if (read(fd, buf, sizeof(buf)) != sizeof(buf))
+	{
+		int save_errno = errno;
+		CloseTransientFile(fd);
+		errno = save_errno;
+		set_shm_connector_errmsg(myConnectorId, "cannot read scn from file");
+		elog(ERROR, "cannot read from file \"%s\": %m", filename);
+	}
+
+	CloseTransientFile(fd);
+
+	g_scn = buf[0];
+	g_c_scn = buf[1];
+	elog(LOG, "initialize scn = %llu, c_scn = %llu", g_scn, g_c_scn);
+	return true;
 }

@@ -72,12 +72,6 @@ PG_FUNCTION_INFO_V1(synchdb_del_jmx_exporter_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_add_olr_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_olr_conninfo);
 
-/* Constants */
-#define SYNCHDB_METADATA_DIR "pg_synchdb"
-#define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
-#define MAX_PATH_LENGTH 1024
-#define MAX_JAVA_OPTION_LENGTH 256
-
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
 int myConnectorId = -1;	/* Global index number to SynchdbSharedState in shared memory - global per worker */
@@ -1389,7 +1383,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 {
 	SynchdbRequest *req, *reqcopy;
 	ConnectorState *currstate, *currstatecopy;
-	char offsetfile[SYNCHDB_JSON_PATH_SIZE] = {0};
+	char offsetfile[MAX_PATH_LENGTH] = {0};
 	char *srcdb;
 	int ret;
 
@@ -1478,8 +1472,8 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 			 connectorStateAsString(reqcopy->reqstate));
 
 		/* derive offset file*/
-		snprintf(offsetfile, SYNCHDB_JSON_PATH_SIZE, SYNCHDB_OFFSET_FILE_PATTERN,
-				get_shm_connector_name(type), connInfo->name);
+		snprintf(offsetfile, MAX_PATH_LENGTH, SYNCHDB_OFFSET_FILE_PATTERN,
+				get_shm_connector_name(type), connInfo->name, connInfo->srcdb);
 
 		set_shm_connector_state(connectorId, STATE_OFFSET_UPDATE);
 		ret = dbz_engine_set_offset(type, srcdb, reqcopy->reqdata, offsetfile);
@@ -1829,15 +1823,26 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 			{
 				if (connectorType == TYPE_OLR)
 				{
-					/* continuously poll change events via Openlog Replicator */
+					int ret = -1;
+					bool sendconfirm = false;
 
+					/* todo: support different snapshot mode */
 					memset(&myBatchStats, 0, sizeof(myBatchStats));
+					ret = olr_client_get_change(myConnectorId, &dbzExitSignal, &myBatchStats,
+							&sendconfirm);
 
-					olr_client_get_change(myConnectorId, &dbzExitSignal, &myBatchStats);
-					sleep(2);
+					/* send confirm message to OLR if successfully done */
+					if (ret == 0 && sendconfirm)
+					{
+						elog(DEBUG1, "successfully applied - send confirm message for "
+								"scn %llu and c_scn %llu", olr_client_get_scn(),
+								olr_client_get_c_scn());
+						olr_client_confirm_scn("ORACLE");
 
-
-					/* todo: send confirm message to OLR if successfully done */
+						/* flush scn if needed */
+						olr_client_write_scn_state(connectorType, connInfo->name,
+								connInfo->srcdb, false);
+					}
 				}
 				else
 				{
@@ -1932,19 +1937,30 @@ cleanup(ConnectorType connectorType)
 
 	elog(WARNING, "synchdb_engine_main shutting down");
 
-	ret = dbz_engine_stop();
-	if (ret)
+	if (connectorType == TYPE_OLR)
 	{
-		elog(DEBUG1, "Failed to call dbz engine stop method");
+		/* force flush scn file before shutdown */
+		elog(WARNING, "force flushing scn file prior to shutdown");
+		olr_client_write_scn_state(connectorType,
+				sdb_state->connectors[myConnectorId].conninfo.name,
+				sdb_state->connectors[myConnectorId].conninfo.srcdb,
+				true);
 	}
-
-	if (jvm != NULL)
+	else
 	{
-		(*jvm)->DestroyJavaVM(jvm);
-		jvm = NULL;
-		env = NULL;
-	}
+		ret = dbz_engine_stop();
+		if (ret)
+		{
+			elog(DEBUG1, "Failed to call dbz engine stop method");
+		}
 
+		if (jvm != NULL)
+		{
+			(*jvm)->DestroyJavaVM(jvm);
+			jvm = NULL;
+			env = NULL;
+		}
+	}
 	fc_deinitFormatConverter(connectorType);
 }
 
@@ -2239,6 +2255,8 @@ get_shm_connector_name(ConnectorType type)
 		return "oracle";
 	case TYPE_SQLSERVER:
 		return "sqlserver";
+	case TYPE_OLR:
+		return "openlog_replicator";
 	/* todo: support more dbz connector types here */
 	default:
 		return "null";
@@ -2965,7 +2983,11 @@ synchdb_engine_main(Datum main_arg)
 	else
 	{
 		int ret = -1;
-		/* native open log replicator */
+
+		/* read resume scn if exists */
+		if (!olr_client_init_scn_state(connectorType, connInfo.name, connInfo.srcdb))
+			elog(WARNING, "scn file not flushed yet");
+
 		ret = olr_client_init(connInfo.hostname, connInfo.port);
 		if (ret)
 		{
@@ -2973,7 +2995,8 @@ synchdb_engine_main(Datum main_arg)
 			elog(ERROR, "failed to init and connect to olr server");
 		}
 
-		ret = olr_client_start_replication("ORACLE", 0, 0);
+		/* connInfo.srcdb is used as data source for OLR */
+		ret = olr_client_start_or_cont_replication(connInfo.srcdb, true);
 		if (ret == -1)
 		{
 			set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
@@ -2982,28 +3005,43 @@ synchdb_engine_main(Datum main_arg)
 
 		if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
 		{
-			elog(WARNING, "already started or starting - sending continue");
-			ret = olr_client_start_replication("ORACLE", 0, 1);
+			elog(WARNING, "replication already started or starting - sending continue");
+			ret = olr_client_start_or_cont_replication(connInfo.srcdb, false);
 			if (ret == -1)
 			{
-				set_shm_connector_errmsg(myConnectorId, "failed to start REDO with olr server");
+				set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
 				elog(ERROR, "failed to start replication with olr server");
 			}
 		}
 
 		if (ret == RES_REPLICATE)
 		{
-			elog(WARNING, "ready to poll change events");
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
 
 			elog(LOG, "Going to main loop .... ");
-			/* Main processing loop */
 			main_loop(connectorType, &connInfo, snapshotMode);
+		}
+		else if (ret == RES_INVALID_DATABASE)
+		{
+			set_shm_connector_errmsg(myConnectorId, "invalid data source requested");
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid data source requested"),
+					 errhint("make sure srcdb matches data source set in openlog replicator")));
+		}
+		else if (ret == RES_INVALID_COMMAND)
+		{
+			set_shm_connector_errmsg(myConnectorId, "invalid OLR command");
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid OLR command"),
+					 errhint("check the openlog replicator protocol version for potential protocol "
+							 "incompatibility")));
 		}
 		else
 		{
-			set_shm_connector_errmsg(myConnectorId, "OLR server is not ready to replicate");
-			elog(ERROR, "OLR server is not ready to replicate, response code %d", ret);
+			set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate");
+			elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
 		}
 		olr_client_shutdown();
 	}

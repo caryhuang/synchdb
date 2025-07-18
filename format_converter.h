@@ -64,6 +64,7 @@ typedef enum _DbzType
 	DBZTYPE_STRING,
 	OLRTYPE_NUMBER,
 	OLRTYPE_DATE,
+	/* todo: more OLRTYPE to be added here */
 } DbzType;
 
 /* Structure to represent a column in a DDL event */
@@ -212,6 +213,6 @@ bool fc_load_rules(ConnectorType connectorType, const char * rulefile);
 bool fc_load_objmap(const char * name, ConnectorType connectorType);
 char * escapeSingleQuote(const char * in, bool addquote);
 int fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
-		const char * name);
+		const char * name, bool * sendconfirm);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */
