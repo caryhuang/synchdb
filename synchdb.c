@@ -23,6 +23,7 @@
 #include <jni.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <dlfcn.h>
 #include "format_converter.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
@@ -43,6 +44,9 @@
 #include "utils/snapmgr.h"
 #include "commands/dbcommands.h"
 #include "olr_client.h"
+
+/* ora-parser test */
+#include "parser/parser.h"
 
 PG_MODULE_MAGIC;
 
@@ -1839,9 +1843,19 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 								olr_client_get_c_scn());
 						olr_client_confirm_scn("ORACLE");
 
-						/* flush scn if needed */
-						olr_client_write_scn_state(connectorType, connInfo->name,
-								connInfo->srcdb, false);
+						/*
+						 * flush scn if needed - if a flush happens, we also set it to
+						 * shared memory to display to user
+						 */
+						if (olr_client_write_scn_state(connectorType, connInfo->name,
+								connInfo->dstdb, false))
+							set_shm_dbz_offset(myConnectorId);
+
+						/* increment batch connector statistics */
+						increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+
+						/* update the batch statistics to shared memory */
+						set_shm_connector_statistics(myConnectorId, &myBatchStats);
 					}
 				}
 				else
@@ -1943,7 +1957,7 @@ cleanup(ConnectorType connectorType)
 		elog(WARNING, "force flushing scn file prior to shutdown");
 		olr_client_write_scn_state(connectorType,
 				sdb_state->connectors[myConnectorId].conninfo.name,
-				sdb_state->connectors[myConnectorId].conninfo.srcdb,
+				sdb_state->connectors[myConnectorId].conninfo.dstdb,
 				true);
 	}
 	else
@@ -2635,9 +2649,17 @@ set_shm_dbz_offset(int connectorId)
 	if (!sdb_state)
 		return;
 
-	offset = dbz_engine_get_offset(connectorId);
-	if (!offset)
-		return;
+	if (sdb_state->connectors[connectorId].type == TYPE_OLR)
+	{
+		offset = psprintf("{\"scn\":%llu, \"c_scn\":%llu}",
+				olr_client_get_scn(), olr_client_get_c_scn());
+	}
+	else
+	{
+		offset = dbz_engine_get_offset(connectorId);
+		if (!offset)
+			return;
+	}
 
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
 	strlcpy(sdb_state->connectors[connectorId].dbzoffset, offset, SYNCHDB_ERRMSG_SIZE);
@@ -2987,6 +3009,12 @@ synchdb_engine_main(Datum main_arg)
 		/* read resume scn if exists */
 		if (!olr_client_init_scn_state(connectorType, connInfo.name, connInfo.srcdb))
 			elog(WARNING, "scn file not flushed yet");
+		else
+		{
+			/* set current scn offset in shared memory for state display */
+			memset(sdb_state->connectors[myConnectorId].dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
+			set_shm_dbz_offset(myConnectorId);
+		}
 
 		ret = olr_client_init(connInfo.hostname, connInfo.port);
 		if (ret)

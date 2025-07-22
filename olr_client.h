@@ -38,7 +38,7 @@ void olr_client_set_scns(orascn scn, orascn c_scn);
 orascn olr_client_get_c_scn(void);
 orascn olr_client_get_scn(void);
 int olr_client_confirm_scn(char * source);
-void olr_client_write_scn_state(ConnectorType type, const char * name, const char * srcdb, bool force);
+bool olr_client_write_scn_state(ConnectorType type, const char * name, const char * srcdb, bool force);
 bool olr_client_init_scn_state(ConnectorType type, const char * name, const char * srcdb);
 
 #endif /* SYNCHDB_OLR_CLIENT_H_ */

@@ -45,7 +45,7 @@ olr_client_start_or_cont_replication(char * source, bool which)
 	ssize_t nbytes = 0;
 	size_t len;
 	unsigned char *buf = NULL;
-	int retcode = -1;
+	int retcode = -1, i = 0;
 
 	OpenLogReplicator__Pb__RedoRequest request =
 			OPEN_LOG_REPLICATOR__PB__REDO_REQUEST__INIT;
@@ -60,8 +60,27 @@ olr_client_start_or_cont_replication(char * source, bool which)
 			OPEN_LOG_REPLICATOR__PB__REQUEST_CODE__CONTINUE;
 	request.database_name = source;
 	request.tm_val_case = OPEN_LOG_REPLICATOR__PB__REDO_REQUEST__TM_VAL_SCN;
-	request.scn = olr_client_get_scn();
-	request.c_scn = olr_client_get_c_scn() + 1; /* resume beyond last know c_scn */
+	request.scn = olr_client_get_scn() == 0 ? olr_client_get_scn() :
+			olr_client_get_scn() + 1;
+	request.c_scn = olr_client_get_c_scn() == 0 ? olr_client_get_c_scn() :
+			olr_client_get_c_scn() + 1; /* resume beyond last know c_scn */
+
+//	request.seq = 1111111;
+
+	/* schema request */
+	request.n_schema = 1;
+	request.schema = palloc0(sizeof(OpenLogReplicator__Pb__SchemaRequest  *) * request.n_schema);
+	for (i = 0; i < request.n_schema; i++)
+	{
+		request.schema[i] = palloc0(sizeof(OpenLogReplicator__Pb__SchemaRequest));
+		open_log_replicator__pb__schema_request__init(request.schema[i]);
+
+	    request.schema[i]->mask = "1";
+	    request.schema[i]->filter = pstrdup("DBZUSER.*");
+	}
+
+	elog(WARNING, "requested scn %lu c_scn %lu, nschema %ld",
+			request.scn, request.c_scn, request.n_schema);
 
 	len = open_log_replicator__pb__redo_request__get_packed_size(&request);
 	buf = palloc0(len + 4);
@@ -76,6 +95,11 @@ olr_client_start_or_cont_replication(char * source, bool which)
 	nbytes = netio_write(&g_netioCtx, buf, len + 4);
 	elog(DEBUG1, "olr client sent %ld bytes to olr", nbytes);
 	pfree(buf);
+
+	/* free the schema request after it has been sent */
+	for (i = 0; i < request.n_schema; i++)
+		pfree(request.schema[i]);
+	pfree(request.schema);
 
 	/* read 4 byte length header from olr first */
 	initStringInfo(&strinfo);
@@ -148,7 +172,7 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 		if (synchdb_log_event_on_error)
 			g_eventStr = strinfo.data;
 
-		elog(DEBUG1, "%s", strinfo.data + 4);
+		elog(WARNING, "%s", strinfo.data + 4);
 
 		/* process 1 change event */
 		ret = fc_processOLRChangeEvent(strinfo.data + 4, myBatchStats,
@@ -240,14 +264,14 @@ olr_client_get_scn(void)
 	return g_scn;
 }
 
-void
-olr_client_write_scn_state(ConnectorType type, const char * name, const char * srcdb, bool force)
+bool
+olr_client_write_scn_state(ConnectorType type, const char * name, const char * dstdb, bool force)
 {
 	int fd;
 	static TimestampTz last_flush_time = 0;
 	orascn buf[2] = {g_scn, g_c_scn};
 	char * filename = psprintf(SYNCHDB_OFFSET_FILE_PATTERN,
-			get_shm_connector_name(type), name, srcdb);
+			get_shm_connector_name(type), name, dstdb);
 
 	TimestampTz now = GetCurrentTimestamp();
 
@@ -255,7 +279,7 @@ olr_client_write_scn_state(ConnectorType type, const char * name, const char * s
     if (!force && last_flush_time != 0 &&
         !TimestampDifferenceExceeds(last_flush_time, now, dbz_offset_flush_interval_ms))
     {
-        return;
+        return false;
     }
 
     elog(DEBUG1, "flushing scn file...");
@@ -276,15 +300,16 @@ olr_client_write_scn_state(ConnectorType type, const char * name, const char * s
 	}
 	CloseTransientFile(fd);
 	last_flush_time = now;
+	return true;
 }
 
 bool
-olr_client_init_scn_state(ConnectorType type, const char * name, const char * srcdb)
+olr_client_init_scn_state(ConnectorType type, const char * name, const char * dstdb)
 {
 	int fd;
 	orascn buf[2];
 	char * filename = psprintf(SYNCHDB_OFFSET_FILE_PATTERN,
-	get_shm_connector_name(type), name, srcdb);
+			get_shm_connector_name(type), name, dstdb);
 
 	fd = OpenTransientFile(filename, O_RDONLY);
 	if (fd < 0)

@@ -5107,7 +5107,76 @@ end:
 }
 
 /*
- * parseOLREvent
+ * parseOLRDDL
+ */
+static OLR_DDL *
+parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn)
+{
+	JsonbValue * v = NULL;
+	JsonbValue vbuf;
+	Jsonb * jbschema;
+	OLR_DDL * olrddl = NULL;
+	bool isnull = false;
+	Datum datum_path_schema[1] = {CStringGetTextDatum("schema")};
+	char * db = NULL, * schema = NULL, * table = NULL, * sql = NULL;
+
+
+	/* db - required */
+	v = getKeyJsonValueFromContainer(&jb->root, "db", strlen("db"), &vbuf);
+	if (!v)
+	{
+		elog(WARNING, "malformed change request - no db value");
+		goto end;
+	}
+	db = pnstrdup(v->val.string.val, v->val.string.len);
+
+	/* fetch payload.0.schema */
+	jbschema = DatumGetJsonbP(jsonb_get_element(payload, &datum_path_schema[0], 1, &isnull, false));
+	if (!jbschema)
+	{
+		elog(WARNING, "malformed change request - no payload.0.schema struct");
+		goto end;
+	}
+
+	/* fetch owner -> considered schema - optional*/
+	v = getKeyJsonValueFromContainer(&jbschema->root, "owner", strlen("owner"), &vbuf);
+	if (v)
+	{
+		schema = pnstrdup(v->val.string.val, v->val.string.len);
+	}
+
+	/* fetch payload.0.schema.table - required */
+	v = getKeyJsonValueFromContainer(&jbschema->root, "table", strlen("table"), &vbuf);
+	if (!v)
+	{
+		elog(WARNING, "malformed change request - no payload.0.schema.table value");
+		goto end;
+	}
+	table = pnstrdup(v->val.string.val, v->val.string.len);
+
+	/* fetch sql - required */
+	v = getKeyJsonValueFromContainer(&payload->root, "sql", strlen("sql"), &vbuf);
+	if (!v)
+	{
+		elog(WARNING, "malformed change request - no payload.0.sql value");
+		goto end;
+	}
+	sql = pnstrdup(v->val.string.val, v->val.string.len);
+
+	elog(WARNING, "olr ddl - db %s, schema %s, table %s, sql %s",
+			db, schema, table, sql);
+
+	/*
+	 * todo: parse the oracle sql string to support CREATE, DROP,
+	 * ALTER TABLE ADD/DROP COLUMN, ALTER TABLE ALTER COLUMN
+	 * ...etc
+	 */
+end:
+
+	return olrddl;
+}
+/*
+ * parseOLRDML
  */
 static OLR_DML *
 parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn)
@@ -7388,6 +7457,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	if (!jb)
 	{
 		elog(WARNING, "bad json message: %s", event);
+		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 		MemoryContextSwitchTo(oldContext);
 		MemoryContextDelete(tempContext);
 		return -1;
@@ -7398,6 +7468,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	if (!payload)
 	{
 		elog(WARNING, "malformed change request - no payload struct");
+		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 		MemoryContextSwitchTo(oldContext);
 		MemoryContextDelete(tempContext);
 		return -1;
@@ -7408,6 +7479,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	if (!v)
 	{
 		elog(WARNING, "malformed change request - no payload.0.op value");
+		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 		MemoryContextSwitchTo(oldContext);
 		MemoryContextDelete(tempContext);
 		return -1;
@@ -7500,9 +7572,29 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	destroyDBZDML(olrdml);
     	destroyPGDML(pgdml);
 	}
-	else
+	else if (!strcasecmp(op, "ddl"))
 	{
 		/* DDLs */
+		OLR_DDL * olrddl = NULL;
+//		PG_DDL * pgddl = NULL;
+		orascn scn = 0, c_scn = 0;
+
+		/* (1) parse */
+		set_shm_connector_state(myConnectorId, STATE_PARSING);
+		olrddl = parseOLRDDL(jb, payload, &scn, &c_scn);
+    	if (!olrddl)
+		{
+    		elog(WARNING, "handling OLR DDL not fully supported yet");
+			set_shm_connector_state(myConnectorId, STATE_SYNCING);
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
+    	/* todo */
+	}
+	else
+	{
 		elog(WARNING, "unkown op %s", op);
 	}
 
