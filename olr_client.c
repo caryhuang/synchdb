@@ -13,6 +13,8 @@
 #include "storage/fd.h"
 #include "utils/timestamp.h"
 #include "utils/datetime.h"
+#include "access/xact.h"
+#include "utils/snapmgr.h"
 
 /* extern globals */
 extern int myConnectorId;
@@ -75,8 +77,8 @@ olr_client_start_or_cont_replication(char * source, bool which)
 		request.schema[i] = palloc0(sizeof(OpenLogReplicator__Pb__SchemaRequest));
 		open_log_replicator__pb__schema_request__init(request.schema[i]);
 
-	    request.schema[i]->mask = "1";
-	    request.schema[i]->filter = pstrdup("DBZUSER.*");
+	    request.schema[i]->mask = "0";
+	    request.schema[i]->filter = pstrdup("{\"table\":[{\"owner\":\"DBZUSER\",\"table\":\"TEST_TABLE\"}]");
 	}
 
 	elog(WARNING, "requested scn %lu c_scn %lu, nschema %ld",
@@ -93,7 +95,6 @@ olr_client_start_or_cont_replication(char * source, bool which)
 
 	/* send encoded message to olr */
 	nbytes = netio_write(&g_netioCtx, buf, len + 4);
-	elog(DEBUG1, "olr client sent %ld bytes to olr", nbytes);
 	pfree(buf);
 
 	/* free the schema request after it has been sent */
@@ -111,7 +112,6 @@ olr_client_start_or_cont_replication(char * source, bool which)
 		memcpy(&size, strinfo.data, sizeof(int));
 		nbytes += netio_read(&g_netioCtx, &strinfo, size);
 	}
-	elog(DEBUG1, "olr client read %ld bytes from olr", nbytes);
 
 	/* decode received message with protobuf-c */
 	if (nbytes > 4)
@@ -133,8 +133,6 @@ olr_client_start_or_cont_replication(char * source, bool which)
 			return -1;
 		}
 	}
-
-	elog(WARNING, "no response or got read error from olr - %ld bytes is read", nbytes);
 	return -1;
 }
 
@@ -163,7 +161,6 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 		memcpy(&size, strinfo.data, sizeof(int));
 		nbytes += netio_read(&g_netioCtx, &strinfo, size);
 	}
-	elog(DEBUG1, "olr client read %ld bytes from olr", nbytes);
 
 	/* decode received message with protobuf-c */
 	if (nbytes > 4)
@@ -174,9 +171,17 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 
 		elog(WARNING, "%s", strinfo.data + 4);
 
-		/* process 1 change event */
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+		elog(WARNING, "B----->");
+
+		/* todo process 1 change event */
 		ret = fc_processOLRChangeEvent(strinfo.data + 4, myBatchStats,
 				get_shm_connector_name_by_id(myConnectorId), sendconfirm);
+
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+		elog(WARNING, "<-----C");
 
 		if (strinfo.data)
 			pfree(strinfo.data);
@@ -186,7 +191,6 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 
 		return ret;
 	}
-	elog(DEBUG1, "no response or got read error from olr - %ld bytes is read", nbytes);
 	return -1;
 }
 
@@ -282,7 +286,7 @@ olr_client_write_scn_state(ConnectorType type, const char * name, const char * d
         return false;
     }
 
-    elog(DEBUG1, "flushing scn file...");
+    elog(DEBUG1, "flushing scn file %s...", filename);
 	fd = OpenTransientFile(filename, O_WRONLY | O_CREAT | O_TRUNC);
 	if (fd < 0)
 	{
@@ -290,6 +294,7 @@ olr_client_write_scn_state(ConnectorType type, const char * name, const char * d
 		elog(ERROR, "can not open file \"%s\" for writing: %m", filename);
 	}
 
+	elog(DEBUG1, "flushing... scn %llu, c_scu %llu", g_scn, g_c_scn);
 	if (write(fd, buf, sizeof(buf)) != sizeof(buf))
 	{
 		int save_errno = errno;
@@ -311,6 +316,7 @@ olr_client_init_scn_state(ConnectorType type, const char * name, const char * ds
 	char * filename = psprintf(SYNCHDB_OFFSET_FILE_PATTERN,
 			get_shm_connector_name(type), name, dstdb);
 
+	elog(DEBUG1, "reading scn file %s...", filename);
 	fd = OpenTransientFile(filename, O_RDONLY);
 	if (fd < 0)
 		return false;

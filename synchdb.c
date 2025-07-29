@@ -45,9 +45,6 @@
 #include "commands/dbcommands.h"
 #include "olr_client.h"
 
-/* ora-parser test */
-#include "parser/parser.h"
-
 PG_MODULE_MAGIC;
 
 /* Function declarations for user-facing functions */
@@ -3007,7 +3004,7 @@ synchdb_engine_main(Datum main_arg)
 		int ret = -1;
 
 		/* read resume scn if exists */
-		if (!olr_client_init_scn_state(connectorType, connInfo.name, connInfo.srcdb))
+		if (!olr_client_init_scn_state(connectorType, connInfo.name, connInfo.dstdb))
 			elog(WARNING, "scn file not flushed yet");
 		else
 		{

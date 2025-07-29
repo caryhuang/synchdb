@@ -38,6 +38,7 @@
 #include "access/table.h"
 #include <time.h>
 #include <sys/time.h>
+#include <dlfcn.h>
 #include "synchdb.h"
 #include "common/base64.h"
 #include "port/pg_bswap.h"
@@ -46,6 +47,13 @@
 #include "access/xact.h"
 #include "utils/snapmgr.h"
 #include "olr_client.h"
+#include "miscadmin.h"
+
+/* ora-parser related */
+#include "parser/parser.h"
+#include "mb/pg_wchar.h"
+#include "nodes/parsenodes.h"
+#include "catalog/namespace.h"
 
 /* global external variables */
 extern bool synchdb_dml_use_spi;
@@ -62,6 +70,11 @@ static HTAB * transformExpressionHash;
 static HTAB * mysqlDatatypeHash;
 static HTAB * oracleDatatypeHash;
 static HTAB * sqlserverDatatypeHash;
+
+/* Oracle raw parser function prototype */
+typedef List * (*oracle_raw_parser_fn)(const char *str, RawParseMode mode);
+static oracle_raw_parser_fn oracle_raw_parser = NULL;
+static void * handle = NULL;
 
 DatatypeHashEntry mysql_defaultTypeMappings[] =
 {
@@ -242,6 +255,60 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 
 #define SIZE_SQLSERVER_DATATYPE_MAPPING (sizeof(sqlserver_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
+static char *
+strtoupper(const char *input)
+{
+    char *upper = pstrdup(input);
+    for (char *p = upper; *p; ++p)
+    	*p = (char) pg_toupper((unsigned char) *p);
+    return upper;
+}
+
+/*
+ * is_whitelist_sql
+ *
+ * returns true if SQL is supported, else otherwise
+ */
+static bool
+is_whitelist_sql(StringInfoData * sql)
+{
+	char * sqlupper = strtoupper(sql->data);
+    bool allowed = false;
+
+    if (strncmp(sqlupper, "CREATE TABLE", strlen("CREATE TABLE")) == 0)
+    {
+    	if (!strstr(sqlupper, "TABLESPACE"))
+    		allowed = true;
+    }
+    else if (strncmp(sqlupper, "DROP TABLE",  strlen("DROP TABLE")) == 0)
+    {
+    	/*
+    	 * Oracle's recycling mode (if enabled) will send query like:
+    	 * "DROP TABLE x AS y", which is internal Oracle mechanism and so we
+    	 * need to truncate everything after ' AS ' if this keyword exists.
+    	 */
+        const char *as_pos = strcasestr(sql->data, " AS ");
+		if (as_pos != NULL)
+		{
+			int new_len = as_pos - sql->data;
+			sql->data[new_len] = '\0';
+			sql->len = new_len;
+		}
+
+		//todo:
+		if (!strstr(sqlupper, "PURGE"))
+			allowed = true;
+    }
+    else if (strncmp(sqlupper, "ALTER TABLE",  strlen("ALTER TABLE")) == 0)
+    {
+    	/* ALTER TABLE xxx RENAME not supported now */
+        if (strstr(sqlupper + 11, "RENAME") == NULL)
+            allowed = true;
+    }
+
+    pfree(sqlupper);
+    return allowed;
+}
 /*
  * remove_precision
  *
@@ -638,6 +705,12 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 	char * value = NULL;
 	bool isfirst = true;
 
+	if (!jsonin)
+	{
+		elog(WARNING, "no valid primary key json");
+		return;
+	}
+
 	jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonin));
 	jb = DatumGetJsonbP(jsonb_datum);
 
@@ -833,11 +906,13 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 }
 
 static DbzType
-getDbzTypeFromString(const char * typestring)
+getExtTypeFromString(const char * typestring)
 {
 	if (!typestring)
 		return DBZTYPE_UNDEF;
 
+	/* todo: perhaps a hash lookup table is more efficient */
+	/* DBZ types */
 	if (!strcmp(typestring, "float32"))
 		return DBZTYPE_FLOAT32;
 	if (!strcmp(typestring, "float64"))
@@ -860,12 +935,36 @@ getDbzTypeFromString(const char * typestring)
 		return DBZTYPE_STRUCT;
 	if (!strcmp(typestring, "string"))
 		return DBZTYPE_STRING;
-	if (!strcmp(typestring, "number"))
-		return OLRTYPE_NUMBER;
-	if (!strcmp(typestring, "date"))
-		return OLRTYPE_DATE;
 
-	elog(DEBUG1, "unexpected dbz type %s", typestring);
+	/* OLR types */
+	if (!strcmp(typestring, "number") ||
+		!strcmp(typestring, "binary_float") ||
+		!strcmp(typestring, "binary_double") ||
+		!strcmp(typestring, "date") ||
+		!strcmp(typestring, "timestamp") ||
+		!strcmp(typestring, "timestamp with local time zone"))
+		return OLRTYPE_NUMBER;
+
+	if (!strcmp(typestring, "char") ||
+		!strcmp(typestring, "varchar2") ||
+		!strcmp(typestring, "varchar") ||
+		!strcmp(typestring, "nvarchar") ||
+		!strcmp(typestring, "nvarchar2") ||
+		!strcmp(typestring, "raw") ||
+		!strcmp(typestring, "blob") ||
+		!strcmp(typestring, "clob") ||
+		!strcmp(typestring, "long") ||
+		!strcmp(typestring, "urowid") ||
+		!strcmp(typestring, "rowid") ||
+		!strcmp(typestring, "unknown") ||
+		!strcmp(typestring, "nclob") ||
+		!strcmp(typestring, "interval day to second") ||
+		!strcmp(typestring, "interval year to month") ||
+		!strcmp(typestring, "timestamp with time zone"))
+		return OLRTYPE_STRING;
+
+	elog(DEBUG1, "unexpected dbz type %s - default to numeric type "
+			"representation", typestring);
 	return DBZTYPE_UNDEF;
 }
 
@@ -960,7 +1059,7 @@ build_schema_jsonpos_hash(Jsonb * jb)
 				if (v2)
 				{
 					tmpstr = pnstrdup(v2->val.string.val, v2->val.string.len);
-					tmprecord.dbztype = getDbzTypeFromString(tmpstr);
+					tmprecord.dbztype = getExtTypeFromString(tmpstr);
 					pfree(tmpstr);
 				}
 				else
@@ -1072,7 +1171,7 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 				if (v2)
 				{
 					tmpstr = pnstrdup(v2->val.string.val, v2->val.string.len);
-					tmprecord.dbztype = getDbzTypeFromString(tmpstr);
+					tmprecord.dbztype = getExtTypeFromString(tmpstr);
 					pfree(tmpstr);
 				}
 				else
@@ -3079,40 +3178,95 @@ handle_numeric_to_timestamp(const char * in, bool addquote, int timerep, int typ
 }
 
 static char *
-handle_string_to_timestamp(const char * in, bool addquote)
+handle_string_to_timestamp(const char * in, bool addquote, ConnectorType type)
 {
-    size_t len = strlen(in);
-    bool add_tz = (len > 0 && in[len - 1] == 'Z') ? true : false;
-    size_t new_len = len + (add_tz ? 5 : 0);
     char * out = NULL;
-    char * t = NULL;
 
-    /* todo: we assume input is already in correct timestamp format.
-     * We may need to check that is true prior to processing
-     */
-	if (addquote)
-	{
-		out = (char *) palloc0(new_len + 2 + 1);
-		out[0] = '\'';
-		strcpy(&out[1], in);
-		t = strchr(out, 'T');
-		if (t)
-			*t = ' ';
+    if (type == TYPE_OLR)
+    {
+        /*
+         * openlog replicator expressed timestamp with time zone as a string
+         * that looks like:
+         *
+         * 		"1706725800000000000,-08:00"
+         *
+         * this function will treat the first part of the string as nanosecond
+         * since epoch, convert it to timestamp string and append the second
+         * part (timezone) to the end of it.
+         */
+		long long ns;
+		char tz[SYNCHDB_MAX_TZ_LEN];
+		time_t seconds = 0;
+		struct tm t;
+		int offset_hours, offset_minutes;
+		char sign;
 
-		if (add_tz)
-			strcpy(&out[len], "+00:00");
-	}
-	else
-	{
-		out = (char *) palloc0(new_len + 1);
-		strcpy(out, in);
-		t = strchr(out, 'T');
-		if (t)
-			*t = ' ';
+		if (sscanf(in, "%lld,%15s", &ns, tz) != 2)
+		{
+			elog(WARNING, "invalid OLR timestamp string %s", in);
+			return NULL;
+		}
 
-		if (add_tz)
-			strcpy(&out[len - 1], "+00:00");
-	}
+		if (sscanf(tz, "%c%2d:%2d", (char *)&sign, &offset_hours, &offset_minutes) != 3)
+		{
+			elog(WARNING, "invalid OLR timezone string %s", tz);
+			return NULL;
+		}
+
+		if (sign != '+' && sign != '-')
+		{
+			elog(WARNING, "invalid timezone sign '%c'", sign);
+			return NULL;
+		}
+
+		seconds = ns / 1000000000LL;
+
+	    /* apply timezone offset to get local time */
+		seconds = sign == '-' ?
+				(seconds - (offset_hours * 3600 + offset_minutes * 60)) :
+				(seconds + (offset_hours * 3600 + offset_minutes * 60));
+
+		gmtime_r(&seconds, &t);
+
+		out = palloc0(SYNCHDB_MAX_TIMESTAMP_LEN + 1);
+		strftime(out, SYNCHDB_MAX_TIMESTAMP_LEN, "%Y-%m-%d %H:%M:%S", &t);
+		strcat(out, tz);
+    }
+    else
+    {
+        size_t len = strlen(in);
+        bool add_tz = (len > 0 && in[len - 1] == 'Z') ? true : false;
+        size_t new_len = len + (add_tz ? 5 : 0);
+        char * t = NULL;
+
+        /* todo: we assume input is already in correct timestamp format.
+         * We may need to check that is true prior to processing
+         */
+    	if (addquote)
+    	{
+    		out = (char *) palloc0(new_len + 2 + 1);
+    		out[0] = '\'';
+    		strcpy(&out[1], in);
+    		t = strchr(out, 'T');
+    		if (t)
+    			*t = ' ';
+
+    		if (add_tz)
+    			strcpy(&out[len], "+00:00");
+    	}
+    	else
+    	{
+    		out = (char *) palloc0(new_len + 1);
+    		strcpy(out, in);
+    		t = strchr(out, 'T');
+    		if (t)
+    			*t = ' ';
+
+    		if (add_tz)
+    			strcpy(&out[len - 1], "+00:00");
+    	}
+    }
+
     return out;
 }
 
@@ -3431,6 +3585,7 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 					out = handle_base64_to_numeric_with_scale(in, colval->scale);
 					break;
 				}
+				case OLRTYPE_STRING:
 				case DBZTYPE_STRING:
 				{
 					/* no special handling for now. todo */
@@ -3478,10 +3633,11 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 					break;
 				}
 				case DBZTYPE_STRING:
+				case OLRTYPE_STRING:
 				{
 					if (strstr(colval->typname, "timestamp") || strstr(colval->typname, "timetz"))
 					{
-						out = handle_string_to_timestamp(in, addquote);
+						out = handle_string_to_timestamp(in, addquote, conntype);
 					}
 					else
 					{
@@ -3521,6 +3677,7 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 					break;
 				}
 				case DBZTYPE_STRING:
+				case OLRTYPE_STRING:
 				default:
 				{
 					if (addquote)
@@ -3548,6 +3705,7 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 					break;
 				}
 				case DBZTYPE_STRING:
+				case OLRTYPE_STRING:
 				{
 					if (addquote)
 						out = escapeSingleQuote(in, addquote);
@@ -3635,6 +3793,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+				case OLRTYPE_STRING:
 				{
 					out = handle_string_to_numeric(in, addquote);
 					break;
@@ -3678,6 +3837,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+				case OLRTYPE_STRING:
 				{
 					out = handle_string_to_bit(in, addquote);
 					break;
@@ -3706,8 +3866,14 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+				case OLRTYPE_STRING:
 				{
 					out = handle_string_to_date(in, addquote);
+					break;
+				}
+				case OLRTYPE_NUMBER:
+				{
+					out = handle_numeric_to_date(in, addquote, TIME_NANOTIMESTAMP);
 					break;
 				}
 				default:
@@ -3736,11 +3902,12 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+				case OLRTYPE_STRING:
 				{
-					out = handle_string_to_timestamp(in, addquote);
+					out = handle_string_to_timestamp(in, addquote, type);
 					break;
 				}
-				case OLRTYPE_DATE:
+				case OLRTYPE_NUMBER:
 				{
 					/* OLR represents date as nanoseconds since epoch*/
 					out = handle_numeric_to_timestamp(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
@@ -3770,8 +3937,14 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+				case OLRTYPE_STRING:
 				{
 					out = handle_string_to_time(in, addquote);
+					break;
+				}
+				case OLRTYPE_NUMBER:
+				{
+					out = handle_numeric_to_time(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
 					break;
 				}
 				default:
@@ -3798,6 +3971,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+				case OLRTYPE_STRING:
 				{
 					out = handle_string_to_byte(in, addquote);
 					break;
@@ -3826,8 +4000,15 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+				case OLRTYPE_STRING:
 				{
 					out = handle_string_to_interval(in, addquote);
+					break;
+				}
+				case OLRTYPE_NUMBER:
+				{
+					/* oracle number represented as interval - usd nanoseconds */
+					out = handle_numeric_to_interval(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
 					break;
 				}
 				default:
@@ -5116,10 +5297,34 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn)
 	JsonbValue vbuf;
 	Jsonb * jbschema;
 	OLR_DDL * olrddl = NULL;
+	OLR_DDL_COLUMN * ddlcol = NULL;
 	bool isnull = false;
 	Datum datum_path_schema[1] = {CStringGetTextDatum("schema")};
-	char * db = NULL, * schema = NULL, * table = NULL, * sql = NULL;
+	char * db = NULL, * schema = NULL, * table = NULL;
+	StringInfoData sql;
+	List * ptree = NULL;
+	ListCell * cell;
+	int j = 0;
 
+	/* scn - required */
+	v = getKeyJsonValueFromContainer(&jb->root, "scn", strlen("scn"), &vbuf);
+	if (!v)
+	{
+		elog(WARNING, "malformed change request - no scn value");
+		goto end;
+	}
+	*scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
+
+	/* commit scn - required */
+	v = getKeyJsonValueFromContainer(&jb->root, "c_scn", strlen("c_scn"), &vbuf);
+	if (!v)
+	{
+		elog(WARNING, "malformed change request - no c_scn value");
+		goto end;
+	}
+	*c_scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
+
+	elog(WARNING, "scu %llu, c_scu %llu", *scn, *c_scn);
 
 	/* db - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "db", strlen("db"), &vbuf);
@@ -5144,6 +5349,16 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn)
 	{
 		schema = pnstrdup(v->val.string.val, v->val.string.len);
 	}
+	else
+	{
+		/*
+		 * no schema: we will ignore all DDLs without a schema (normally the username) because
+		 * OLR sends a lot of DDLs from system's internal maintainance so most of them are not
+		 * intended for user tables
+		 */
+		elog(DEBUG1, "skip ddl with no schema...");
+		goto end;
+	}
 
 	/* fetch payload.0.schema.table - required */
 	v = getKeyJsonValueFromContainer(&jbschema->root, "table", strlen("table"), &vbuf);
@@ -5155,22 +5370,285 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn)
 	table = pnstrdup(v->val.string.val, v->val.string.len);
 
 	/* fetch sql - required */
+	initStringInfo(&sql);
 	v = getKeyJsonValueFromContainer(&payload->root, "sql", strlen("sql"), &vbuf);
 	if (!v)
 	{
 		elog(WARNING, "malformed change request - no payload.0.sql value");
 		goto end;
 	}
-	sql = pnstrdup(v->val.string.val, v->val.string.len);
 
-	elog(WARNING, "olr ddl - db %s, schema %s, table %s, sql %s",
-			db, schema, table, sql);
+	appendBinaryStringInfo(&sql, v->val.string.val, v->val.string.len);
+	remove_double_quotes(&sql);
 
 	/*
-	 * todo: parse the oracle sql string to support CREATE, DROP,
-	 * ALTER TABLE ADD/DROP COLUMN, ALTER TABLE ALTER COLUMN
-	 * ...etc
+	 * do a preliminary filter on the incoming DDLs to filter out the ones
+	 * we are not interested in
 	 */
+	if (!is_whitelist_sql(&sql))
+	{
+		elog(DEBUG1, "unsupported DDL -----> %s", sql.data);
+		goto end;
+	}
+	else
+	{
+		elog(WARNING, "SUPPORTED -----> %s", sql.data);
+	}
+
+	/* construct the ddl struct */
+	olrddl = (DBZ_DDL*) palloc0(sizeof(DBZ_DDL));
+
+	/* Parse the Oracle SQL */
+	ptree = oracle_raw_parser(sql.data, RAW_PARSE_DEFAULT);
+	if (!ptree)
+	{
+		elog(WARNING, "oracle parser fails to parse SQL '%s'", sql.data);
+		destroyDBZDDL(olrddl);
+		olrddl = NULL;
+		goto end;
+	}
+	foreach(cell, ptree)
+	{
+		RawStmt *raw = (RawStmt *) lfirst(cell);
+		Node *stmt = NULL;
+
+		if (!IsA(raw, RawStmt))
+		{
+			elog(WARNING, "not a raw stmt");
+			continue;
+		}
+
+		stmt = raw->stmt;
+		if (IsA(stmt, CreateStmt))
+		{
+			/* CREATE TABLE */
+			ListCell *colCell;
+			ListCell *constrCell;
+			CreateStmt *createStmt = (CreateStmt *) stmt;
+			RangeVar *relation = createStmt->relation;
+			StringInfoData pklist;
+			char *schemaName = relation->schemaname ? relation->schemaname : "public";
+			char *tableName = relation->relname;
+
+			elog(DEBUG1, "Creating table: %s.%s", schemaName, tableName);
+
+			/* prepare to build primary key list */
+			initStringInfo(&pklist);
+			appendStringInfo(&pklist, "[");
+
+			/* Columns and constraints */
+			olrddl->type = pstrdup("CREATE");
+			foreach(colCell, createStmt->tableElts)
+			{
+				Node *elt = (Node *) lfirst(colCell);
+
+				if (IsA(elt, ColumnDef))
+				{
+					ColumnDef *col = (ColumnDef *) elt;
+					ddlcol = (OLR_DDL_COLUMN *) palloc0(sizeof(OLR_DDL_COLUMN));
+
+					/* column name */
+					elog(DEBUG1, "Column: %s", col->colname);
+					ddlcol->name = pstrdup(col->colname);
+
+					/* data type */
+					if (col->typeName && col->typeName->names)
+						elog(DEBUG1, "Type: %s", NameListToString(col->typeName->names));
+					ddlcol->typeName = pstrdup(NameListToString(col->typeName->names));
+
+					/* is optional? */
+					if (col->is_not_null)
+						ddlcol->optional = false;
+					else
+						ddlcol->optional = true;
+
+					elog(DEBUG1, "Optional: %d", ddlcol->optional);
+
+					/* auto increment? - assumed false todo */
+					ddlcol->autoIncremented = false;
+
+					/* length */
+					if (list_length(col->typeName->typmods) > 0)
+					{
+						Node *lenNode = (Node *) linitial(col->typeName->typmods);
+						if (IsA(lenNode, A_Const))
+						{
+					        A_Const *aconst = (A_Const *) lenNode;
+					        if (IsA(&aconst->val, Integer))
+					            ddlcol->length = intVal(&aconst->val);
+					        else
+					            elog(DEBUG1, "Expected integer for length value, got %d", nodeTag(&aconst->val));
+						}
+						else
+						{
+							elog(DEBUG1, "Expected a ConstNode, but got %d", nodeTag(lenNode));
+							ddlcol->length = 0;
+						}
+					}
+					elog(DEBUG1, "length = %d", ddlcol->length);
+
+					/* scale */
+					if (list_length(col->typeName->typmods) > 1)
+					{
+						Node *scaleNode = (Node *) lsecond(col->typeName->typmods);
+						if (IsA(scaleNode, A_Const))
+						{
+					        A_Const *aconst = (A_Const *) scaleNode;
+					        if (IsA(&aconst->val, Integer))
+					            ddlcol->scale = intVal(&aconst->val);
+					        else
+					            elog(DEBUG1, "Expected integer for scale value, got %d", nodeTag(&aconst->val));
+						}
+						else
+						{
+							elog(DEBUG1, "Expected a ConstNode, but got %d", nodeTag(scaleNode));
+							ddlcol->length = 0;
+						}
+					}
+					elog(DEBUG1, "scale = %d", ddlcol->scale);
+
+					/* inline constraint */
+					if (col->constraints)
+					{
+						elog(DEBUG1, "col %s has inline constraint", col->colname);
+						foreach(constrCell, col->constraints)
+						{
+							Constraint *constr = (Constraint *) lfirst(constrCell);
+
+							if (constr->contype == CONSTR_PRIMARY)
+							{
+								/* primary key indication */
+								elog(DEBUG1, "col %s is a pk", col->colname);
+								appendStringInfo(&pklist, "\"%s\",", col->colname);
+							}
+							else if (constr->contype == CONSTR_DEFAULT)
+					        {
+					            /*
+					             * default value expression - always defaults to null at later
+					             * stage of processing so it does not matter what expression is
+					             * put here. todo
+					             */
+					            ddlcol->defaultValueExpression = nodeToString(constr->raw_expr);
+					            elog(DEBUG1, "default value %s", ddlcol->defaultValueExpression);
+					        }
+							else
+							{
+								 elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+							}
+						}
+						pklist.data[pklist.len - 1] = '\0';
+						pklist.len = pklist.len - 1;
+						appendStringInfo(&pklist, "]");
+					}
+					olrddl->columns = lappend(olrddl->columns, ddlcol);
+				}
+				else if (IsA(elt, Constraint))
+				{
+					/* separately defined constraint */
+					Constraint *constr = (Constraint *) elt;
+
+					if (constr->contype == CONSTR_PRIMARY)
+					{
+						ListCell * keys;
+
+						elog(DEBUG1, "found a primary key constraint");
+						foreach(keys, constr->keys)
+						{
+							char *keycol = strVal(lfirst(keys));
+							elog(DEBUG1, "  -> PK Column: %s", keycol);
+							appendStringInfo(&pklist, "\"%s\",", keycol);
+						}
+						pklist.data[pklist.len - 1] = '\0';
+						pklist.len = pklist.len - 1;
+						appendStringInfo(&pklist, "]");
+					}
+					else
+					{
+						elog(WARNING, "unsupported contraints type %d", constr->contype);
+					}
+				}
+			}
+			elog(DEBUG1, "pks = %s", pklist.data);
+			olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+
+			if (pklist.data)
+				pfree(pklist.data);
+		}
+		else if (IsA(stmt, AlterTableStmt))
+		{
+			/* ALTER TABLE */
+			ListCell *cmdCell;
+
+			AlterTableStmt *alterStmt = (AlterTableStmt *) stmt;
+			elog(WARNING, "ALTER TABLE: %s", alterStmt->relation->relname);
+			olrddl->type = pstrdup("ALTER");
+			foreach(cmdCell, alterStmt->cmds)
+			{
+				AlterTableCmd *cmd = (AlterTableCmd *) lfirst(cmdCell);
+
+				switch (cmd->subtype)
+				{
+					case AT_AddColumn:
+					{
+						ColumnDef *col = (ColumnDef *)cmd->def;
+						elog(WARNING, "  ADD COLUMN: %s", col->colname);
+
+						if (col->typeName && col->typeName->names)
+						{
+							char *typeNameStr = NameListToString(col->typeName->names);
+							elog(WARNING, "    Type: %s", typeNameStr);
+						}
+						else
+						{
+							elog(WARNING, "    Type: (unknown)");
+						}
+						break;
+					}
+					case AT_DropColumn:
+						elog(WARNING, "  DROP COLUMN: %s", cmd->name);
+						break;
+					case AT_AlterColumnType:
+						elog(WARNING, "  ALTER COLUMN TYPE: %s", cmd->name);
+						break;
+					default:
+						elog(WARNING, "  Unhandled ALTER subtype: %d", cmd->subtype);
+						break;
+				}
+			}
+		}
+		else if (IsA(stmt, DropStmt))
+		{
+			/* DROP TABLE */
+			DropStmt *dropStmt = (DropStmt *) stmt;
+
+			if (dropStmt->removeType == OBJECT_TABLE)
+			{
+				ListCell *objCell;
+				foreach(objCell, dropStmt->objects)
+				{
+					List *names = (List *) lfirst(objCell);
+					char *relname = strVal(llast(names));
+					elog(WARNING, "DROP TABLE: %s", relname);
+
+					/* replace table with the new value */
+					if(table)
+					{
+						pfree(table);
+						table = pstrdup(relname);
+					}
+				}
+				olrddl->type = pstrdup("DROP");
+			}
+		}
+	}
+
+	if (db && schema && table)
+		olrddl->id = psprintf("%s.%s.%s", db, schema, table);
+	else
+		olrddl->id = psprintf("%s.%s", db, table);
+
+	for (j = 0; j < strlen(olrddl->id); j++)
+		olrddl->id[j] = (char) pg_tolower((unsigned char) olrddl->id[j]);
 end:
 
 	return olrddl;
@@ -6448,6 +6926,10 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 		case TYPE_OLR:
 		{
 			hash_destroy(oracleDatatypeHash);
+
+			/* unload oracle parser for OLR is needed */
+			if (connectorType == TYPE_OLR && handle != NULL)
+				dlclose(handle);
 			break;
 		}
 		case TYPE_SQLSERVER:
@@ -7451,17 +7933,21 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	oldContext = MemoryContextSwitchTo(tempContext);
 
     /* Convert event string to JSONB */
-    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
-    jb = DatumGetJsonbP(jsonb_datum);
-
-	if (!jb)
+	PG_TRY();
 	{
+	    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
+	    jb = DatumGetJsonbP(jsonb_datum);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
 		elog(WARNING, "bad json message: %s", event);
 		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 		MemoryContextSwitchTo(oldContext);
 		MemoryContextDelete(tempContext);
 		return -1;
 	}
+	PG_END_TRY();
 
 	/* payload - required */
 	payload = DatumGetJsonbP(jsonb_get_element(jb, &datum_path_payload[0], 2, &isnull, false));
@@ -7492,15 +7978,15 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		/* transaction boundary */
 		if (!strcasecmp(op, "begin"))
 		{
-			elog(DEBUG1, "begin transaction...");
-			StartTransactionCommand();
-			PushActiveSnapshot(GetTransactionSnapshot());
+//			elog(DEBUG1, "begin transaction...");
+//			StartTransactionCommand();
+//			PushActiveSnapshot(GetTransactionSnapshot());
 		}
 		else if (!strcasecmp(op, "commit"))
 		{
-			elog(DEBUG1, "commit transaction...");
-			PopActiveSnapshot();
-			CommitTransactionCommand();
+//			elog(DEBUG1, "commit transaction...");
+//			PopActiveSnapshot();
+//			CommitTransactionCommand();
 
 			/*
 			 * at successful commit, we need to signal the caller to also send
@@ -7566,6 +8052,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
     	/* (4) record scn and c_scn */
     	olr_client_set_scns(scn, c_scn);
+    	* sendconfirm = true;
 
        	/* (5) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -7576,26 +8063,95 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	{
 		/* DDLs */
 		OLR_DDL * olrddl = NULL;
-//		PG_DDL * pgddl = NULL;
+		PG_DDL * pgddl = NULL;
+
 		orascn scn = 0, c_scn = 0;
 
-		/* (1) parse */
+		/* (1) make sure oracle parser is ready to use */
+		if (oracle_raw_parser == NULL)
+		{
+			char * oralib_path = NULL, * error = NULL;
+
+			oralib_path = psprintf("%s/%s", pkglib_path, ORACLE_RAW_PARSER_LIB);
+
+			/* Load the shared library */
+			handle = dlopen(oralib_path, RTLD_NOW | RTLD_GLOBAL);
+			if (!handle)
+			{
+				set_shm_connector_errmsg(myConnectorId, "failed to load oracle_parser.so");
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("failed to load oracle_parser.so at %s", oralib_path),
+						 errhint("%s",  dlerror())));
+
+			}
+			pfree(oralib_path);
+
+			oracle_raw_parser = (oracle_raw_parser_fn) dlsym(handle, "oracle_raw_parser");
+			if ((error = dlerror()) != NULL)
+			{
+				set_shm_connector_errmsg(myConnectorId, "failed to load oracle_raw_parser symbol");
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("failed to load oracle_raw_parser function symbol"),
+						 errhint("make sure oracle_raw_parser() function in oracle_parser.so is "
+								 "publicly accessible ")));
+			}
+		}
+
+		/* (2) parse */
 		set_shm_connector_state(myConnectorId, STATE_PARSING);
 		olrddl = parseOLRDDL(jb, payload, &scn, &c_scn);
     	if (!olrddl)
 		{
-    		elog(WARNING, "handling OLR DDL not fully supported yet");
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
 			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 			MemoryContextSwitchTo(oldContext);
 			MemoryContextDelete(tempContext);
 			return -1;
 		}
-    	/* todo */
+
+    	/* (3) convert */
+    	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
+    	pgddl = convert2PGDDL(olrddl, TYPE_OLR);
+    	if (!olrddl)
+    	{
+    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+    		destroyDBZDDL(olrddl);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
+    		return -1;
+    	}
+
+    	/* (4) execute */
+    	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
+    	ret = ra_executePGDDL(pgddl, TYPE_OLR);
+    	if(ret)
+    	{
+    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+    		destroyDBZDDL(olrddl);
+    		destroyPGDDL(pgddl);
+    		MemoryContextSwitchTo(oldContext);
+    		MemoryContextDelete(tempContext);
+    		return -1;
+    	}
+
+    	/* (5) record scn and c_scn */
+    	olr_client_set_scns(scn, c_scn);
+    	* sendconfirm = true;
+
+		/* (6) update attribute map table */
+    	updateSynchdbAttribute(olrddl, pgddl, TYPE_OLR, name);
+
+    	set_shm_connector_state(myConnectorId, STATE_SYNCING);
+		destroyDBZDDL(olrddl);
+		destroyPGDDL(pgddl);
 	}
 	else
 	{
-		elog(WARNING, "unkown op %s", op);
+		elog(WARNING, "unsupported op %s", op);
 	}
 
 	MemoryContextSwitchTo(oldContext);

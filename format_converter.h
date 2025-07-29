@@ -47,9 +47,15 @@ typedef enum _timeRep
 	DATA_ENUM,				/* indication of enum data */
 } TimeRep;
 
-/* structure to hold dbz data literal type in json */
+/*
+ * DbzType
+ *
+ * enum that represents how foreign systems (dbz or olr) could represent
+ * a data value
+ */
 typedef enum _DbzType
 {
+	/* DBZ types */
 	DBZTYPE_UNDEF = 0,
 	DBZTYPE_FLOAT32,
 	DBZTYPE_FLOAT64,
@@ -62,9 +68,10 @@ typedef enum _DbzType
 	DBZTYPE_INT64,
 	DBZTYPE_STRUCT,
 	DBZTYPE_STRING,
+
+	/* OLR types */
 	OLRTYPE_NUMBER,
-	OLRTYPE_DATE,
-	/* todo: more OLRTYPE to be added here */
+	OLRTYPE_STRING
 } DbzType;
 
 /* Structure to represent a column in a DDL event */
@@ -81,6 +88,9 @@ typedef struct dbz_ddl_column
 	char * defaultValueExpression;
 	int scale;
 } DBZ_DDL_COLUMN;
+
+/* another alias to the same DDL COLUMN struct for clarity */
+typedef DBZ_DDL_COLUMN OLR_DDL_COLUMN;
 
 /* Structure to represent a DDL event */
 typedef struct dbz_ddl

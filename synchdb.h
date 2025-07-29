@@ -42,6 +42,8 @@
 #define SYNCHDB_TRANSFORM_EXPRESSION_SIZE 256
 #define SYNCHDB_JSON_PATH_SIZE 128
 #define SYNCHDB_INVALID_BATCH_ID -1
+#define SYNCHDB_MAX_TZ_LEN 16
+#define SYNCHDB_MAX_TIMESTAMP_LEN 64
 
 #define SYNCHDB_PG_MAJOR_VERSION  PG_VERSION_NUM / 100
 
@@ -52,6 +54,7 @@
 
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
 #define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
+#define ORACLE_RAW_PARSER_LIB "liboracle_parser.so"
 #define MAX_PATH_LENGTH 1024
 #define MAX_JAVA_OPTION_LENGTH 256
 #define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_%s_offsets.dat"
