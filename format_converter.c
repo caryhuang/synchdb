@@ -267,7 +267,10 @@ strtoupper(const char *input)
 /*
  * is_whitelist_sql
  *
- * returns true if SQL is supported, else otherwise
+ * this function does a simple filtering on the input DDL statement and returns
+ * true if SQL is supported, or false if otherwise. This is kind of rough and
+ * may need to add more filtering as more tests are conducted. This filter is
+ * needed because the oracle parser does not support every single oracle syntax.
  */
 static bool
 is_whitelist_sql(StringInfoData * sql)
@@ -295,14 +298,13 @@ is_whitelist_sql(StringInfoData * sql)
 			sql->len = new_len;
 		}
 
-		//todo:
 		if (!strstr(sqlupper, "PURGE"))
 			allowed = true;
     }
     else if (strncmp(sqlupper, "ALTER TABLE",  strlen("ALTER TABLE")) == 0)
     {
     	/* ALTER TABLE xxx RENAME not supported now */
-        if (strstr(sqlupper + 11, "RENAME") == NULL)
+        if (strstr(sqlupper + 11, "RENAME") == NULL && strstr(sqlupper + 11, "SUPPLEMENTAL") == NULL)
             allowed = true;
     }
 
@@ -5291,7 +5293,7 @@ end:
  * parseOLRDDL
  */
 static OLR_DDL *
-parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn)
+parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfirst, bool islast)
 {
 	JsonbValue * v = NULL;
 	JsonbValue vbuf;
@@ -5323,8 +5325,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn)
 		goto end;
 	}
 	*c_scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
-
-	elog(WARNING, "scu %llu, c_scu %llu", *scn, *c_scn);
 
 	/* db - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "db", strlen("db"), &vbuf);
@@ -5390,14 +5390,20 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn)
 		elog(DEBUG1, "unsupported DDL -----> %s", sql.data);
 		goto end;
 	}
-	else
-	{
-		elog(WARNING, "SUPPORTED -----> %s", sql.data);
-	}
 
 	/* construct the ddl struct */
 	olrddl = (DBZ_DDL*) palloc0(sizeof(DBZ_DDL));
 
+	/* tm - only on first and last record within a batch */
+	if (isfirst || islast)
+	{
+		v = getKeyJsonValueFromContainer(&jb->root, "tm", strlen("tm"), &vbuf);
+		if (v)
+		{
+			olrddl->src_ts_ms = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+					NumericGetDatum(v->val.numeric))) / 1000 / 1000;
+		}
+	}
 	/* Parse the Oracle SQL */
 	ptree = oracle_raw_parser(sql.data, RAW_PARSE_DEFAULT);
 	if (!ptree)
@@ -5657,7 +5663,7 @@ end:
  * parseOLRDML
  */
 static OLR_DML *
-parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn)
+parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfirst, bool islast)
 {
 	JsonbValue * v = NULL;
 	JsonbValue vbuf;
@@ -5709,15 +5715,25 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn)
 	}
 	db = pnstrdup(v->val.string.val, v->val.string.len);
 
-	elog(DEBUG1, "scn %llu c_scn %llu db %s op is %c", *scn, *c_scn, db, op);
-
 	olrdml = palloc0(sizeof(DBZ_DML));
 	olrdml->op = op;
 
 	initStringInfo(&objid);
 	initStringInfo(&strinfo);
-
 	appendStringInfo(&objid, "%s.", db);
+
+	/* tm - only at first and last record within a batch */
+	if (isfirst || islast)
+	{
+		v = getKeyJsonValueFromContainer(&jb->root, "tm", strlen("tm"), &vbuf);
+		if (v)
+		{
+			/* todo - support batch request with more than 1 event */
+			olrdml->src_ts_ms = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+					NumericGetDatum(v->val.numeric))) / 1000 / 1000;
+		}
+	}
+	elog(DEBUG1, "scn %llu c_scn %llu db %s op is %c", *scn, *c_scn, db, op);
 
 	/* fetch payload.0.schema */
 	jbschema = DatumGetJsonbP(jsonb_get_element(payload, &datum_path_schema[0], 1, &isnull, false));
@@ -7801,7 +7817,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	updateSynchdbAttribute(dbzddl, pgddl, type, name);
 
     	/* (5) record only the first and last change event's processing timestamps only */
-    	if (islast && !isfirst)
+    	if (islast)
     	{
 			myBatchStats->stats_last_src_ts = dbzddl->src_ts_ms;
 			myBatchStats->stats_last_dbz_ts = dbzddl->dbz_ts_ms;
@@ -7809,7 +7825,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
-    	if (!islast && isfirst)
+    	if (isfirst)
     	{
 			myBatchStats->stats_first_src_ts = dbzddl->src_ts_ms;
 			myBatchStats->stats_first_dbz_ts = dbzddl->dbz_ts_ms;
@@ -7872,7 +7888,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	}
 
     	/* (4) record only the first and last change event's processing timestamps only */
-    	if (islast && !isfirst)
+    	if (islast)
     	{
 			myBatchStats->stats_last_src_ts = dbzdml->src_ts_ms;
 			myBatchStats->stats_last_dbz_ts = dbzdml->dbz_ts_ms;
@@ -7880,7 +7896,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
-    	if (!islast && isfirst)
+    	if (isfirst)
     	{
 			myBatchStats->stats_first_src_ts = dbzdml->src_ts_ms;
 			myBatchStats->stats_first_dbz_ts = dbzdml->dbz_ts_ms;
@@ -7912,7 +7928,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
  */
 int
 fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
-		const char * name, bool * sendconfirm)
+		const char * name, bool * sendconfirm, bool isfirst, bool islast)
 {
 	Datum jsonb_datum;
 	Jsonb * jb = NULL;
@@ -7923,6 +7939,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	int ret = -1;
 	bool isnull = false;
 	MemoryContext tempContext, oldContext;
+	struct timeval tv;
 
 	Datum datum_path_payload[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("0")};
 
@@ -7978,23 +7995,41 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		/* transaction boundary */
 		if (!strcasecmp(op, "begin"))
 		{
-//			elog(DEBUG1, "begin transaction...");
-//			StartTransactionCommand();
-//			PushActiveSnapshot(GetTransactionSnapshot());
+			/* todo */
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 		}
 		else if (!strcasecmp(op, "commit"))
 		{
-//			elog(DEBUG1, "commit transaction...");
-//			PopActiveSnapshot();
-//			CommitTransactionCommand();
-
-			/*
-			 * at successful commit, we need to signal the caller to also send
-			 * a confirm message to OLR
-			 */
-			* sendconfirm = true;
+			/* todo */
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 		}
 		set_shm_connector_state(myConnectorId, STATE_SYNCING);
+
+		/* tm - only at first and last record within a batch */
+		/* update processing timestamps */
+    	if (islast)
+    	{
+			v = getKeyJsonValueFromContainer(&jb->root, "tm", strlen("tm"), &vbuf);
+			if (v)
+			{
+				myBatchStats->stats_last_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+						NumericGetDatum(v->val.numeric))) / 1000 / 1000;
+			}
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+    	if (isfirst)
+    	{
+			v = getKeyJsonValueFromContainer(&jb->root, "tm", strlen("tm"), &vbuf);
+			if (v)
+			{
+				myBatchStats->stats_first_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+						NumericGetDatum(v->val.numeric))) / 1000 / 1000;
+			}
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
 	}
 	else if (!strcasecmp(op, "c") || !strcasecmp(op, "u") || !strcasecmp(op, "d"))
 	{
@@ -8002,6 +8037,9 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		OLR_DML * olrdml = NULL;
 		PG_DML * pgdml = NULL;
 		orascn scn = 0, c_scn = 0;
+
+		/* increment batch statistics */
+		increment_connector_statistics(myBatchStats, STATS_DML, 1);
 
 		if (!IsTransactionState())
 		{
@@ -8013,7 +8051,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
 		/* (1) parse */
 		set_shm_connector_state(myConnectorId, STATE_PARSING);
-		olrdml = parseOLRDML(jb, op[0], payload, &scn, &c_scn);
+		olrdml = parseOLRDML(jb, op[0], payload, &scn, &c_scn, isfirst, islast);
     	if (!olrdml)
 		{
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -8050,9 +8088,25 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     		return -1;
     	}
 
-    	/* (4) record scn and c_scn */
+    	/* (4) record scn, c_scn and processing timestamps */
     	olr_client_set_scns(scn, c_scn);
     	* sendconfirm = true;
+
+    	if (islast)
+    	{
+			myBatchStats->stats_last_src_ts = olrdml->src_ts_ms;
+			myBatchStats->stats_last_dbz_ts = olrdml->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+    	if (isfirst)
+    	{
+			myBatchStats->stats_first_src_ts = olrdml->src_ts_ms;
+			myBatchStats->stats_first_dbz_ts = olrdml->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
 
        	/* (5) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -8064,10 +8118,12 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		/* DDLs */
 		OLR_DDL * olrddl = NULL;
 		PG_DDL * pgddl = NULL;
-
 		orascn scn = 0, c_scn = 0;
 
-		/* (1) make sure oracle parser is ready to use */
+		/* increment batch statistics */
+		increment_connector_statistics(myBatchStats, STATS_DDL, 1);
+
+		/* (1) make sure oracle parser is ready to use - todo move earlier */
 		if (oracle_raw_parser == NULL)
 		{
 			char * oralib_path = NULL, * error = NULL;
@@ -8101,7 +8157,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
 		/* (2) parse */
 		set_shm_connector_state(myConnectorId, STATE_PARSING);
-		olrddl = parseOLRDDL(jb, payload, &scn, &c_scn);
+		olrddl = parseOLRDDL(jb, payload, &scn, &c_scn, isfirst, islast);
     	if (!olrddl)
 		{
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -8138,13 +8194,30 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     		return -1;
     	}
 
-    	/* (5) record scn and c_scn */
+    	/* (5) record scn, c_scn and processing timestmaps */
     	olr_client_set_scns(scn, c_scn);
     	* sendconfirm = true;
+
+    	if (islast)
+    	{
+			myBatchStats->stats_last_src_ts = olrddl->src_ts_ms;
+			myBatchStats->stats_last_dbz_ts = olrddl->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+    	if (isfirst)
+    	{
+			myBatchStats->stats_first_src_ts = olrddl->src_ts_ms;
+			myBatchStats->stats_first_dbz_ts = olrddl->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
 
 		/* (6) update attribute map table */
     	updateSynchdbAttribute(olrddl, pgddl, TYPE_OLR, name);
 
+    	/* (7) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
 		destroyDBZDDL(olrddl);
 		destroyPGDDL(pgddl);

@@ -99,6 +99,7 @@ int synchdb_max_connector_workers = 30;
 int synchdb_error_strategy = STRAT_EXIT_ON_ERROR;
 int dbz_log_level = LOG_LEVEL_WARN;
 bool synchdb_log_event_on_error = true;
+int olr_read_buffer_size = 64;	/* in kilobytes */
 
 static const struct config_enum_entry error_strategies[] =
 {
@@ -1827,32 +1828,83 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 					int ret = -1;
 					bool sendconfirm = false;
 
-					/* todo: support different snapshot mode */
-					memset(&myBatchStats, 0, sizeof(myBatchStats));
-					ret = olr_client_get_change(myConnectorId, &dbzExitSignal, &myBatchStats,
-							&sendconfirm);
-
-					/* send confirm message to OLR if successfully done */
-					if (ret == 0 && sendconfirm)
+					/* check if connection is still alive */
+					if (olr_client_get_connect_status())
 					{
-						elog(DEBUG1, "successfully applied - send confirm message for "
-								"scn %llu and c_scn %llu", olr_client_get_scn(),
-								olr_client_get_c_scn());
-						olr_client_confirm_scn("ORACLE");
+						/* todo: support different snapshot mode */
+						memset(&myBatchStats, 0, sizeof(myBatchStats));
+						ret = olr_client_get_change(myConnectorId, &dbzExitSignal, &myBatchStats,
+								&sendconfirm);
 
+						/* send confirm message to OLR if successfully done */
+						if (ret == 0 && sendconfirm)
+						{
+							elog(DEBUG1, "successfully applied - send confirm message for "
+									"scn %llu and c_scn %llu", olr_client_get_scn(),
+									olr_client_get_c_scn());
+
+							olr_client_confirm_scn(connInfo->srcdb);
+
+							/*
+							 * flush scn if needed - if a flush happens, we also set it to
+							 * shared memory to display to user
+							 */
+							if (olr_client_write_scn_state(connectorType, connInfo->name,
+									connInfo->dstdb, false))
+								set_shm_dbz_offset(myConnectorId);
+						}
+
+						/* update statistics if at least one batch is attempted (ret != -2) */
+						if (ret != -2)
+						{
+							/* increment batch connector statistics */
+							increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+
+							/* update the batch statistics to shared memory */
+							set_shm_connector_statistics(myConnectorId, &myBatchStats);
+						}
+					}
+					else
+					{
 						/*
-						 * flush scn if needed - if a flush happens, we also set it to
-						 * shared memory to display to user
+						 * peer has disconnected, let's retry connection again with
+						 * a little bit of delay in between...
 						 */
-						if (olr_client_write_scn_state(connectorType, connInfo->name,
-								connInfo->dstdb, false))
-							set_shm_dbz_offset(myConnectorId);
 
-						/* increment batch connector statistics */
-						increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+						sleep(3);
+						elog(WARNING, "reconnecting...");
+						if (olr_client_init(connInfo->hostname, connInfo->port))
+							elog(WARNING, "failed to reconnect");
+						else
+						{
+							elog(WARNING, "reconnected, request replication...");
 
-						/* update the batch statistics to shared memory */
-						set_shm_connector_statistics(myConnectorId, &myBatchStats);
+							/* connInfo.srcdb is used as data source for OLR */
+							ret = olr_client_start_or_cont_replication(connInfo->srcdb, true);
+							if (ret == -1)
+							{
+								set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+								elog(ERROR, "failed to start replication with olr server");
+							}
+
+							if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
+							{
+								elog(WARNING, "replication already started or starting - sending continue");
+								ret = olr_client_start_or_cont_replication(connInfo->srcdb, false);
+								if (ret == -1)
+								{
+									set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+									elog(ERROR, "failed to start replication with olr server");
+								}
+							}
+							if (ret == RES_REPLICATE)
+								elog(WARNING, "replication requested...");
+							else
+							{
+								set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate after reconnection");
+								elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
+							}
+						}
 					}
 				}
 				else
@@ -2909,6 +2961,17 @@ _PG_init(void)
 							 PGC_SIGHUP,
 							 0,
 							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.olr_read_buffer_size",
+							"size of buffer in kilobytes for network IO reads",
+							NULL,
+							&olr_read_buffer_size,
+							64,
+							8,
+							128,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
 
 	if (process_shared_preload_libraries_in_progress)
 	{

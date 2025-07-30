@@ -226,6 +226,6 @@ bool fc_load_rules(ConnectorType connectorType, const char * rulefile);
 bool fc_load_objmap(const char * name, ConnectorType connectorType);
 char * escapeSingleQuote(const char * in, bool addquote);
 int fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
-		const char * name, bool * sendconfirm);
+		const char * name, bool * sendconfirm, bool isfirst, bool islast);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */

@@ -40,5 +40,6 @@ orascn olr_client_get_scn(void);
 int olr_client_confirm_scn(char * source);
 bool olr_client_write_scn_state(ConnectorType type, const char * name, const char * srcdb, bool force);
 bool olr_client_init_scn_state(ConnectorType type, const char * name, const char * srcdb);
+bool olr_client_get_connect_status(void);
 
 #endif /* SYNCHDB_OLR_CLIENT_H_ */

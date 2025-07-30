@@ -76,11 +76,11 @@ netio_connect(NetioContext *ctx, const char *host, int port)
 				socklen_t len = sizeof(err);
 				if (getsockopt(ctx->sockfd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0)
 				{
-					// Connection established
+					/* Connection established */
 				}
 				else
 				{
-					// Connection failed: err has errno-like value
+					/* Connection failed: err has errno-like value */
 					elog(WARNING, "connect failed: %s (errno=%d)", strerror(err), err);
 					goto error;
 				}
@@ -148,7 +148,7 @@ netio_read(NetioContext *ctx, StringInfoData * buf, int size)
 	{
 		while (true)
 		{
-			ssize_t n = recv(ctx->sockfd, tmp, size, 0);
+			ssize_t n = recv(ctx->sockfd, tmp, sizeof(tmp), 0);
 			if (n > 0)
 			{
 				appendBinaryStringInfo(buf, tmp, n);
@@ -157,6 +157,7 @@ netio_read(NetioContext *ctx, StringInfoData * buf, int size)
 			else if (n == 0)
 			{
 				/* Peer closed connection */
+				elog(WARNING, "peer disconnected");
 				ctx->is_connected = false;
 				break;
 			}
@@ -166,7 +167,11 @@ netio_read(NetioContext *ctx, StringInfoData * buf, int size)
 					break;  /* no more data to read or now */
 				if (errno == EINTR)
 					continue;  /* try again */
-				return -1; /* recv error */
+
+				/* recv error */
+				elog(WARNING, "recv error");
+				ctx->is_connected = false;
+				return -1;
 			}
 		}
 	}
@@ -186,6 +191,7 @@ netio_read(NetioContext *ctx, StringInfoData * buf, int size)
 			}
 			else if (n == 0)
 			{
+				elog(WARNING, "peer disconnected");
 				ctx->is_connected = false;
 				break;
 			}
@@ -195,6 +201,10 @@ netio_read(NetioContext *ctx, StringInfoData * buf, int size)
 					break;
 				if (errno == EINTR)
 					continue;
+
+				/* recv error */
+				elog(WARNING, "recv error");
+				ctx->is_connected = false;
 				return -1;
 			}
 		}

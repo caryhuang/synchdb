@@ -11,12 +11,17 @@
 
 #include "synchdb.h"
 
+#define NETIO_NODATA				-1
+#define NETIO_PEER_DISCONNECTED 	-2
+#define NETIO_FATAL_ERROR			-3
+
 typedef struct
 {
 	int sockfd;
 	char host[SYNCHDB_CONNINFO_HOSTNAME_SIZE];
 	int port;
 	bool is_connected;
+	int errcode;
 } NetioContext;
 
 int netio_connect(NetioContext *ctx, const char *host, int port);

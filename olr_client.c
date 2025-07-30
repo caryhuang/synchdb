@@ -21,18 +21,21 @@ extern int myConnectorId;
 extern int dbz_offset_flush_interval_ms;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
+extern int olr_read_buffer_size;
 
 /* static globals */
 static NetioContext g_netioCtx = {0};
 static orascn g_scn = 0;
 static orascn g_c_scn = 0;
+static StringInfoData g_strinfo;
+static int g_offset = 0;
 
 int
 olr_client_init(const char * hostname, unsigned int port)
 {
+	initStringInfo(&g_strinfo);
 	if (netio_connect(&g_netioCtx, hostname, port))
 	{
-		/* todo: hook up error messages with synchdb state view and use ERROR shutdown */
 		elog(WARNING, "failed to connect to OLR");
 		return -1;
 	}
@@ -47,7 +50,7 @@ olr_client_start_or_cont_replication(char * source, bool which)
 	ssize_t nbytes = 0;
 	size_t len;
 	unsigned char *buf = NULL;
-	int retcode = -1, i = 0;
+	int retcode = -1;
 
 	OpenLogReplicator__Pb__RedoRequest request =
 			OPEN_LOG_REPLICATOR__PB__REDO_REQUEST__INIT;
@@ -67,20 +70,6 @@ olr_client_start_or_cont_replication(char * source, bool which)
 	request.c_scn = olr_client_get_c_scn() == 0 ? olr_client_get_c_scn() :
 			olr_client_get_c_scn() + 1; /* resume beyond last know c_scn */
 
-//	request.seq = 1111111;
-
-	/* schema request */
-	request.n_schema = 1;
-	request.schema = palloc0(sizeof(OpenLogReplicator__Pb__SchemaRequest  *) * request.n_schema);
-	for (i = 0; i < request.n_schema; i++)
-	{
-		request.schema[i] = palloc0(sizeof(OpenLogReplicator__Pb__SchemaRequest));
-		open_log_replicator__pb__schema_request__init(request.schema[i]);
-
-	    request.schema[i]->mask = "0";
-	    request.schema[i]->filter = pstrdup("{\"table\":[{\"owner\":\"DBZUSER\",\"table\":\"TEST_TABLE\"}]");
-	}
-
 	elog(WARNING, "requested scn %lu c_scn %lu, nschema %ld",
 			request.scn, request.c_scn, request.n_schema);
 
@@ -96,11 +85,6 @@ olr_client_start_or_cont_replication(char * source, bool which)
 	/* send encoded message to olr */
 	nbytes = netio_write(&g_netioCtx, buf, len + 4);
 	pfree(buf);
-
-	/* free the schema request after it has been sent */
-	for (i = 0; i < request.n_schema; i++)
-		pfree(request.schema[i]);
-	pfree(request.schema);
 
 	/* read 4 byte length header from olr first */
 	initStringInfo(&strinfo);
@@ -141,57 +125,108 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 		bool * sendconfirm)
 {
 	ssize_t nbytes = 0;
-	StringInfoData strinfo;
-	int ret = -1;
+	int ret = -1, curr = 0;
+	int batchsize = 0;
+	int tmp_offset = g_offset;
 
 	if (!g_netioCtx.is_connected)
 	{
-		/* todo: maybe retry connection indefinitely? */
 		elog(WARNING, "no connection established to openlog replicator");
-		return -1;
+		return -2;
 	}
 
-	/* read 4 byte length header from olr first */
-	initStringInfo(&strinfo);
-	nbytes = netio_read(&g_netioCtx, &strinfo, 4);
-	if (nbytes == 4)
+	nbytes = netio_read(&g_netioCtx, &g_strinfo, olr_read_buffer_size*1024);
+	if (nbytes > 0)
 	{
-		/* then read the payload */
-		int size = -1;
-		memcpy(&size, strinfo.data, sizeof(int));
-		nbytes += netio_read(&g_netioCtx, &strinfo, size);
-	}
+		elog(DEBUG1, "%ld bytes read", nbytes);
 
-	/* decode received message with protobuf-c */
-	if (nbytes > 4)
-	{
-		/* expected JSON payload - skip 4 bytes size header */
-		if (synchdb_log_event_on_error)
-			g_eventStr = strinfo.data;
+		/*
+		 * pre-scan - count how many complete json payloads in one read.
+		 * This is needed to clearly identify first and last change events
+		 * for the purpose of recording batch statistics.
+		 */
+		while (tmp_offset + 4 <= g_strinfo.len)
+		{
+			int json_len = 0;
+			memcpy(&json_len, g_strinfo.data + tmp_offset, 4);
 
-		elog(WARNING, "%s", strinfo.data + 4);
+			if (tmp_offset + 4 + json_len > g_strinfo.len)
+				break;
+
+			batchsize++;
+			tmp_offset += 4 + json_len;
+		}
+		elog(DEBUG1, "there are %d records in this batch", batchsize);
 
 		StartTransactionCommand();
 		PushActiveSnapshot(GetTransactionSnapshot());
-		elog(WARNING, "B----->");
 
-		/* todo process 1 change event */
-		ret = fc_processOLRChangeEvent(strinfo.data + 4, myBatchStats,
-				get_shm_connector_name_by_id(myConnectorId), sendconfirm);
+		while (g_offset + 4 <= g_strinfo.len && curr < batchsize)
+		{
+			int json_len = 0;
+			char * json_payload;
+			memcpy(&json_len, g_strinfo.data + g_offset, 4);
+
+			elog(DEBUG1, "json len %d", json_len);
+
+			if (g_offset + 4 + json_len > g_strinfo.len)
+			{
+				/*
+				 * not enough payload data, exit for now. More data is expected
+				 * to be read in the next call
+				 */
+				elog(DEBUG1, "json_len is %d, but only %ld bytes left in buffer %ld/%d",
+						json_len, (long)(g_strinfo.len - g_offset - 4), (long)g_offset,
+						g_strinfo.len);
+				break;
+			}
+			/*
+			 * payload is not null-terminated so we make a copy of it first - kind of
+			 * inefficient here. todo.
+			 */
+			json_payload = pnstrdup(g_strinfo.data + g_offset + 4, json_len);
+
+			if (synchdb_log_event_on_error)
+				g_eventStr = json_payload;
+
+			/* process it */
+			ret = fc_processOLRChangeEvent(json_payload, myBatchStats,
+					get_shm_connector_name_by_id(myConnectorId), sendconfirm,
+					(curr == 0), (curr == batchsize - 1));
+
+			pfree(json_payload);
+
+			if (synchdb_log_event_on_error)
+				g_eventStr = NULL;
+
+			g_offset += 4 + json_len;
+			curr++;
+		}
 
 		PopActiveSnapshot();
 		CommitTransactionCommand();
-		elog(WARNING, "<-----C");
 
-		if (strinfo.data)
-			pfree(strinfo.data);
+		/* compact or reuse the buffer if available */
+		if (g_offset >= g_strinfo.len)
+		{
+			resetStringInfo(&g_strinfo);
+			g_offset = 0;
+			elog(DEBUG1, "reset g_strinfo buffer");
+		}
+		else if (g_offset > 0)
+		{
+			memmove(g_strinfo.data, g_strinfo.data + g_offset, g_strinfo.len - g_offset);
+			g_strinfo.len -= g_offset;
+			g_strinfo.data[g_strinfo.len] = '\0';
+			g_offset = 0;
+			elog(DEBUG1, "reset and moved g_strinfo buffer content");
+		}
+		increment_connector_statistics(myBatchStats, STATS_TOTAL_CHANGE_EVENT, batchsize);
 
-		if (synchdb_log_event_on_error)
-			g_eventStr = NULL;
-
+		/* this ret could be -1 for general failure or 0 for success */
 		return ret;
 	}
-	return -1;
+	return -2;
 }
 
 void
@@ -222,7 +257,6 @@ olr_client_confirm_scn(char * source)
 
 	if (!g_netioCtx.is_connected)
 	{
-		/* todo: hook up error messages with synchdb state view and use ERROR shutdown */
 		elog(WARNING, "no connection established to openlog replicator");
 		return -1;
 	}
@@ -294,7 +328,7 @@ olr_client_write_scn_state(ConnectorType type, const char * name, const char * d
 		elog(ERROR, "can not open file \"%s\" for writing: %m", filename);
 	}
 
-	elog(DEBUG1, "flushing... scn %llu, c_scu %llu", g_scn, g_c_scn);
+	elog(DEBUG1, "flushing... scn %llu, c_scn %llu", g_scn, g_c_scn);
 	if (write(fd, buf, sizeof(buf)) != sizeof(buf))
 	{
 		int save_errno = errno;
@@ -336,4 +370,10 @@ olr_client_init_scn_state(ConnectorType type, const char * name, const char * ds
 	g_c_scn = buf[1];
 	elog(LOG, "initialize scn = %llu, c_scn = %llu", g_scn, g_c_scn);
 	return true;
+}
+
+bool
+olr_client_get_connect_status(void)
+{
+	return g_netioCtx.is_connected;
 }
