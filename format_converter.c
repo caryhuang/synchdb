@@ -267,10 +267,11 @@ strtoupper(const char *input)
 /*
  * is_whitelist_sql
  *
- * this function does a simple filtering on the input DDL statement and returns
- * true if SQL is supported, or false if otherwise. This is kind of rough and
- * may need to add more filtering as more tests are conducted. This filter is
- * needed because the oracle parser does not support every single oracle syntax.
+ * this function does a simple filtering and normalization on the input DDL
+ * statement and returns true if SQL is good to proceed, or false if otherwise.
+ * This is kind of rough and may need to add more filtering as more tests are
+ * conducted. This filter is needed because the oracle parser does not support
+ * every single oracle syntax.
  */
 static bool
 is_whitelist_sql(StringInfoData * sql)
@@ -278,35 +279,39 @@ is_whitelist_sql(StringInfoData * sql)
 	char * sqlupper = strtoupper(sql->data);
     bool allowed = false;
 
-    if (strncmp(sqlupper, "CREATE TABLE", strlen("CREATE TABLE")) == 0)
-    {
-    	if (!strstr(sqlupper, "TABLESPACE"))
-    		allowed = true;
-    }
-    else if (strncmp(sqlupper, "DROP TABLE",  strlen("DROP TABLE")) == 0)
+    /* special case for DROP TABLE xxx AS yyy (internal oracle sql) */
+    if (strstr(sqlupper, "DROP") && strstr(sqlupper, "TABLE") &&
+		strstr(sqlupper, "AS"))
     {
     	/*
     	 * Oracle's recycling mode (if enabled) will send query like:
     	 * "DROP TABLE x AS y", which is internal Oracle mechanism and so we
-    	 * need to truncate everything after ' AS ' if this keyword exists.
+    	 * need to truncate everything after 'AS' if this keyword exists.
     	 */
-        const char *as_pos = strcasestr(sql->data, " AS ");
+        const char *as_pos = strcasestr(sql->data, "AS");
 		if (as_pos != NULL)
 		{
 			int new_len = as_pos - sql->data;
 			sql->data[new_len] = '\0';
 			sql->len = new_len;
 		}
+		allowed = true;
+    }
 
-		if (!strstr(sqlupper, "PURGE"))
-			allowed = true;
-    }
-    else if (strncmp(sqlupper, "ALTER TABLE",  strlen("ALTER TABLE")) == 0)
-    {
-    	/* ALTER TABLE xxx RENAME not supported now */
-        if (strstr(sqlupper + 11, "RENAME") == NULL && strstr(sqlupper + 11, "SUPPLEMENTAL") == NULL)
-            allowed = true;
-    }
+    /*
+     * we are only interested in the following DDL statements though Some of
+     * these may not be parsed successfully by oracle parser. This is okay as
+     * we will just ignore them and ensure the ones we are interested can be
+     * parsed
+     */
+    if (strstr(sqlupper, "CREATE") && strstr(sqlupper, "TABLE"))
+    	allowed = true;
+
+    if (strstr(sqlupper, "DROP") && strstr(sqlupper, "TABLE"))
+    	allowed = true;
+
+    if (strstr(sqlupper, "ALTER") && strstr(sqlupper, "TABLE"))
+    	allowed = true;
 
     pfree(sqlupper);
     return allowed;
@@ -1229,6 +1234,9 @@ destroyDBZDDL(DBZ_DDL * ddlinfo)
 	{
 		if (ddlinfo->id)
 			pfree(ddlinfo->id);
+
+		if (ddlinfo->subtype)
+			pfree(ddlinfo->subtype);
 
 		if (ddlinfo->type)
 			pfree(ddlinfo->type);
@@ -2527,52 +2535,294 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 #endif
 		table_close(rel, AccessShareLock);
 
-		/*
-		 * DBZ supplies more columns than what PostreSQL have. This means ALTER
-		 * TABLE ADD COLUMN operation. Let's find which one is to be added.
-		 */
-		if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
+		if (type != TYPE_OLR)
 		{
-			altered = false;
-			foreach(cell, dbzddl->columns)
+			/*
+			 * DBZ supplies more columns than what PostreSQL have. This means ALTER
+			 * TABLE ADD COLUMN operation. Let's find which one is to be added.
+			 */
+			if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
 			{
-				DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
-				char * mappedColumnName = NULL;
-
-				pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
-
-				/* express a column name in fully qualified id */
-				resetStringInfo(&colNameObjId);
-				appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
-				mappedColumnName = transform_object_name(colNameObjId.data, "column");
-				if (mappedColumnName)
+				altered = false;
+				foreach(cell, dbzddl->columns)
 				{
-					elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-							colNameObjId.data, mappedColumnName);
+					DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
+					char * mappedColumnName = NULL;
+
+					pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
+
+					/* express a column name in fully qualified id */
+					resetStringInfo(&colNameObjId);
+					appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
+					mappedColumnName = transform_object_name(colNameObjId.data, "column");
+					if (mappedColumnName)
+					{
+						elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+								colNameObjId.data, mappedColumnName);
+					}
+					else
+						mappedColumnName = pstrdup(col->name);
+
+					found = false;
+					for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+					{
+						Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+
+						/* skip special attname indicated a dropped column */
+						if (strstr(NameStr(attr->attname), "pg.dropped"))
+							continue;
+
+						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+						{
+							found = true;
+							break;
+						}
+					}
+					if (!found)
+					{
+						elog(DEBUG1, "adding new column %s", mappedColumnName);
+						altered = true;
+						appendStringInfo(&strinfo, "ADD COLUMN IF NOT EXISTS ");
+
+						transformDDLColumns(dbzddl->id, col, type, false, &strinfo, pgcol);
+
+						/* if both length and scale are specified, add them. For example DECIMAL(10,2) */
+						if (col->length > 0 && col->scale > 0)
+						{
+							appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
+						}
+
+						/* if a only length if specified, add it. For example VARCHAR(30)*/
+						if (col->length > 0 && col->scale == 0)
+						{
+							/* make sure it does not exceed postgresql allowed maximum */
+							if (col->length > MaxAttrSize)
+								col->length = MaxAttrSize;
+							appendStringInfo(&strinfo, "(%d) ", col->length);
+						}
+
+						/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
+						if (strstr(col->typeName, "unsigned"))
+						{
+							appendStringInfo(&strinfo, "CHECK (%s >= 0) ", pgcol->attname);
+						}
+
+						/* is it optional? */
+						if (!col->optional)
+						{
+							appendStringInfo(&strinfo, "NOT NULL ");
+						}
+
+						/* does it have defaults? */
+						if (col->defaultValueExpression && strlen(col->defaultValueExpression) > 0
+								&& !col->autoIncremented)
+						{
+							/* use DEFAULT NULL regardless of the value of col->defaultValueExpression
+							 * because it may contain expressions not recognized by PostgreSQL. We could
+							 * make this part more intelligent by checking if the given expression can
+							 * be applied by PostgreSQL and use it only when it can. But for now, we will
+							 * just put default null here. Todo
+							 */
+							appendStringInfo(&strinfo, "DEFAULT %s ", "NULL");
+						}
+						appendStringInfo(&strinfo, ",");
+
+						/* assign new attnum for this newly added column */
+						pgcol->position = attnum + newcol;
+						newcol++;
+					}
+					else
+					{
+						/* not a column to add, point data to null and act as a placeholder in the list */
+						pgcol->attname = NULL;
+						pgcol->atttype = NULL;
+					}
+
+					/*
+					 * add to list regardless if this column is to be added or not so we keep both ddl->columns
+					 * and pgddl->columns the same size
+					 */
+					pgddl->columns = lappend(pgddl->columns, pgcol);
+
+					if(mappedColumnName)
+						pfree(mappedColumnName);
+
+					if (colNameObjId.data)
+						pfree(colNameObjId.data);
+				}
+
+				if (altered)
+				{
+					/* something has been altered, continue to wrap up... */
+					/* remove the last extra comma */
+					strinfo.data[strinfo.len - 1] = '\0';
+					strinfo.len = strinfo.len - 1;
+
+					/*
+					 * finally, declare primary keys if current table has no primary key index.
+					 * Iterate dbzddl->primaryKeyColumnNames and build into primary key(x, y, z)
+					 * clauses. We will not add new primary key if current table already has pk.
+					 *
+					 * If a primary key is added in the same clause as alter table add column, debezium
+					 * may not be able to include the list of primary keys properly (observed in oracle
+					 * connector). We need to ensure that it is done in 2 qureies; first to add a new
+					 * column and second to add a new primary on the new column.
+					 */
+					if (pkoid == InvalidOid)
+						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
+
+					/* indicate pgddl that this is alter add column */
+					pfree(pgddl->type);
+					pgddl->type = pstrdup("ALTER-ADD");	//todo: define a subtype in pgddl
 				}
 				else
-					mappedColumnName = pstrdup(col->name);
-
-				found = false;
+				{
+					elog(DEBUG1, "no column altered");
+					pfree(pgddl);
+					return NULL;
+				}
+			}
+			else if (list_length(dbzddl->columns) < count_active_columns(tupdesc))
+			{
+				/*
+				 * DBZ supplies less columns than what PostreSQL have. This means ALTER
+				 * TABLE DROP COLUMN operation. Let's find which one is to be dropped.
+				 */
+				altered = false;
 				for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 				{
 					Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+					found = false;
 
 					/* skip special attname indicated a dropped column */
 					if (strstr(NameStr(attr->attname), "pg.dropped"))
 						continue;
 
-					if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+					foreach(cell, dbzddl->columns)
 					{
-						found = true;
-						break;
+						DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
+						char * mappedColumnName = NULL;
+
+						/* express a column name in fully qualified id */
+						resetStringInfo(&colNameObjId);
+						appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
+						mappedColumnName = transform_object_name(colNameObjId.data, "column");
+						if (mappedColumnName)
+						{
+							elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+									colNameObjId.data, mappedColumnName);
+						}
+						else
+							mappedColumnName = pstrdup(col->name);
+
+						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+						{
+							found = true;
+							if (mappedColumnName)
+								pfree(mappedColumnName);
+
+							if (colNameObjId.data)
+								pfree(colNameObjId.data);
+
+							break;
+						}
+						if (mappedColumnName)
+							pfree(mappedColumnName);
+
+						if (colNameObjId.data)
+							pfree(colNameObjId.data);
+					}
+					if (!found)
+					{
+						elog(DEBUG1, "dropping old column %s", NameStr(attr->attname));
+
+						pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
+						altered = true;
+						appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS %s,", NameStr(attr->attname));
+						pgcol->attname = pstrdup(NameStr(attr->attname));
+						pgcol->position = attnum;
+						pgddl->columns = lappend(pgddl->columns, pgcol);
 					}
 				}
-				if (!found)
+				if(altered)
 				{
+					/* something has been altered, continue to wrap up... */
+					/* remove the last extra comma */
+					strinfo.data[strinfo.len - 1] = '\0';
+					strinfo.len = strinfo.len - 1;
+
+					/* indicate pgddl that this is alter drop column */
+					pfree(pgddl->type);
+					pgddl->type = pstrdup("ALTER-DROP");	//todo: define a subtype in pgddl
+				}
+				else
+				{
+					elog(DEBUG1, "no column altered");
+					pfree(pgddl);
+					return NULL;
+				}
+			}
+			else
+			{
+				/*
+				 * DBZ supplies the same number of columns as what PostreSQL have. This means
+				 * general ALTER TABLE operation.
+				 */
+				char * alterclause = NULL;
+				alterclause = composeAlterColumnClauses(dbzddl->id, type, dbzddl->columns, tupdesc, rel, pgddl);
+				if (alterclause)
+				{
+					appendStringInfo(&strinfo, "%s", alterclause);
+					elog(DEBUG1, "alter clause: %s", strinfo.data);
+					pfree(alterclause);
+				}
+				else
+				{
+					elog(DEBUG1, "no column altered");
+					pfree(pgddl);
+					return NULL;
+				}
+				/*
+				 * finally, declare primary keys if current table has no primary key index.
+				 * Iterate dbzddl->primaryKeyColumnNames and build into primary key(x, y, z)
+				 * clauses. We will not add new primary key if current table already has pk.
+				 */
+				if (pkoid == InvalidOid)
+					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
+			}
+		}
+		else
+		{
+			/*
+			 * OLR connector gives the added and dropped columns directly so there is no
+			 * need to figure out that information
+			 */
+			if (!strcasecmp(dbzddl->subtype, "ADD"))
+			{
+				/* ADD COLUMN */
+				altered = false;
+				foreach(cell, dbzddl->columns)
+				{
+					OLR_DDL_COLUMN * col = (OLR_DDL_COLUMN *) lfirst(cell);
+					char * mappedColumnName = NULL;
+
+					pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
+
+					/* express a column name in fully qualified id */
+					resetStringInfo(&colNameObjId);
+					appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
+					mappedColumnName = transform_object_name(colNameObjId.data, "column");
+					if (mappedColumnName)
+					{
+						elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+								colNameObjId.data, mappedColumnName);
+					}
+					else
+						mappedColumnName = pstrdup(col->name);
+
 					elog(DEBUG1, "adding new column %s", mappedColumnName);
 					altered = true;
-					appendStringInfo(&strinfo, "ADD COLUMN");
+					appendStringInfo(&strinfo, "ADD COLUMN IF NOT EXISTS ");
 
 					transformDDLColumns(dbzddl->id, col, type, false, &strinfo, pgcol);
 
@@ -2617,79 +2867,55 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					}
 					appendStringInfo(&strinfo, ",");
 
-					/* assign new attnum for this newly added column */
-					pgcol->position = attnum + newcol;
 					newcol++;
+					pgcol->position = tupdesc->natts + newcol;
+					pgddl->columns = lappend(pgddl->columns, pgcol);
+
+					if(mappedColumnName)
+						pfree(mappedColumnName);
+
+					if (colNameObjId.data)
+						pfree(colNameObjId.data);
+				}
+
+				if (altered)
+				{
+					/* something has been altered, continue to wrap up... */
+					/* remove the last extra comma */
+					strinfo.data[strinfo.len - 1] = '\0';
+					strinfo.len = strinfo.len - 1;
+
+					/*
+					 * finally, declare primary keys if current table has no primary key index.
+					 * Iterate dbzddl->primaryKeyColumnNames and build into primary key(x, y, z)
+					 * clauses. We will not add new primary key if current table already has pk.
+					 *
+					 * If a primary key is added in the same clause as alter table add column, debezium
+					 * may not be able to include the list of primary keys properly (observed in oracle
+					 * connector). We need to ensure that it is done in 2 qureies; first to add a new
+					 * column and second to add a new primary on the new column.
+					 */
+					if (pkoid == InvalidOid)
+						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
+
+					/* indicate pgddl that this is alter add column */
+					pfree(pgddl->type);
+					pgddl->type = pstrdup("ALTER-ADD");	//todo: define a subtype in pgddl
 				}
 				else
 				{
-					/* not a column to add, point data to null and act as a placeholder in the list */
-					pgcol->attname = NULL;
-					pgcol->atttype = NULL;
+					elog(DEBUG1, "no column altered");
+					pfree(pgddl);
+					return NULL;
 				}
-
-				/*
-				 * add to list regardless if this column is to be added or not so we keep both ddl->columns
-				 * and pgddl->columns the same size
-				 */
-				pgddl->columns = lappend(pgddl->columns, pgcol);
-
-				if(mappedColumnName)
-					pfree(mappedColumnName);
-
-				if (colNameObjId.data)
-					pfree(colNameObjId.data);
 			}
-
-			if (altered)
+			else if (!strcasecmp(dbzddl->subtype, "DROP"))
 			{
-				/* something has been altered, continue to wrap up... */
-				/* remove the last extra comma */
-				strinfo.data[strinfo.len - 1] = '\0';
-				strinfo.len = strinfo.len - 1;
-
-				/*
-				 * finally, declare primary keys if current table has no primary key index.
-				 * Iterate dbzddl->primaryKeyColumnNames and build into primary key(x, y, z)
-				 * clauses. We will not add new primary key if current table already has pk.
-				 *
-				 * If a primary key is added in the same clause as alter table add column, debezium
-				 * may not be able to include the list of primary keys properly (observed in oracle
-				 * connector). We need to ensure that it is done in 2 qureies; first to add a new
-				 * column and second to add a new primary on the new column.
-				 */
-				if (pkoid == InvalidOid)
-					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
-
-				/* indicate pgddl that this is alter add column */
-				strcat(pgddl->type, "-ADD");
-			}
-			else
-			{
-				elog(DEBUG1, "no column altered");
-				pfree(pgddl);
-				return NULL;
-			}
-		}
-		else if (list_length(dbzddl->columns) < count_active_columns(tupdesc))
-		{
-			/*
-			 * DBZ supplies less columns than what PostreSQL have. This means ALTER
-			 * TABLE DROP COLUMN operation. Let's find which one is to be dropped.
-			 */
-			altered = false;
-			for (attnum = 1; attnum <= tupdesc->natts; attnum++)
-			{
-				Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-				found = false;
-
-				/* skip special attname indicated a dropped column */
-				if (strstr(NameStr(attr->attname), "pg.dropped"))
-					continue;
-
+				/* DROP COLUMN */
+				altered = false;
 				foreach(cell, dbzddl->columns)
 				{
-					DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
+					OLR_DDL_COLUMN * col = (OLR_DDL_COLUMN *) lfirst(cell);
 					char * mappedColumnName = NULL;
 
 					/* express a column name in fully qualified id */
@@ -2704,79 +2930,170 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					else
 						mappedColumnName = pstrdup(col->name);
 
-					if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+					/*
+					 * in order to update synchdb_attribute table correctly, we need to find
+					 * this dropped column's attribute id from postgres
+					 */
+					for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 					{
-						found = true;
-						if (mappedColumnName)
-							pfree(mappedColumnName);
+						Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
 
-						if (colNameObjId.data)
-							pfree(colNameObjId.data);
+						/* skip special attname indicated a dropped column */
+						if (strstr(NameStr(attr->attname), "pg.dropped"))
+							continue;
 
-						break;
+						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+							break;
 					}
+
+					appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS %s,", mappedColumnName);
+
+					elog(DEBUG1, "dropping old column %s", mappedColumnName);
+
+					pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
+					altered = true;
+
+					pgcol->attname = pstrdup(mappedColumnName);
+					pgcol->position = attnum;
+					pgddl->columns = lappend(pgddl->columns, pgcol);
+
 					if (mappedColumnName)
 						pfree(mappedColumnName);
 
 					if (colNameObjId.data)
 						pfree(colNameObjId.data);
 				}
-				if (!found)
+				if(altered)
 				{
-					elog(DEBUG1, "dropping old column %s", NameStr(attr->attname));
+					/* something has been altered, continue to wrap up... */
+					/* remove the last extra comma */
+					strinfo.data[strinfo.len - 1] = '\0';
+					strinfo.len = strinfo.len - 1;
 
+					/* indicate pgddl that this is alter drop column */
+					pfree(pgddl->type);
+					pgddl->type = pstrdup("ALTER-DROP");	//todo: define a subtype in pgddl
+				}
+			}
+			else
+			{
+				/* ALTER COLUMN */
+				altered = false;
+				foreach(cell, dbzddl->columns)
+				{
+					char * mappedColumnName = NULL;
+					OLR_DDL_COLUMN * col = (OLR_DDL_COLUMN *) lfirst(cell);
 					pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
-					altered = true;
-					appendStringInfo(&strinfo, "DROP COLUMN %s,", NameStr(attr->attname));
-					pgcol->attname = pstrdup(NameStr(attr->attname));
+
+					/* express a column name in fully qualified id */
+					resetStringInfo(&colNameObjId);
+					appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
+					mappedColumnName = transform_object_name(colNameObjId.data, "column");
+					if (mappedColumnName)
+					{
+						elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+								colNameObjId.data, mappedColumnName);
+					}
+					else
+						mappedColumnName = pstrdup(col->name);
+
+					/*
+					 * in order to update synchdb_attribute table correctly, we need to find
+					 * this dropped column's attribute id from postgres
+					 */
+					for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+					{
+						Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+
+						/* skip special attname indicated a dropped column */
+						if (strstr(NameStr(attr->attname), "pg.dropped"))
+							continue;
+
+						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+							break;
+					}
+
+					/* check data type */
+					elog(DEBUG1, "altering column %s", col->name);
+					appendStringInfo(&strinfo, "ALTER COLUMN %s SET DATA TYPE",
+							mappedColumnName);
+
+					transformDDLColumns(dbzddl->id, col, type, true, &strinfo, pgcol);
+					if (col->length > 0 && col->scale > 0)
+					{
+						appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
+					}
+
+					/* if a only length if specified, add it. For example VARCHAR(30)*/
+					if (col->length > 0 && col->scale == 0)
+					{
+						/* make sure it does not exceed postgresql allowed maximum */
+						if (col->length > MaxAttrSize)
+							col->length = MaxAttrSize;
+						appendStringInfo(&strinfo, "(%d) ", col->length);
+					}
+
+					/*
+					 * todo: for complex data type transformation, postgresql requires
+					 * the user to specify a function to cast existing values to the new
+					 * data type via the USING clause. This is needed for INT -> TEXT,
+					 * INT -> DATE or NUMERIC -> VARCHAR. We do not support USING now as
+					 * we do not know what function the user wants to use for casting the
+					 * values. Perhaps we can include these cast functions in the rule file
+					 * as well, but for now this is not supported and PostgreSQL may complain
+					 * if we attempt to do complex data type changes.
+					 */
+					appendStringInfo(&strinfo, ", ");
+
+					if (col->defaultValueExpression)
+					{
+						/*
+						 * synchdb can receive a default expression not supported in postgresql.
+						 * so for now, we always set to default null. todo
+						 */
+						appendStringInfo(&strinfo, "ALTER COLUMN %s SET DEFAULT %s",
+								mappedColumnName, "NULL");
+					}
+					else
+					{
+						/* remove default value */
+						appendStringInfo(&strinfo, "ALTER COLUMN %s DROP DEFAULT",
+								mappedColumnName);
+					}
+
+					appendStringInfo(&strinfo, ", ");
+
+					/* check if nullable or not nullable */
+					if (!col->optional)
+					{
+						appendStringInfo(&strinfo, "ALTER COLUMN %s SET NOT NULL",
+								mappedColumnName);
+					}
+					else
+					{
+						appendStringInfo(&strinfo, "ALTER COLUMN %s DROP NOT NULL",
+								mappedColumnName);
+					}
+
+					appendStringInfo(&strinfo, ",");
+
+					/*
+					 * finally, declare primary keys if current table has no primary key index.
+					 * Iterate dbzddl->primaryKeyColumnNames and build into primary key(x, y, z)
+					 * clauses. We will not add new primary key if current table already has pk.
+					 */
+					if (pkoid == InvalidOid)
+						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
+
 					pgcol->position = attnum;
 					pgddl->columns = lappend(pgddl->columns, pgcol);
 				}
-			}
-			if(altered)
-			{
-				/* something has been altered, continue to wrap up... */
-				/* remove the last extra comma */
+
+				/* remove extra "," */
 				strinfo.data[strinfo.len - 1] = '\0';
 				strinfo.len = strinfo.len - 1;
+			}
 
-				/* indicate pgddl that this is alter drop column */
-				strcat(pgddl->type, "-DROP");
-			}
-			else
-			{
-				elog(DEBUG1, "no column altered");
-				pfree(pgddl);
-				return NULL;
-			}
-		}
-		else
-		{
-			/*
-			 * DBZ supplies the same number of columns as what PostreSQL have. This means
-			 * general ALTER TABLE operation.
-			 */
-			char * alterclause = NULL;
-			alterclause = composeAlterColumnClauses(dbzddl->id, type, dbzddl->columns, tupdesc, rel, pgddl);
-			if (alterclause)
-			{
-				appendStringInfo(&strinfo, "%s", alterclause);
-				elog(DEBUG1, "alter clause: %s", strinfo.data);
-				pfree(alterclause);
-			}
-			else
-			{
-				elog(DEBUG1, "no column altered");
-				pfree(pgddl);
-				return NULL;
-			}
-			/*
-			 * finally, declare primary keys if current table has no primary key index.
-			 * Iterate dbzddl->primaryKeyColumnNames and build into primary key(x, y, z)
-			 * clauses. We will not add new primary key if current table already has pk.
-			 */
-			if (pkoid == InvalidOid)
-				populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
 		}
 	}
 
@@ -5381,10 +5698,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 	appendBinaryStringInfo(&sql, v->val.string.val, v->val.string.len);
 	remove_double_quotes(&sql);
 
-	/*
-	 * do a preliminary filter on the incoming DDLs to filter out the ones
-	 * we are not interested in
-	 */
 	if (!is_whitelist_sql(&sql))
 	{
 		elog(DEBUG1, "unsupported DDL -----> %s", sql.data);
@@ -5405,14 +5718,45 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 		}
 	}
 	/* Parse the Oracle SQL */
-	ptree = oracle_raw_parser(sql.data, RAW_PARSE_DEFAULT);
-	if (!ptree)
+	PG_TRY();
 	{
-		elog(WARNING, "oracle parser fails to parse SQL '%s'", sql.data);
+		elog(WARNING, "parsing %s", sql.data);
+		ptree = oracle_raw_parser(sql.data, RAW_PARSE_DEFAULT);
+		if (!ptree)
+		{
+			elog(WARNING, "failed to parse: '%s'", sql.data);
+			destroyDBZDDL(olrddl);
+			olrddl = NULL;
+			goto end;
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		ErrorData  *errdata = CopyErrorData();
+
+		if (errdata)
+		{
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "%s.%s: %s | %s",
+					errdata->schema_name == NULL ? "" : errdata->schema_name,
+					errdata->table_name == NULL ? "" : errdata->table_name,
+					errdata->message,
+					errdata->detail == NULL ? "" : errdata->detail);
+			elog(WARNING, "%s", msg);
+			pfree(msg);
+		}
+		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
+
+		FlushErrorState();  // clear the error
+		elog(WARNING, "failed to parse: '%s'", sql.data);
 		destroyDBZDDL(olrddl);
 		olrddl = NULL;
 		goto end;
 	}
+	PG_END_TRY();
+
 	foreach(cell, ptree)
 	{
 		RawStmt *raw = (RawStmt *) lfirst(cell);
@@ -5539,7 +5883,10 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 					        }
 							else
 							{
-								 elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+								elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+								destroyDBZDDL(olrddl);
+								olrddl = NULL;
+								goto end;
 							}
 						}
 						pklist.data[pklist.len - 1] = '\0';
@@ -5571,6 +5918,9 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 					else
 					{
 						elog(WARNING, "unsupported contraints type %d", constr->contype);
+						destroyDBZDDL(olrddl);
+						olrddl = NULL;
+						goto end;
 					}
 				}
 			}
@@ -5584,6 +5934,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 		{
 			/* ALTER TABLE */
 			ListCell *cmdCell;
+			ListCell *constrCell;
 
 			AlterTableStmt *alterStmt = (AlterTableStmt *) stmt;
 			elog(WARNING, "ALTER TABLE: %s", alterStmt->relation->relname);
@@ -5596,30 +5947,246 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 				{
 					case AT_AddColumn:
 					{
+						StringInfoData pklist;
 						ColumnDef *col = (ColumnDef *)cmd->def;
-						elog(WARNING, "  ADD COLUMN: %s", col->colname);
+						ddlcol = (OLR_DDL_COLUMN *) palloc0(sizeof(OLR_DDL_COLUMN));
 
+						/* prepare to build primary key list */
+						initStringInfo(&pklist);
+						appendStringInfo(&pklist, "[");
+
+						/* column name */
+						elog(WARNING, "  ADD COLUMN: %s", col->colname);
+						ddlcol->name = pstrdup(col->colname);
+						olrddl->subtype = pstrdup("ADD");
+
+						/* data type */
 						if (col->typeName && col->typeName->names)
-						{
-							char *typeNameStr = NameListToString(col->typeName->names);
-							elog(WARNING, "    Type: %s", typeNameStr);
-						}
+							elog(DEBUG1, "Type: %s", NameListToString(col->typeName->names));
+						ddlcol->typeName = pstrdup(NameListToString(col->typeName->names));
+
+						/* is optional? */
+						if (col->is_not_null)
+							ddlcol->optional = false;
 						else
+							ddlcol->optional = true;
+
+						elog(DEBUG1, "Optional: %d", ddlcol->optional);
+
+						/* auto increment? - assumed false todo */
+						ddlcol->autoIncremented = false;
+
+						/* length */
+						if (list_length(col->typeName->typmods) > 0)
 						{
-							elog(WARNING, "    Type: (unknown)");
+							Node *lenNode = (Node *) linitial(col->typeName->typmods);
+							if (IsA(lenNode, A_Const))
+							{
+						        A_Const *aconst = (A_Const *) lenNode;
+						        if (IsA(&aconst->val, Integer))
+						            ddlcol->length = intVal(&aconst->val);
+						        else
+						            elog(DEBUG1, "Expected integer for length value, got %d", nodeTag(&aconst->val));
+							}
+							else
+							{
+								elog(DEBUG1, "Expected a ConstNode, but got %d", nodeTag(lenNode));
+								ddlcol->length = 0;
+							}
 						}
+						elog(DEBUG1, "length = %d", ddlcol->length);
+
+						/* scale */
+						if (list_length(col->typeName->typmods) > 1)
+						{
+							Node *scaleNode = (Node *) lsecond(col->typeName->typmods);
+							if (IsA(scaleNode, A_Const))
+							{
+								A_Const *aconst = (A_Const *) scaleNode;
+								if (IsA(&aconst->val, Integer))
+									ddlcol->scale = intVal(&aconst->val);
+								else
+									elog(DEBUG1, "Expected integer for scale value, got %d", nodeTag(&aconst->val));
+							}
+							else
+							{
+								elog(DEBUG1, "Expected a ConstNode, but got %d", nodeTag(scaleNode));
+								ddlcol->length = 0;
+							}
+						}
+						elog(DEBUG1, "scale = %d", ddlcol->scale);
+
+						/* inline constraint */
+						if (col->constraints)
+						{
+							elog(DEBUG1, "col %s has inline constraint", col->colname);
+							foreach(constrCell, col->constraints)
+							{
+								Constraint *constr = (Constraint *) lfirst(constrCell);
+
+								if (constr->contype == CONSTR_PRIMARY)
+								{
+									/* primary key indication */
+									elog(DEBUG1, "col %s is a pk", col->colname);
+									appendStringInfo(&pklist, "\"%s\",", col->colname);
+								}
+								else if (constr->contype == CONSTR_DEFAULT)
+						        {
+						            /*
+						             * default value expression - always defaults to null at later
+						             * stage of processing so it does not matter what expression is
+						             * put here. todo
+						             */
+						            ddlcol->defaultValueExpression = nodeToString(constr->raw_expr);
+						            elog(DEBUG1, "default value %s", ddlcol->defaultValueExpression);
+						        }
+								else
+								{
+									elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+									destroyDBZDDL(olrddl);
+									olrddl = NULL;
+									goto end;
+								}
+							}
+							pklist.data[pklist.len - 1] = '\0';
+							pklist.len = pklist.len - 1;
+							appendStringInfo(&pklist, "]");
+
+							olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+						}
+						if (pklist.data)
+							pfree(pklist.data);
+
 						break;
 					}
 					case AT_DropColumn:
-						elog(WARNING, "  DROP COLUMN: %s", cmd->name);
+					{
+						ddlcol = (OLR_DDL_COLUMN *) palloc0(sizeof(OLR_DDL_COLUMN));
+
+						elog(WARNING, "DROP COLUMN: %s", cmd->name);
+						olrddl->subtype = pstrdup("DROP");
+						ddlcol->name = pstrdup(cmd->name);
 						break;
+					}
 					case AT_AlterColumnType:
-						elog(WARNING, "  ALTER COLUMN TYPE: %s", cmd->name);
-						break;
+					{
+						StringInfoData pklist;
+						ColumnDef *col = (ColumnDef *)cmd->def;
+						ddlcol = (OLR_DDL_COLUMN *) palloc0(sizeof(OLR_DDL_COLUMN));
+
+						/* prepare to build primary key list */
+						initStringInfo(&pklist);
+						appendStringInfo(&pklist, "[");
+
+						/* column name */
+						elog(WARNING, "MODIFY COLUMN: %s", cmd->name);
+						ddlcol->name = pstrdup(cmd->name);
+						olrddl->subtype = pstrdup("ALTER");
+
+						/* data type */
+						if (col->typeName && col->typeName->names)
+							elog(DEBUG1, "Type: %s", NameListToString(col->typeName->names));
+						ddlcol->typeName = pstrdup(NameListToString(col->typeName->names));
+
+						/* is optional? */
+						if (col->is_not_null)
+							ddlcol->optional = false;
+						else
+							ddlcol->optional = true;
+
+						elog(DEBUG1, "optional: %d", ddlcol->optional);
+
+						/* length */
+						if (list_length(col->typeName->typmods) > 0)
+						{
+							Node *lenNode = (Node *) linitial(col->typeName->typmods);
+							if (IsA(lenNode, A_Const))
+							{
+						        A_Const *aconst = (A_Const *) lenNode;
+						        if (IsA(&aconst->val, Integer))
+						            ddlcol->length = intVal(&aconst->val);
+						        else
+						            elog(DEBUG1, "Expected integer for length value, got %d", nodeTag(&aconst->val));
+							}
+							else
+							{
+								elog(DEBUG1, "Expected a ConstNode, but got %d", nodeTag(lenNode));
+								ddlcol->length = 0;
+							}
+						}
+						elog(DEBUG1, "length = %d", ddlcol->length);
+
+						/* scale */
+						if (list_length(col->typeName->typmods) > 1)
+						{
+							Node *scaleNode = (Node *) lsecond(col->typeName->typmods);
+							if (IsA(scaleNode, A_Const))
+							{
+								A_Const *aconst = (A_Const *) scaleNode;
+								if (IsA(&aconst->val, Integer))
+									ddlcol->scale = intVal(&aconst->val);
+								else
+									elog(DEBUG1, "Expected integer for scale value, got %d", nodeTag(&aconst->val));
+							}
+							else
+							{
+								elog(DEBUG1, "Expected a ConstNode, but got %d", nodeTag(scaleNode));
+								ddlcol->length = 0;
+							}
+						}
+						elog(DEBUG1, "scale = %d", ddlcol->scale);
+
+						/* inline constraint */
+						if (col->constraints)
+						{
+							elog(DEBUG1, "col %s has inline constraint",cmd->name);
+							foreach(constrCell, col->constraints)
+							{
+								Constraint *constr = (Constraint *) lfirst(constrCell);
+
+								if (constr->contype == CONSTR_PRIMARY)
+								{
+									/* primary key indication */
+									elog(DEBUG1, "col %s is a pk", cmd->name);
+									appendStringInfo(&pklist, "\"%s\",", cmd->name);
+								}
+								else if (constr->contype == CONSTR_DEFAULT)
+						        {
+						            /*
+						             * default value expression - always defaults to null at later
+						             * stage of processing so it does not matter what expression is
+						             * put here. todo
+						             */
+						            ddlcol->defaultValueExpression = nodeToString(constr->raw_expr);
+						            elog(DEBUG1, "default value %s", ddlcol->defaultValueExpression);
+						        }
+								else
+								{
+									elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+									destroyDBZDDL(olrddl);
+									olrddl = NULL;
+									goto end;
+								}
+							}
+							pklist.data[pklist.len - 1] = '\0';
+							pklist.len = pklist.len - 1;
+							appendStringInfo(&pklist, "]");
+
+							olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+						}
+					}	break;
 					default:
+					{
 						elog(WARNING, "  Unhandled ALTER subtype: %d", cmd->subtype);
+						destroyDBZDDL(olrddl);
+						olrddl = NULL;
+						goto end;
 						break;
+					}
 				}
+
+				if (ddlcol != NULL)
+					olrddl->columns = lappend(olrddl->columns, ddlcol);
 			}
 		}
 		else if (IsA(stmt, DropStmt))
@@ -5634,7 +6201,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 				{
 					List *names = (List *) lfirst(objCell);
 					char *relname = strVal(llast(names));
-					elog(WARNING, "DROP TABLE: %s", relname);
+					elog(DEBUG1, "DROP TABLE: %s", relname);
 
 					/* replace table with the new value */
 					if(table)
@@ -5645,6 +6212,10 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 				}
 				olrddl->type = pstrdup("DROP");
 			}
+		}
+		else
+		{
+			elog(WARNING, "ignored %d stmt type",  nodeTag(stmt));
 		}
 	}
 

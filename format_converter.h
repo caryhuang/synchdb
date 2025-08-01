@@ -97,6 +97,7 @@ typedef struct dbz_ddl
 {
 	char * id;
 	char * type;
+	char * subtype;
 	char * primaryKeyColumnNames;
 	List * columns;		/* list of DBZ_DDL_COLUMN */
 	unsigned long long dbz_ts_ms;	/* time(ms) when this DDL is processed by DBZ */

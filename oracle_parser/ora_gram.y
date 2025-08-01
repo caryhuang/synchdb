@@ -2557,20 +2557,36 @@ alter_table_cmd:
 					n->name = $3;
 					$$ = (Node *)n;
 				}
-			| MODIFY ColId INVISIBLE
+			| MODIFY ColId Typename opt_collate_clause alter_using
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
-					n->subtype = AT_SetInvisible;
-					n->name = $2;
-					$$ = (Node *)n;
+                    ColumnDef *def = makeNode(ColumnDef);
+
+                    n->subtype = AT_AlterColumnType;
+                    n->name = $2;
+                    n->def = (Node *) def;
+                    /* We only use these fields of the ColumnDef node */
+                    def->typeName = $3;
+                    def->collClause = (CollateClause *) $4;
+                    def->raw_default = $5;
+                    //def->location = @3;
+                    $$ = (Node *) n;
+
 				}
-			| MODIFY ColId VISIBLE
-				{
-					AlterTableCmd *n = makeNode(AlterTableCmd);
-					n->subtype = AT_DropInvisible;
-					n->name = $2;
-					$$ = (Node *)n;
-				}
+			//| MODIFY ColId INVISIBLE
+			//	{
+			//		AlterTableCmd *n = makeNode(AlterTableCmd);
+			//		n->subtype = AT_SetInvisible;
+			//		n->name = $2;
+			//		$$ = (Node *)n;
+			//	}
+			//| MODIFY ColId VISIBLE
+			//	{
+			//		AlterTableCmd *n = makeNode(AlterTableCmd);
+			//		n->subtype = AT_DropInvisible;
+			//		n->name = $2;
+			//		$$ = (Node *)n;
+			//	}
 			/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP NOT NULL */
 			| ALTER opt_column ColId DROP NOT NULL_P
 				{
