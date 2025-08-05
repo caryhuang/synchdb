@@ -701,8 +701,9 @@ transform_object_name(const char * objid, const char * objtype)
  * is expected to be a json array with string element, for example:
  * ["col1","col2"]
  */
+//todo make it more flexible
 static void
-populate_primary_keys(StringInfoData * strinfo, const char * id, const char * jsonin, bool alter)
+populate_primary_keys(StringInfoData * strinfo, const char * id, const char * jsonin, bool alter, bool isinline)
 {
 	Datum jsonb_datum;
 	Jsonb * jb;
@@ -771,15 +772,31 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 
 						if (alter)
 						{
-							if (isfirst)
+							if (isinline)
 							{
-								appendStringInfo(strinfo, ", ADD PRIMARY KEY(");
-								appendStringInfo(strinfo, "%s,", value);
-								isfirst = false;
+								if (isfirst)
+								{
+									appendStringInfo(strinfo, ", ADD PRIMARY KEY(");
+									appendStringInfo(strinfo, "%s,", value);
+									isfirst = false;
+								}
+								else
+								{
+									appendStringInfo(strinfo, "%s,", value);
+								}
 							}
 							else
 							{
-								appendStringInfo(strinfo, "%s,", value);
+								if (isfirst)
+								{
+									appendStringInfo(strinfo, "PRIMARY KEY(");
+									appendStringInfo(strinfo, "%s,", value);
+									isfirst = false;
+								}
+								else
+								{
+									appendStringInfo(strinfo, "%s,", value);
+								}
 							}
 						}
 						else
@@ -2327,7 +2344,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		 * finally, declare primary keys if any. iterate dbzddl->primaryKeyColumnNames
 		 * and build into primary key(x, y, z) clauses. todo
 		 */
-		populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, false);
+		populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, false, true);
 
 		appendStringInfo(&strinfo, ");");
 	}
@@ -2669,7 +2686,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					 * column and second to add a new primary on the new column.
 					 */
 					if (pkoid == InvalidOid)
-						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
+						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
 
 					/* indicate pgddl that this is alter add column */
 					pfree(pgddl->type);
@@ -2788,7 +2805,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				 * clauses. We will not add new primary key if current table already has pk.
 				 */
 				if (pkoid == InvalidOid)
-					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
+					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
 			}
 		}
 		else
@@ -2896,7 +2913,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					 * column and second to add a new primary on the new column.
 					 */
 					if (pkoid == InvalidOid)
-						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
+						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
 
 					/* indicate pgddl that this is alter add column */
 					pfree(pgddl->type);
@@ -2975,7 +2992,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					pgddl->type = pstrdup("ALTER-DROP");	//todo: define a subtype in pgddl
 				}
 			}
-			else
+			else if (!strcasecmp(dbzddl->subtype, "ALTER"))
 			{
 				/* ALTER COLUMN */
 				altered = false;
@@ -3083,7 +3100,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					 * clauses. We will not add new primary key if current table already has pk.
 					 */
 					if (pkoid == InvalidOid)
-						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true);
+						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
 
 					pgcol->position = attnum;
 					pgddl->columns = lappend(pgddl->columns, pgcol);
@@ -3093,7 +3110,46 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				strinfo.data[strinfo.len - 1] = '\0';
 				strinfo.len = strinfo.len - 1;
 			}
+			else if (!strcasecmp(dbzddl->subtype, "ADD-CONSTR"))
+			{
+				if (pkoid == InvalidOid)
+				{
+					appendStringInfo(&strinfo, "ADD CONSTRAINT %s ", dbzddl->constraintName);
+					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, false);
 
+					/* indicate pgddl that this is add constraint ddl */
+					pfree(pgddl->type);
+					pgddl->type = pstrdup("ALTER-ADDC");	//todo: define a subtype in pgddl
+				}
+				else
+				{
+					elog(WARNING, "relation already has primary key, skip adding...");
+					destroyPGDDL(pgddl);
+					return NULL;
+				}
+			}
+			else if (!strcasecmp(dbzddl->subtype, "DROP-CONSTR"))
+			{
+				if (dbzddl->constraintName)
+				{
+					appendStringInfo(&strinfo, "DROP CONSTRAINT %s ", dbzddl->constraintName);
+					/* indicate pgddl that this is add constraint ddl */
+					pfree(pgddl->type);
+					pgddl->type = pstrdup("ALTER-DROPC");	//todo: define a subtype in pgddl
+				}
+				else
+				{
+					elog(WARNING, "constaint name to drop is NULL. Skipping...");
+					destroyPGDDL(pgddl);
+					return NULL;
+				}
+			}
+			else
+			{
+				elog(WARNING, "unsupported ALTER TABLE sub type %s", dbzddl->subtype);
+				destroyPGDDL(pgddl);
+				return NULL;
+			}
 		}
 	}
 
@@ -6174,7 +6230,53 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 
 							olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
 						}
-					}	break;
+						break;
+					}
+					case AT_AddConstraint:
+					{
+						StringInfoData pklist;
+						Constraint *constr = (Constraint *)cmd->def;
+
+						olrddl->subtype = pstrdup("ADD-CONSTR");
+
+						/* prepare to build primary key list */
+						initStringInfo(&pklist);
+						appendStringInfo(&pklist, "[");
+
+						if (constr->contype == CONSTR_PRIMARY)
+						{
+							ListCell * keys;
+							elog(WARNING, "adding primary key constraint %s", constr->conname);
+
+							olrddl->constraintName = pstrdup(constr->conname);
+							foreach(keys, constr->keys)
+							{
+								char *keycol = strVal(lfirst(keys));
+								elog(DEBUG1, "  -> PK Column: %s", keycol);
+								appendStringInfo(&pklist, "\"%s\",", keycol);
+							}
+							pklist.data[pklist.len - 1] = '\0';
+							pklist.len = pklist.len - 1;
+							appendStringInfo(&pklist, "]");
+
+							olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+						}
+						else
+						{
+							elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+						}
+						break;
+					}
+					case AT_DropConstraint:
+					{
+						if (cmd->name)
+						{
+							elog(DEBUG1, "dropping constraint: %s", cmd->name);
+							olrddl->constraintName = pstrdup(cmd->name);
+						}
+						olrddl->subtype = pstrdup("DROP-CONSTR");
+						break;
+					}
 					default:
 					{
 						elog(WARNING, "  Unhandled ALTER subtype: %d", cmd->subtype);
@@ -8733,6 +8835,16 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		{
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
 			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+
+			/*
+			 * openlog replicator delivers a lot of DDLs issued internally in oracle that
+			 * we still receive and try to process. Most of them do not parse but we still
+			 * have to move forward with scn and c_scn so we do not receive these again
+			 * in case of connector restart.
+			 */
+	    	olr_client_set_scns(scn, c_scn);
+	    	* sendconfirm = true;
+
 			MemoryContextSwitchTo(oldContext);
 			MemoryContextDelete(tempContext);
 			return -1;
@@ -8741,7 +8853,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	/* (3) convert */
     	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
     	pgddl = convert2PGDDL(olrddl, TYPE_OLR);
-    	if (!olrddl)
+    	if (!pgddl)
     	{
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);

@@ -1837,7 +1837,8 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 								&sendconfirm);
 
 						/* send confirm message to OLR if successfully done */
-						if (ret == 0 && sendconfirm)
+//						if (ret == 0 && sendconfirm)
+						if (sendconfirm)
 						{
 							elog(DEBUG1, "successfully applied - send confirm message for "
 									"scn %llu and c_scn %llu", olr_client_get_scn(),
