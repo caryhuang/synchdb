@@ -11,8 +11,8 @@
 #define SYNCHDB_OLR_CLIENT_H_
 
 #include "postgres.h"
-#include "synchdb.h"
-#include "netio_utils.h"
+#include "synchdb/synchdb.h"
+#include "utils/netio_utils.h"
 
 /**
  * RedoResponseCode - Enum representing response code from OLR

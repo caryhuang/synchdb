@@ -20,7 +20,7 @@
 #include <poll.h>
 
 #include "postgres.h"
-#include "netio_utils.h"
+#include "utils/netio_utils.h"
 
 int
 netio_connect(NetioContext *ctx, const char *host, int port)

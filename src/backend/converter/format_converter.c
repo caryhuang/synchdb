@@ -29,7 +29,6 @@
 #include "fmgr.h"
 #include "utils/jsonb.h"
 #include "utils/builtins.h"
-#include "format_converter.h"
 #include "catalog/pg_type.h"
 #include "catalog/namespace.h"
 #include "utils/lsyscache.h"
@@ -39,15 +38,18 @@
 #include <time.h>
 #include <sys/time.h>
 #include <dlfcn.h>
-#include "synchdb.h"
 #include "common/base64.h"
 #include "port/pg_bswap.h"
 #include "utils/datetime.h"
 #include "utils/typcache.h"
 #include "access/xact.h"
 #include "utils/snapmgr.h"
-#include "olr_client.h"
 #include "miscadmin.h"
+
+/* synchdb inccludes */
+#include "converter/format_converter.h"
+#include "synchdb/synchdb.h"
+#include "olr/olr_client.h"
 
 /* ora-parser related */
 #include "parser/parser.h"

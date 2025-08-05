@@ -19,7 +19,7 @@
 #define SYNCHDB_REPLICATION_AGENT_H_
 
 #include "executor/tuptable.h"
-#include "synchdb.h"
+#include "synchdb/synchdb.h"
 
 /* Data structures representing PostgreSQL data formats */
 typedef struct pg_ddl

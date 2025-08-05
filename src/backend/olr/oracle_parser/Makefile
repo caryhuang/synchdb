@@ -26,7 +26,7 @@
 #
 #-------------------------------------------------------------------------
 #subdir = contrib/oracle_parser
-top_builddir = ../../..
+top_builddir = ../../../../../../
 include $(top_builddir)/src/Makefile.global
 
 PGFILEDESC = "liboracle_parser - raw parser for oracle"

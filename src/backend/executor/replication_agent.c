@@ -14,7 +14,7 @@
 
 #include "postgres.h"
 #include "fmgr.h"
-#include "replication_agent.h"
+#include "executor/replication_agent.h"
 #include "executor/spi.h"
 #include "access/xact.h"
 #include "utils/snapmgr.h"
@@ -27,7 +27,7 @@
 #include "utils/snapmgr.h"
 #include "parser/parse_relation.h"
 #include "replication/logicalrelation.h"
-#include "synchdb.h"
+#include "synchdb/synchdb.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "storage/ipc.h"

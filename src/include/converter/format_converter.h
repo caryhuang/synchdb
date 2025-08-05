@@ -21,8 +21,9 @@
 
 #include "utils/hsearch.h"
 #include "nodes/pg_list.h"
-#include "replication_agent.h"
-#include "synchdb.h"
+
+#include "executor/replication_agent.h"
+#include "synchdb/synchdb.h"
 
 /* constants */
 #define RULEFILE_DATATYPE_TRANSFORM 1

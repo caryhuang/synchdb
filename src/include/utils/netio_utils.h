@@ -9,7 +9,7 @@
 #ifndef SYNCHDB_NETIO_UTILS_H_
 #define SYNCHDB_NETIO_UTILS_H_
 
-#include "synchdb.h"
+#include "synchdb/synchdb.h"
 
 #define NETIO_NODATA				-1
 #define NETIO_PEER_DISCONNECTED 	-2

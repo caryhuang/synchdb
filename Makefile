@@ -7,16 +7,16 @@ DATA = synchdb--1.0.sql
 PGFILEDESC = "synchdb - allows logical replication with heterogeneous databases"
 
 REGRESS = synchdb
-REGRESS_OPTS = --load-extension=pgcrypto
+REGRESS_OPTS = --inputdir=./src/test/regress --outputdir=./src/test/regress/results --load-extension=pgcrypto
 
-OBJS = synchdb.o \
-       format_converter.o \
-       replication_agent.o \
-       OraProtoBuf.pb-c.o \
-       netio_utils.o \
-       olr_client.o
+OBJS = src/backend/synchdb/synchdb.o \
+       src/backend/converter/format_converter.o \
+       src/backend/executor/replication_agent.o \
+       src/backend/olr/OraProtoBuf.pb-c.o \
+       src/backend/utils/netio_utils.o \
+       src/backend/olr/olr_client.o
 
-DBZ_ENGINE_PATH = dbz-engine
+DBZ_ENGINE_PATH = src/backend/debezium
 
 # Dynamically set JDK paths
 JAVA_PATH := $(shell which java)
@@ -39,8 +39,8 @@ endif
 
 JDK_LIB_PATH := $(JDK_HOME_PATH)/lib/server
 
-PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS)
-PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS)
+PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include
+PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include
 PG_LDFLAGS = -L$(JDK_LIB_PATH) -ljvm -lprotobuf-c
 
 ifdef USE_PGXS
@@ -87,22 +87,31 @@ install_dbz:
 	install -d $(pkglibdir)/dbz_engine
 	cp -rp $(DBZ_ENGINE_PATH)/target/* $(pkglibdir)/dbz_engine
 
+oracle_parser:
+	make -C src/backend/olr/oracle_parser
+
+clean_oracle_parser:
+	make -C src/backend/olr/oracle_parser clean
+
+install_oracle_parser:
+	make -C src/backend/olr/oracle_parser install
+
 .PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck dbcheck-tpcc mysqlcheck-tpcc sqlservercheck-tpcc oraclecheck-tpcc
 dbcheck:
 	@command -v pytest >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
 	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo >&2 "❌ docker-compose not found in PATH"; exit 1; }
 	@echo "Running tests against dbvendor=$(DB)"
-	PYTHONPATH=./test/synchdb_tests/ pytest -v -s --dbvendor=$(DB) --capture=tee-sys ./test/synchdb_tests/
-	rm -r .pytest_cache ./test/synchdb_tests/__pycache__ ./test/synchdb_tests/t/__pycache__
+	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -v -s --dbvendor=$(DB) --capture=tee-sys ./src/test/pytests/synchdbtests/
+	rm -r .pytest_cache ./src/test/pytests/synchdbtests/__pycache__ ./src/test/pytests/synchdbtests/t/__pycache__
 
 dbcheck-tpcc:
 	@command -v pytest >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
 	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo >&2 "❌ docker-compose not found in PATH"; exit 1; }
 	@echo "Running hammerdb based tpcc tests against dbvendor=$(DB)"
-	PYTHONPATH=./test/synchdb_tests/ pytest -v -s --dbvendor=$(DB) --tpccmode=serial --capture=tee-sys ./test/hammerdb/
-	rm -r .pytest_cache ./test/hammerdb/__pycache__
+	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -v -s --dbvendor=$(DB) --tpccmode=serial --capture=tee-sys ./src/test/pytests/hammerdb/
+	rm -r .pytest_cache ./src/test/pytests/hammerdb/__pycache__
 
 mysqlcheck:
 	$(MAKE) dbcheck DB=mysql

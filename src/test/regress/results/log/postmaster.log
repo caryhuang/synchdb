@@ -1,0 +1,15 @@
+2025-08-05 15:57:20.990 PDT postmaster[964187] LOG:  starting PostgreSQL 17.4 on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0, 64-bit
+2025-08-05 15:57:20.990 PDT postmaster[964187] LOG:  listening on Unix socket "/tmp/pg_regress-7Z9OgY/.s.PGSQL.55316"
+2025-08-05 15:57:20.992 PDT startup[964190] LOG:  database system was shut down at 2025-08-05 15:57:20 PDT
+2025-08-05 15:57:20.995 PDT postmaster[964187] LOG:  database system is ready to accept connections
+2025-08-05 15:57:21.091 PDT client backend[964200] pg_regress ERROR:  extension "pgcrypto" is not available
+2025-08-05 15:57:21.091 PDT client backend[964200] pg_regress DETAIL:  Could not open extension control file "/home/ubuntu/synchdb/postgres/tmp_install/usr/local/pgsql/share/extension/pgcrypto.control": No such file or directory.
+2025-08-05 15:57:21.091 PDT client backend[964200] pg_regress HINT:  The extension must first be installed on the system where PostgreSQL is running.
+2025-08-05 15:57:21.091 PDT client backend[964200] pg_regress STATEMENT:  CREATE EXTENSION IF NOT EXISTS "pgcrypto"
+2025-08-05 15:57:21.093 PDT postmaster[964187] LOG:  received fast shutdown request
+2025-08-05 15:57:21.093 PDT postmaster[964187] LOG:  aborting any active transactions
+2025-08-05 15:57:21.096 PDT postmaster[964187] LOG:  background worker "logical replication launcher" (PID 964193) exited with exit code 1
+2025-08-05 15:57:21.096 PDT checkpointer[964188] LOG:  shutting down
+2025-08-05 15:57:21.096 PDT checkpointer[964188] LOG:  checkpoint starting: shutdown immediate
+2025-08-05 15:57:21.105 PDT checkpointer[964188] LOG:  checkpoint complete: wrote 924 buffers (5.6%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.009 s, sync=0.001 s, total=0.010 s; sync files=0, longest=0.000 s, average=0.000 s; distance=4234 kB, estimate=4234 kB; lsn=0/1904818, redo lsn=0/1904818
+2025-08-05 15:57:21.111 PDT postmaster[964187] LOG:  database system is shut down

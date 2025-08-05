@@ -6,7 +6,7 @@
 #define PROTOBUF_C__NO_DEPRECATED
 #endif
 
-#include "OraProtoBuf.pb-c.h"
+#include "olr/OraProtoBuf.pb-c.h"
 void   open_log_replicator__pb__value__init
                      (OpenLogReplicator__Pb__Value         *message)
 {

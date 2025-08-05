@@ -7,9 +7,9 @@
  *
  */
 
-#include "OraProtoBuf.pb-c.h"
-#include "olr_client.h"
-#include "format_converter.h"
+#include "olr/OraProtoBuf.pb-c.h"
+#include "olr/olr_client.h"
+#include "converter/format_converter.h"
 #include "storage/fd.h"
 #include "utils/timestamp.h"
 #include "utils/datetime.h"

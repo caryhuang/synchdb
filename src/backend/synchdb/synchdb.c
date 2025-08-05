@@ -19,12 +19,18 @@
 
 #include "postgres.h"
 #include "fmgr.h"
-#include "utils/builtins.h"
 #include <jni.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <dlfcn.h>
-#include "format_converter.h"
+
+/* synchdb includes */
+#include "converter/format_converter.h"
+#include "synchdb/synchdb.h"
+#include "executor/replication_agent.h"
+#include "olr/olr_client.h"
+
+/* postgresql includes */
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "storage/procsignal.h"
@@ -38,12 +44,10 @@
 #include "utils/guc.h"
 #include "varatt.h"
 #include "funcapi.h"
-#include "synchdb.h"
-#include "replication_agent.h"
 #include "access/xact.h"
 #include "utils/snapmgr.h"
+#include "utils/builtins.h"
 #include "commands/dbcommands.h"
-#include "olr_client.h"
 
 PG_MODULE_MAGIC;
 
