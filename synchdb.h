@@ -156,6 +156,34 @@ typedef enum _DbzLogLevels
 	LOG_LEVEL_TRACE
 } DbzLogLevels;
 
+/*
+ * DDL_TYPE
+ *
+ * enum that represents supported DDL command types
+ */
+typedef enum _DdlType
+{
+	DDL_UNDEF,
+	DDL_CREATE_TABLE,
+	DDL_ALTER_TABLE,
+	DDL_DROP_TABLE
+} DdlType;
+
+/*
+ * DDL_TYPE
+ *
+ * enum that represents supported ALTER command sub types
+ */
+typedef enum _AlterSubType
+{
+	SUBTYPE_UNDEF,
+	SUBTYPE_ADD_COLUMN,
+	SUBTYPE_DROP_COLUMN,
+	SUBTYPE_ALTER_COLUMN,
+	SUBTYPE_ADD_CONSTRAINT,
+	SUBTYPE_DROP_CONSTRAINT
+} AlterSubType;
+
 /**
  * BatchInfo - Structure containing the metadata of a batch change request
  */

@@ -25,7 +25,8 @@
 typedef struct pg_ddl
 {
 	char * ddlquery;	/* to be fed into SPI*/
-	char * type;		/* CREATE, DROP or ALTER-ADD, ALTER-DROP or ALTER */
+	DdlType type;		/* CREATE, DROP or ALTER...etc */
+	AlterSubType subtype;	/* subtype for ALTER TABLE */
 	char * schema;		/* name of PG schema */
 	char * tbname;		/* name of PG table */
 	List * columns;		/* list of PG_DDL_COLUMN */

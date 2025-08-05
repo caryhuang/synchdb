@@ -1072,7 +1072,7 @@ synchdb_state_tupdesc(void)
 
 	tupdesc = CreateTemplateTupleDesc(attrnum);
 
-	/* todo: add more columns here per connector if needed */
+	/* add more columns here per connector if needed */
 	TupleDescInitEntry(tupdesc, ++a, "name", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "connector type", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "pid", INT4OID, -1, 0);
@@ -1102,7 +1102,7 @@ synchdb_stats_tupdesc(void)
 
 	tupdesc = CreateTemplateTupleDesc(attrnum);
 
-	/* todo: add more columns here per connector if needed */
+	/* add more columns here per connector if needed */
 	TupleDescInitEntry(tupdesc, ++a, "name", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "ddls", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "dmls", INT8OID, -1, 0);
@@ -1836,8 +1836,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						ret = olr_client_get_change(myConnectorId, &dbzExitSignal, &myBatchStats,
 								&sendconfirm);
 
-						/* send confirm message to OLR if successfully done */
-//						if (ret == 0 && sendconfirm)
+						/* send confirm message to OLR if it is necessary */
 						if (sendconfirm)
 						{
 							elog(DEBUG1, "successfully applied - send confirm message for "
@@ -1871,11 +1870,10 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						 * peer has disconnected, let's retry connection again with
 						 * a little bit of delay in between...
 						 */
-
 						sleep(3);
 						elog(WARNING, "reconnecting...");
 						if (olr_client_init(connInfo->hostname, connInfo->port))
-							elog(WARNING, "failed to reconnect");
+							elog(DEBUG1, "failed to reconnect");
 						else
 						{
 							elog(WARNING, "reconnected, request replication...");

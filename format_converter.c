@@ -694,6 +694,19 @@ transform_object_name(const char * objid, const char * objtype)
 	return res;
 }
 
+static DdlType
+name_to_ddltype(const char * name)
+{
+	if (!strcasecmp(name, "CREATE"))
+		return DDL_CREATE_TABLE;
+	else if (!strcasecmp(name, "ALTER"))
+		return DDL_ALTER_TABLE;
+	else if (!strcasecmp(name, "DROP"))
+		return DDL_DROP_TABLE;
+	else
+		return DDL_UNDEF;
+}
+
 /*
  * populate_primary_keys
  *
@@ -1252,12 +1265,6 @@ destroyDBZDDL(DBZ_DDL * ddlinfo)
 		if (ddlinfo->id)
 			pfree(ddlinfo->id);
 
-		if (ddlinfo->subtype)
-			pfree(ddlinfo->subtype);
-
-		if (ddlinfo->type)
-			pfree(ddlinfo->type);
-
 		if (ddlinfo->primaryKeyColumnNames)
 			pfree(ddlinfo->primaryKeyColumnNames);
 
@@ -1279,9 +1286,6 @@ destroyPGDDL(PG_DDL * ddlinfo)
 	{
 		if (ddlinfo->ddlquery)
 			pfree(ddlinfo->ddlquery);
-
-		if (ddlinfo->type)
-			pfree(ddlinfo->type);
 
 		if (ddlinfo->schema)
 			pfree(ddlinfo->schema);
@@ -1400,14 +1404,14 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
     ddlinfo->primaryKeyColumnNames = pstrdup(strinfo.data);
 
     getPathElementString(jb, "payload.tableChanges.0.type", &strinfo, true);
-    ddlinfo->type = pstrdup(strinfo.data);
+    ddlinfo->type = name_to_ddltype(strinfo.data);
 
     /* free the data inside strinfo as we no longer needs it */
     pfree(strinfo.data);
 
-    if (!strcmp(ddlinfo->id, "NULL") && !strcmp(ddlinfo->type, "NULL"))
+    if (!strcmp(ddlinfo->id, "NULL") || ddlinfo->type == DDL_UNDEF)
     {
-    	elog(DEBUG1, "no table change data. Stop parsing...");
+    	elog(DEBUG1, "no table change data or unknown DDL type. Stop parsing...");
     	destroyDBZDDL(ddlinfo);
     	return NULL;
     }
@@ -1416,7 +1420,7 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 	for (j = 0; j < strlen(ddlinfo->id); j++)
 		ddlinfo->id[j] = (char) pg_tolower((unsigned char) ddlinfo->id[j]);
 
-    if (!strcmp(ddlinfo->type, "CREATE") || !strcmp(ddlinfo->type, "ALTER"))
+    if (ddlinfo->type == DDL_CREATE_TABLE || ddlinfo->type == DDL_ALTER_TABLE)
     {
 		/* fetch payload.tableChanges.0.table.columns as jsonb */
     	Datum datum_elems[5] ={CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges"),
@@ -1622,14 +1626,14 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 			return NULL;
 		}
     }
-    else if (!strcmp(ddlinfo->type, "DROP"))
+    else if (ddlinfo->type == DDL_DROP_TABLE)
     {
     	/* no further parsing needed for DROP, just return ddlinfo */
     	return ddlinfo;
     }
     else
     {
-		elog(WARNING, "unknown ddl type %s", ddlinfo->type);
+		elog(WARNING, "unsupported ddl type %d", ddlinfo->type);
 		destroyDBZDDL(ddlinfo);
 		return NULL;
     }
@@ -2193,9 +2197,9 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 	initStringInfo(&strinfo);
 
-	pgddl->type = pstrdup(dbzddl->type);
+	pgddl->type = dbzddl->type;
 
-	if (!strcmp(dbzddl->type, "CREATE"))
+	if (dbzddl->type == DDL_CREATE_TABLE)
 	{
 		int attnum = 1;
 		mappedObjName = transform_object_name(dbzddl->id, "table");
@@ -2348,7 +2352,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 		appendStringInfo(&strinfo, ");");
 	}
-	else if (!strcmp(dbzddl->type, "DROP"))
+	else if (dbzddl->type == DDL_DROP_TABLE)
 	{
 		DataCacheKey cachekey = {0};
 		bool found = false;
@@ -2424,7 +2428,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		hash_search(dataCacheHash, &cachekey, HASH_REMOVE, &found);
 
 	}
-	else if (!strcmp(dbzddl->type, "ALTER"))
+	else if (dbzddl->type == DDL_ALTER_TABLE)
 	{
 		int i = 0, attnum = 1, newcol = 0;
 		Oid schemaoid = 0;
@@ -2561,6 +2565,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
 			{
 				altered = false;
+
+				/* indicate pgddl that this is alter add column */
+				pgddl->subtype = SUBTYPE_ADD_COLUMN;
+
 				foreach(cell, dbzddl->columns)
 				{
 					DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
@@ -2687,15 +2695,11 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					 */
 					if (pkoid == InvalidOid)
 						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
-
-					/* indicate pgddl that this is alter add column */
-					pfree(pgddl->type);
-					pgddl->type = pstrdup("ALTER-ADD");	//todo: define a subtype in pgddl
 				}
 				else
 				{
 					elog(DEBUG1, "no column altered");
-					pfree(pgddl);
+					destroyPGDDL(pgddl);
 					return NULL;
 				}
 			}
@@ -2706,6 +2710,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				 * TABLE DROP COLUMN operation. Let's find which one is to be dropped.
 				 */
 				altered = false;
+
+				/* indicate pgddl that this is alter drop column */
+				pgddl->subtype = SUBTYPE_DROP_COLUMN;
+
 				for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 				{
 					Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
@@ -2767,15 +2775,11 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					/* remove the last extra comma */
 					strinfo.data[strinfo.len - 1] = '\0';
 					strinfo.len = strinfo.len - 1;
-
-					/* indicate pgddl that this is alter drop column */
-					pfree(pgddl->type);
-					pgddl->type = pstrdup("ALTER-DROP");	//todo: define a subtype in pgddl
 				}
 				else
 				{
 					elog(DEBUG1, "no column altered");
-					pfree(pgddl);
+					destroyPGDDL(pgddl);
 					return NULL;
 				}
 			}
@@ -2786,6 +2790,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				 * general ALTER TABLE operation.
 				 */
 				char * alterclause = NULL;
+
+				/* indicate pgddl that this is alter column ddl*/
+				pgddl->subtype = SUBTYPE_ALTER_COLUMN;
+
 				alterclause = composeAlterColumnClauses(dbzddl->id, type, dbzddl->columns, tupdesc, rel, pgddl);
 				if (alterclause)
 				{
@@ -2796,7 +2804,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				else
 				{
 					elog(DEBUG1, "no column altered");
-					pfree(pgddl);
+					destroyPGDDL(pgddl);
 					return NULL;
 				}
 				/*
@@ -2810,13 +2818,23 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		}
 		else
 		{
+			/* pass the subtype to pgddl */
+			pgddl->subtype = dbzddl->subtype;
+
 			/*
 			 * OLR connector gives the added and dropped columns directly so there is no
 			 * need to figure out that information
 			 */
-			if (!strcasecmp(dbzddl->subtype, "ADD"))
+			if (dbzddl->subtype == SUBTYPE_ADD_COLUMN)
 			{
 				/* ADD COLUMN */
+				if (list_length(dbzddl->columns) <= 0)
+				{
+					elog(WARNING, "no columns to add");
+					destroyPGDDL(pgddl);
+					return NULL;
+				}
+
 				altered = false;
 				foreach(cell, dbzddl->columns)
 				{
@@ -2914,21 +2932,24 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					 */
 					if (pkoid == InvalidOid)
 						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
-
-					/* indicate pgddl that this is alter add column */
-					pfree(pgddl->type);
-					pgddl->type = pstrdup("ALTER-ADD");	//todo: define a subtype in pgddl
 				}
 				else
 				{
 					elog(DEBUG1, "no column altered");
-					pfree(pgddl);
+					destroyPGDDL(pgddl);
 					return NULL;
 				}
 			}
-			else if (!strcasecmp(dbzddl->subtype, "DROP"))
+			else if (dbzddl->subtype == SUBTYPE_DROP_COLUMN)
 			{
 				/* DROP COLUMN */
+				if (list_length(dbzddl->columns) <= 0)
+				{
+					elog(WARNING, "no columns to drop");
+					destroyPGDDL(pgddl);
+					return NULL;
+				}
+
 				altered = false;
 				foreach(cell, dbzddl->columns)
 				{
@@ -2986,15 +3007,18 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					/* remove the last extra comma */
 					strinfo.data[strinfo.len - 1] = '\0';
 					strinfo.len = strinfo.len - 1;
-
-					/* indicate pgddl that this is alter drop column */
-					pfree(pgddl->type);
-					pgddl->type = pstrdup("ALTER-DROP");	//todo: define a subtype in pgddl
 				}
 			}
-			else if (!strcasecmp(dbzddl->subtype, "ALTER"))
+			else if (dbzddl->subtype == SUBTYPE_ALTER_COLUMN)
 			{
 				/* ALTER COLUMN */
+				if (list_length(dbzddl->columns) <= 0)
+				{
+					elog(WARNING, "no columns to alter");
+					destroyPGDDL(pgddl);
+					return NULL;
+				}
+
 				altered = false;
 				foreach(cell, dbzddl->columns)
 				{
@@ -3110,16 +3134,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				strinfo.data[strinfo.len - 1] = '\0';
 				strinfo.len = strinfo.len - 1;
 			}
-			else if (!strcasecmp(dbzddl->subtype, "ADD-CONSTR"))
+			else if (dbzddl->subtype == SUBTYPE_ADD_CONSTRAINT)
 			{
 				if (pkoid == InvalidOid)
 				{
 					appendStringInfo(&strinfo, "ADD CONSTRAINT %s ", dbzddl->constraintName);
 					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, false);
-
-					/* indicate pgddl that this is add constraint ddl */
-					pfree(pgddl->type);
-					pgddl->type = pstrdup("ALTER-ADDC");	//todo: define a subtype in pgddl
 				}
 				else
 				{
@@ -3128,15 +3148,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					return NULL;
 				}
 			}
-			else if (!strcasecmp(dbzddl->subtype, "DROP-CONSTR"))
+			else if (dbzddl->subtype == SUBTYPE_DROP_CONSTRAINT)
 			{
 				if (dbzddl->constraintName)
-				{
 					appendStringInfo(&strinfo, "DROP CONSTRAINT %s ", dbzddl->constraintName);
-					/* indicate pgddl that this is add constraint ddl */
-					pfree(pgddl->type);
-					pgddl->type = pstrdup("ALTER-DROPC");	//todo: define a subtype in pgddl
-				}
 				else
 				{
 					elog(WARNING, "constaint name to drop is NULL. Skipping...");
@@ -3146,11 +3161,17 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			}
 			else
 			{
-				elog(WARNING, "unsupported ALTER TABLE sub type %s", dbzddl->subtype);
+				elog(WARNING, "unsupported ALTER TABLE sub type %d", dbzddl->subtype);
 				destroyPGDDL(pgddl);
 				return NULL;
 			}
 		}
+	}
+	else
+	{
+		elog(WARNING, "unsupported conversion for DDL type %d", dbzddl->type);
+		destroyPGDDL(pgddl);
+		return NULL;
 	}
 
 	pgddl->ddlquery = pstrdup(strinfo.data);
@@ -3229,7 +3250,8 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 		default:
 		{
 			/* todo */
-			elog(WARNING, "struct parsing for mysql and sqlserver are TBD");
+			elog(WARNING, "struct expansion for mysql and sqlserver can be added here"
+					"once we come across them");
 			break;
 		}
 	}
@@ -3391,7 +3413,7 @@ construct_datestr(long long input, bool addquote, int timerep)
 		case TIME_UNDEF:
 		default:
 		{
-			/* todo: manually figure out the right timerep based on input */
+			/* todo: intelligently figure out the right timerep based on input */
 			set_shm_connector_errmsg(myConnectorId, "no time representation available to"
 					"process DATEOID value");
 			elog(ERROR, "no time representation available to process DATEOID value");
@@ -3484,7 +3506,7 @@ construct_timestampstr(long long input, bool addquote, int timerep, int typemod)
 		case TIME_UNDEF:
 		default:
 		{
-			/* todo: manually figure out the right timerep based on input */
+			/* todo: intelligently figure out the right timerep based on input */
 			set_shm_connector_errmsg(myConnectorId, "no time representation available to"
 					"process TIMESTAMPOID value");
 			elog(ERROR, "no time representation available to process TIMESTAMPOID value");
@@ -3672,7 +3694,7 @@ construct_timetr(long long input, bool addquote, int timerep, int typemod)
 		case TIME_UNDEF:
 		default:
 		{
-			/* todo: manually figure out the right timerep based on input */
+			/* todo: intelligently figure out the right timerep based on input */
 			set_shm_connector_errmsg(myConnectorId, "no time representation available to"
 					"process TIMEOID value");
 			elog(ERROR, "no time representation available to process TIMEOID value");
@@ -3800,7 +3822,7 @@ construct_intervalstr(long long input, bool addquote, int timerep, int typemod)
 		}
 		default:
 		{
-			/* todo: manually figure out the right timerep based on input */
+			/* todo: intelligently figure out the right timerep based on input */
 			set_shm_connector_errmsg(myConnectorId, "no interval representation available to"
 					"process INTERVALOID value");
 			elog(ERROR, "no interval representation available to process INTERVALOID value");
@@ -5843,7 +5865,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 			appendStringInfo(&pklist, "[");
 
 			/* Columns and constraints */
-			olrddl->type = pstrdup("CREATE");
+			olrddl->type = DDL_CREATE_TABLE;
 			foreach(colCell, createStmt->tableElts)
 			{
 				Node *elt = (Node *) lfirst(colCell);
@@ -5993,8 +6015,11 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 			ListCell *constrCell;
 
 			AlterTableStmt *alterStmt = (AlterTableStmt *) stmt;
-			elog(WARNING, "ALTER TABLE: %s", alterStmt->relation->relname);
-			olrddl->type = pstrdup("ALTER");
+
+			elog(DEBUG1, "ALTER TABLE: %s", alterStmt->relation->relname);
+
+			olrddl->type = DDL_ALTER_TABLE;
+
 			foreach(cmdCell, alterStmt->cmds)
 			{
 				AlterTableCmd *cmd = (AlterTableCmd *) lfirst(cmdCell);
@@ -6012,9 +6037,10 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						appendStringInfo(&pklist, "[");
 
 						/* column name */
-						elog(WARNING, "  ADD COLUMN: %s", col->colname);
+						elog(DEBUG1, "  ADD COLUMN: %s", col->colname);
 						ddlcol->name = pstrdup(col->colname);
-						olrddl->subtype = pstrdup("ADD");
+
+						olrddl->subtype = SUBTYPE_ADD_COLUMN;
 
 						/* data type */
 						if (col->typeName && col->typeName->names)
@@ -6120,7 +6146,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						ddlcol = (OLR_DDL_COLUMN *) palloc0(sizeof(OLR_DDL_COLUMN));
 
 						elog(WARNING, "DROP COLUMN: %s", cmd->name);
-						olrddl->subtype = pstrdup("DROP");
+						olrddl->subtype = SUBTYPE_DROP_COLUMN;
 						ddlcol->name = pstrdup(cmd->name);
 						break;
 					}
@@ -6135,9 +6161,9 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						appendStringInfo(&pklist, "[");
 
 						/* column name */
-						elog(WARNING, "MODIFY COLUMN: %s", cmd->name);
+						elog(DEBUG1, "MODIFY COLUMN: %s", cmd->name);
 						ddlcol->name = pstrdup(cmd->name);
-						olrddl->subtype = pstrdup("ALTER");
+						olrddl->subtype = SUBTYPE_ALTER_COLUMN;
 
 						/* data type */
 						if (col->typeName && col->typeName->names)
@@ -6237,7 +6263,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						StringInfoData pklist;
 						Constraint *constr = (Constraint *)cmd->def;
 
-						olrddl->subtype = pstrdup("ADD-CONSTR");
+						olrddl->subtype = SUBTYPE_ADD_CONSTRAINT;
 
 						/* prepare to build primary key list */
 						initStringInfo(&pklist);
@@ -6274,7 +6300,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 							elog(DEBUG1, "dropping constraint: %s", cmd->name);
 							olrddl->constraintName = pstrdup(cmd->name);
 						}
-						olrddl->subtype = pstrdup("DROP-CONSTR");
+						olrddl->subtype = SUBTYPE_DROP_CONSTRAINT;
 						break;
 					}
 					default:
@@ -6295,6 +6321,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 		{
 			/* DROP TABLE */
 			DropStmt *dropStmt = (DropStmt *) stmt;
+			olrddl->type = DDL_DROP_TABLE;
 
 			if (dropStmt->removeType == OBJECT_TABLE)
 			{
@@ -6312,12 +6339,16 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						table = pstrdup(relname);
 					}
 				}
-				olrddl->type = pstrdup("DROP");
 			}
+			else
+				elog(DEBUG1, "unsupported drop type %d", dropStmt->removeType);
 		}
 		else
 		{
-			elog(WARNING, "ignored %d stmt type",  nodeTag(stmt));
+			elog(WARNING, "unsupported stmt type: %d ",  nodeTag(stmt));
+			destroyDBZDDL(olrddl);
+			olrddl = NULL;
+			goto end;
 		}
 	}
 
@@ -6401,7 +6432,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 		v = getKeyJsonValueFromContainer(&jb->root, "tm", strlen("tm"), &vbuf);
 		if (v)
 		{
-			/* todo - support batch request with more than 1 event */
 			olrdml->src_ts_ms = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
 					NumericGetDatum(v->val.numeric))) / 1000 / 1000;
 		}
@@ -7120,26 +7150,15 @@ ConnectorType
 fc_get_connector_type(const char * connector)
 {
 	if (!strcasecmp(connector, "mysql"))
-	{
 		return TYPE_MYSQL;
-	}
 	else if (!strcasecmp(connector, "oracle"))
-	{
 		return TYPE_ORACLE;
-	}
 	else if (!strcasecmp(connector, "sqlserver"))
-	{
 		return TYPE_SQLSERVER;
-	}
 	else if (!strcasecmp(connector, "olr"))
-	{
 		return TYPE_OLR;
-	}
-	/* todo: support more dbz connector types here */
 	else
-	{
 		return TYPE_UNDEF;
-	}
 }
 
 /*
@@ -7303,9 +7322,9 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 
 	initStringInfo(&strinfo);
 
-	if (!strcmp(pgddl->type, "CREATE") ||
-			!strcmp(pgddl->type, "ALTER-ADD") ||
-			!strcmp(pgddl->type, "ALTER"))
+	if (pgddl->type == DDL_CREATE_TABLE ||
+		(pgddl->type == DDL_ALTER_TABLE && pgddl->subtype == SUBTYPE_ADD_COLUMN) ||
+		(pgddl->type == DDL_ALTER_TABLE && pgddl->subtype == SUBTYPE_ALTER_COLUMN))
 	{
 		int j = 0;
 		Oid schemaoid, tableoid;
@@ -7376,7 +7395,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 				"ext_attname = EXCLUDED.ext_attname,"
 				"ext_atttypename = EXCLUDED.ext_atttypename;");
 	}
-	else if (!strcmp(pgddl->type, "DROP"))
+	else if (pgddl->type == DDL_DROP_TABLE)
 	{
 		appendStringInfo(&strinfo, "DELETE FROM %s "
 				"WHERE lower(ext_tbname) = lower('%s') AND "
@@ -7387,7 +7406,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 				name,
 				connectorTypeToString(conntype));
 	}
-	else if (!strcmp(pgddl->type, "ALTER-DROP"))
+	else if (pgddl->type == DDL_ALTER_TABLE && pgddl->subtype == SUBTYPE_DROP_COLUMN)
 	{
 		if (list_length(pgddl->columns) <= 0)
 		{
@@ -7412,7 +7431,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 	}
 	else
 	{
-		elog(WARNING, "unknown type %s. Skipping attribute update", pgddl->type);
+		elog(WARNING, "unknown ddl type %d. Skipping attribute update", pgddl->type);
 		return;
 	}
 

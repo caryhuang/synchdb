@@ -96,8 +96,8 @@ typedef DBZ_DDL_COLUMN OLR_DDL_COLUMN;
 typedef struct dbz_ddl
 {
 	char * id;
-	char * type;
-	char * subtype;
+	DdlType type;
+	AlterSubType subtype;
 	char * primaryKeyColumnNames;
 	char * constraintName;
 	List * columns;		/* list of DBZ_DDL_COLUMN */
