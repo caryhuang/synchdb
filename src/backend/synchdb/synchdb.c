@@ -26,6 +26,7 @@
 
 /* synchdb includes */
 #include "converter/format_converter.h"
+#include "converter/debezium_event_handler.h"
 #include "synchdb/synchdb.h"
 #include "executor/replication_agent.h"
 #include "olr/olr_client.h"

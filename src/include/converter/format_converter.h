@@ -21,7 +21,7 @@
 
 #include "utils/hsearch.h"
 #include "nodes/pg_list.h"
-
+#include "utils/jsonb.h"
 #include "executor/replication_agent.h"
 #include "synchdb/synchdb.h"
 
@@ -47,33 +47,6 @@ typedef enum _timeRep
 	DATA_GEOMETRY,			/* indication of geometry data */
 	DATA_ENUM,				/* indication of enum data */
 } TimeRep;
-
-/*
- * DbzType
- *
- * enum that represents how foreign systems (dbz or olr) could represent
- * a data value
- */
-typedef enum _DbzType
-{
-	/* DBZ types */
-	DBZTYPE_UNDEF = 0,
-	DBZTYPE_FLOAT32,
-	DBZTYPE_FLOAT64,
-	DBZTYPE_FLOAT,
-	DBZTYPE_DOUBLE,
-	DBZTYPE_BYTES,
-	DBZTYPE_INT8,
-	DBZTYPE_INT16,
-	DBZTYPE_INT32,
-	DBZTYPE_INT64,
-	DBZTYPE_STRUCT,
-	DBZTYPE_STRING,
-
-	/* OLR types */
-	OLRTYPE_NUMBER,
-	OLRTYPE_STRING
-} DbzType;
 
 /* Structure to represent a column in a DDL event */
 typedef struct dbz_ddl_column
@@ -125,7 +98,7 @@ typedef struct
 {
 	char name[NAMEDATALEN];
 	int jsonpos;
-	DbzType dbztype;
+	int dbztype;
 	TimeRep timerep;
 	int scale;
 } NameJsonposEntry;
@@ -142,7 +115,7 @@ typedef struct dbz_dml_column_value
 	int timerep;	/* how dbz represents time related fields */
 	int typemod;	/* extra data type modifier */
 	bool ispk;		/* indicate if this column is a primary key*/
-	DbzType dbztype;	/* data literal type as defined by dbz */
+	int dbztype;	/* data literal type as defined by dbz */
 	char typcategory;	/* type category defined by pg */
 	bool typispreferred;	/* wether type category is preferred by pg */
 	char * typname;		/* the name of the data type */
@@ -220,15 +193,19 @@ typedef struct transformExpressionHashEntry
 } TransformExpressionHashEntry;
 
 /* Function prototypes */
-int fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
-		bool schemasync, const char * name, bool isfirst, bool islast);
 ConnectorType fc_get_connector_type(const char * connector);
 void fc_initFormatConverter(ConnectorType connectorType);
 void fc_deinitFormatConverter(ConnectorType connectorType);
-bool fc_load_rules(ConnectorType connectorType, const char * rulefile);
 bool fc_load_objmap(const char * name, ConnectorType connectorType);
 char * escapeSingleQuote(const char * in, bool addquote);
-int fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
-		const char * name, bool * sendconfirm, bool isfirst, bool islast);
+int getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool removequotes);
+void remove_double_quotes(StringInfoData * str);
+bool find_exact_string_match(const char * line, const char * wordtofind);
+char * transform_object_name(const char * objid, const char * objtype);
+void splitIdString(char * id, char ** db, char ** schema, char ** table, bool usedb);
+int list_sort_cmp(const ListCell *a, const ListCell *b);
+PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type);
+void updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype, const char * name);
+PG_DML * convert2PGDML(DBZ_DML * dbzdml, ConnectorType type);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */

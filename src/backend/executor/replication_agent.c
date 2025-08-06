@@ -1320,3 +1320,50 @@ end:
 
 	return ret;
 }
+
+/*
+ * destroyPGDDL
+ *
+ * Function to destroy PG_DDL structure
+ */
+void
+destroyPGDDL(PG_DDL * ddlinfo)
+{
+	if (ddlinfo)
+	{
+		if (ddlinfo->ddlquery)
+			pfree(ddlinfo->ddlquery);
+
+		if (ddlinfo->schema)
+			pfree(ddlinfo->schema);
+
+		if (ddlinfo->tbname)
+			pfree(ddlinfo->tbname);
+
+		list_free_deep(ddlinfo->columns);
+
+		pfree(ddlinfo);
+	}
+}
+
+/*
+ * destroyPGDML
+ *
+ * Function to destroy PG_DML structure
+ */
+void
+destroyPGDML(PG_DML * dmlinfo)
+{
+	if (dmlinfo)
+	{
+		if (dmlinfo->dmlquery)
+			pfree(dmlinfo->dmlquery);
+
+		if (dmlinfo->columnValuesBefore)
+			list_free_deep(dmlinfo->columnValuesBefore);
+
+		if (dmlinfo->columnValuesAfter)
+			list_free_deep(dmlinfo->columnValuesAfter);
+		pfree(dmlinfo);
+	}
+}

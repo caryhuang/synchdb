@@ -11,6 +11,8 @@ REGRESS_OPTS = --inputdir=./src/test/regress --outputdir=./src/test/regress/resu
 
 OBJS = src/backend/synchdb/synchdb.o \
        src/backend/converter/format_converter.o \
+       src/backend/converter/debezium_event_handler.o \
+       src/backend/converter/olr_event_handler.o \
        src/backend/executor/replication_agent.o \
        src/backend/olr/OraProtoBuf.pb-c.o \
        src/backend/utils/netio_utils.o \
