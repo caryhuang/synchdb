@@ -43,7 +43,9 @@
 /* synchdb includes */
 #include "converter/format_converter.h"
 #include "converter/debezium_event_handler.h"
+#ifdef WITH_OLR
 #include "converter/olr_event_handler.h"
+#endif
 #include "synchdb/synchdb.h"
 
 /* global external variables */
@@ -555,7 +557,6 @@ transform_data_expression(const char * remoteObjid, const char * colname)
  * is expected to be a json array with string element, for example:
  * ["col1","col2"]
  */
-//todo make it more flexible
 static void
 populate_primary_keys(StringInfoData * strinfo, const char * id, const char * jsonin, bool alter, bool isinline)
 {
@@ -2239,7 +2240,9 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 					out = handle_base64_to_numeric_with_scale(in, colval->scale);
 					break;
 				}
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				case DBZTYPE_STRING:
 				{
 					/* no special handling for now. todo */
@@ -2287,7 +2290,9 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 					break;
 				}
 				case DBZTYPE_STRING:
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				{
 					if (strstr(colval->typname, "timestamp") || strstr(colval->typname, "timetz"))
 					{
@@ -2331,7 +2336,9 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 					break;
 				}
 				case DBZTYPE_STRING:
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				default:
 				{
 					if (addquote)
@@ -2359,7 +2366,9 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 					break;
 				}
 				case DBZTYPE_STRING:
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				{
 					if (addquote)
 						out = escapeSingleQuote(in, addquote);
@@ -2447,7 +2456,9 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				{
 					out = handle_string_to_numeric(in, addquote);
 					break;
@@ -2491,7 +2502,9 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				{
 					out = handle_string_to_bit(in, addquote);
 					break;
@@ -2520,16 +2533,20 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				{
 					out = handle_string_to_date(in, addquote);
 					break;
 				}
+#ifdef WITH_OLR
 				case OLRTYPE_NUMBER:
 				{
 					out = handle_numeric_to_date(in, addquote, TIME_NANOTIMESTAMP);
 					break;
 				}
+#endif
 				default:
 				{
 					out = handle_numeric_to_date(in, addquote, colval->timerep);
@@ -2556,17 +2573,22 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				{
 					out = handle_string_to_timestamp(in, addquote, type);
 					break;
 				}
+#ifdef WITH_OLR
 				case OLRTYPE_NUMBER:
+
 				{
 					/* OLR represents date as nanoseconds since epoch*/
 					out = handle_numeric_to_timestamp(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
 					break;
 				}
+#endif
 				default:
 				{
 					out = handle_numeric_to_timestamp(in, addquote, colval->timerep, colval->typemod);
@@ -2591,16 +2613,20 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				{
 					out = handle_string_to_time(in, addquote);
 					break;
 				}
+#ifdef WITH_OLR
 				case OLRTYPE_NUMBER:
 				{
 					out = handle_numeric_to_time(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
 					break;
 				}
+#endif
 				default:
 				{
 					out = handle_numeric_to_time(in, addquote, colval->timerep, colval->typemod);
@@ -2625,7 +2651,9 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				{
 					out = handle_string_to_byte(in, addquote);
 					break;
@@ -2654,17 +2682,21 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					break;
 				}
 				case DBZTYPE_STRING:
+#ifdef WITH_OLR
 				case OLRTYPE_STRING:
+#endif
 				{
 					out = handle_string_to_interval(in, addquote);
 					break;
 				}
+#ifdef WITH_OLR
 				case OLRTYPE_NUMBER:
 				{
 					/* oracle number represented as interval - usd nanoseconds */
 					out = handle_numeric_to_interval(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
 					break;
 				}
+#endif
 				default:
 				{
 					out = handle_numeric_to_interval(in, addquote, colval->timerep, colval->typemod);
@@ -3318,10 +3350,11 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 		case TYPE_OLR:
 		{
 			hash_destroy(oracleDatatypeHash);
-
+#ifdef WITH_OLR
 			/* unload oracle parser for OLR is needed */
 			if (connectorType == TYPE_OLR)
 				unload_oracle_parser();
+#endif
 			break;
 		}
 		case TYPE_SQLSERVER:
@@ -4525,6 +4558,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
 			}
 		}
+#ifdef WITH_OLR
 		else
 		{
 			/* pass the subtype to pgddl */
@@ -4875,6 +4909,13 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				return NULL;
 			}
 		}
+#else
+		else
+		{
+			set_shm_connector_errmsg(myConnectorId, "OLR connector is not enabled in this synchdb build");
+			elog(ERROR, "OLR connector is not enabled in this synchdb build");
+		}
+#endif
 	}
 	else
 	{

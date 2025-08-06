@@ -29,7 +29,9 @@
 #include "converter/debezium_event_handler.h"
 #include "synchdb/synchdb.h"
 #include "executor/replication_agent.h"
+#ifdef WITH_OLR
 #include "olr/olr_client.h"
+#endif
 
 /* postgresql includes */
 #include "postmaster/bgworker.h"
@@ -150,7 +152,6 @@ static char *dbz_engine_get_offset(int connectorId);
 static int dbz_mark_batch_complete(int batchid);
 static TupleDesc synchdb_state_tupdesc(void);
 static TupleDesc synchdb_stats_tupdesc(void);
-static void synchdb_init_shmem(void);
 static void synchdb_detach_shmem(int code, Datum arg);
 static void prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid, const char * snapshotMode);
 static const char *connectorStateAsString(ConnectorState state);
@@ -1828,7 +1829,35 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 		{
 			case STATE_SYNCING:
 			{
-				if (connectorType == TYPE_OLR)
+				if (connectorType != TYPE_OLR)
+				{
+					/* continuously poll change events via Debezium */
+					/* reset batchinfo and batchStats*/
+					myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
+					myBatchInfo.batchSize = 0;
+					memset(&myBatchStats, 0, sizeof(myBatchStats));
+
+					dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
+							&myBatchInfo, &myBatchStats, connInfo->isShcemaSync);
+
+					/*
+					 * if a valid batchid is set by dbz_engine_get_change(), it means we have
+					 * successfully completed a batch change request and we shall notify dbz
+					 * that it's been completed.
+					 */
+					if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
+					{
+						dbz_mark_batch_complete(myBatchInfo.batchId);
+
+						/* increment batch connector statistics */
+						increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+
+						/* update the batch statistics to shared memory */
+						set_shm_connector_statistics(myConnectorId, &myBatchStats);
+					}
+				}
+#ifdef WITH_OLR
+				else
 				{
 					int ret = -1;
 					bool sendconfirm = false;
@@ -1911,33 +1940,13 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						}
 					}
 				}
+#else
 				else
 				{
-					/* continuously poll change events via Debezium */
-					/* reset batchinfo and batchStats*/
-					myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
-					myBatchInfo.batchSize = 0;
-					memset(&myBatchStats, 0, sizeof(myBatchStats));
-
-					dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
-							&myBatchInfo, &myBatchStats, connInfo->isShcemaSync);
-
-					/*
-					 * if a valid batchid is set by dbz_engine_get_change(), it means we have
-					 * successfully completed a batch change request and we shall notify dbz
-					 * that it's been completed.
-					 */
-					if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
-					{
-						dbz_mark_batch_complete(myBatchInfo.batchId);
-
-						/* increment batch connector statistics */
-						increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
-
-						/* update the batch statistics to shared memory */
-						set_shm_connector_statistics(myConnectorId, &myBatchStats);
-					}
+					set_shm_connector_errmsg(myConnectorId, "OLR connector is not enabled in this synchdb build");
+					elog(ERROR, "OLR connector is not enabled in this synchdb build");
 				}
+#endif
 				break;
 			}
 			case STATE_PAUSED:
@@ -2004,6 +2013,7 @@ cleanup(ConnectorType connectorType)
 
 	elog(WARNING, "synchdb_engine_main shutting down");
 
+#ifdef WITH_OLR
 	if (connectorType == TYPE_OLR)
 	{
 		/* force flush scn file before shutdown */
@@ -2014,6 +2024,7 @@ cleanup(ConnectorType connectorType)
 				true);
 	}
 	else
+#endif
 	{
 		ret = dbz_engine_stop();
 		if (ret)
@@ -2702,12 +2713,14 @@ set_shm_dbz_offset(int connectorId)
 	if (!sdb_state)
 		return;
 
+#ifdef WITH_OLR
 	if (sdb_state->connectors[connectorId].type == TYPE_OLR)
 	{
 		offset = psprintf("{\"scn\":%llu, \"c_scn\":%llu}",
 				olr_client_get_scn(), olr_client_get_c_scn());
 	}
 	else
+#endif
 	{
 		offset = dbz_engine_get_offset(connectorId);
 		if (!offset)
@@ -3066,6 +3079,7 @@ synchdb_engine_main(Datum main_arg)
 		/* Main processing loop */
 		main_loop(connectorType, &connInfo, snapshotMode);
 	}
+#ifdef WITH_OLR
 	else
 	{
 		int ret = -1;
@@ -3137,7 +3151,13 @@ synchdb_engine_main(Datum main_arg)
 		}
 		olr_client_shutdown();
 	}
-
+#else
+	else
+	{
+		set_shm_connector_errmsg(myConnectorId, "OLR connector is not enabled in this synchdb build.");
+		elog(ERROR, "OLR connector is not enabled in this synchdb build.");
+	}
+#endif
 	if (snapshotMode)
 		pfree(snapshotMode);
 
@@ -3884,11 +3904,19 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	}
 	connector = text_to_cstring(connector_text);
 
+#ifdef WITH_OLR
 	if (strcasecmp(connector, "mysql") && strcasecmp(connector, "sqlserver")
 			&& strcasecmp(connector, "oracle") && strcasecmp(connector, "olr"))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unsupported connector")));
+#else
+	if (strcasecmp(connector, "mysql") && strcasecmp(connector, "sqlserver")
+			&& strcasecmp(connector, "oracle"))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported connector")));
+#endif
 
 	appendStringInfo(&strinfo, "INSERT INTO %s (name, isactive, data)"
 			" VALUES ('%s', %s, jsonb_build_object("

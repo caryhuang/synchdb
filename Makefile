@@ -9,14 +9,13 @@ PGFILEDESC = "synchdb - allows logical replication with heterogeneous databases"
 REGRESS = synchdb
 REGRESS_OPTS = --inputdir=./src/test/regress --outputdir=./src/test/regress/results --load-extension=pgcrypto
 
+# flag to build with native openlog replicator connector support
+WITH_OLR ?= 0
+
 OBJS = src/backend/synchdb/synchdb.o \
        src/backend/converter/format_converter.o \
        src/backend/converter/debezium_event_handler.o \
-       src/backend/converter/olr_event_handler.o \
-       src/backend/executor/replication_agent.o \
-       src/backend/olr/OraProtoBuf.pb-c.o \
-       src/backend/utils/netio_utils.o \
-       src/backend/olr/olr_client.o
+       src/backend/executor/replication_agent.o
 
 DBZ_ENGINE_PATH = src/backend/debezium
 
@@ -24,6 +23,10 @@ DBZ_ENGINE_PATH = src/backend/debezium
 JAVA_PATH := $(shell which java)
 JDK_HOME_PATH := $(shell readlink -f $(JAVA_PATH) | sed 's:/bin/java::')
 JDK_INCLUDE_PATH := $(JDK_HOME_PATH)/include
+
+# default protobuf-c path (for OLR build)
+PROTOBUF_C_INCLUDE_DIR ?= /usr/local/include
+PROTOBUF_C_LIB_DIR ?= /usr/local/lib
 
 # Detect the operating system
 UNAME_S := $(shell uname -s)
@@ -43,7 +46,19 @@ JDK_LIB_PATH := $(JDK_HOME_PATH)/lib/server
 
 PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include
 PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include
-PG_LDFLAGS = -L$(JDK_LIB_PATH) -ljvm -lprotobuf-c
+PG_LDFLAGS = -L$(JDK_LIB_PATH) -ljvm
+
+
+ifeq ($(WITH_OLR),1)
+OBJS += src/backend/converter/olr_event_handler.o \
+		src/backend/olr/OraProtoBuf.pb-c.o \
+		src/backend/utils/netio_utils.o \
+		src/backend/olr/olr_client.o
+
+PG_LDFLAGS += -lprotobuf-c
+PG_CFLAGS += -DWITH_OLR
+PG_CPPFLAGS += -DWITH_OLR
+endif
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
@@ -55,6 +70,25 @@ top_builddir = ../..
 include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk
 endif
+
+check_protobufc:
+	@echo "Checking protobuf-c installation"
+	@if [ ! -d $(PROTOBUF_C_INCLUDE_DIR)/protobuf-c ]; then \
+      echo "Error: protobuf-c include path $(PROTOBUF_C_INCLUDE_DIR) not found"; \
+      echo "Hint: overwrite PROTOBUF_C_INCLUDE_DIR with correct path to protobuf-c include dir"; \
+      exit 1; \
+    fi
+	@if [ ! -f $(PROTOBUF_C_LIB_DIR)/libprotobuf-c.so.1.0.0 ]; then \
+      echo "Error:  $(PROTOBUF_C_LIB_DIR)/libprotobuf-c.so.1.0.0 not found"; \
+      echo "Hint: overwrite PROTOBUF_C_LIB_DIR with correct path to /libprotobuf-c.so.1.0.0"; \
+      exit 1; \
+    fi
+
+	@echo "protobuf-c Paths"
+	@echo "$(PROTOBUF_C_INCLUDE_DIR)/protobuf-c"
+	@echo "$(PROTOBUF_C_LIB_DIR)/libprotobuf-c.so.1.0.0"
+	@echo "protobuf-c check passed"
+
 
 # Target that checks JDK paths
 check_jdk:
