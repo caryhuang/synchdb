@@ -264,7 +264,8 @@ olr_client_confirm_scn(char * source)
 	request.code = OPEN_LOG_REPLICATOR__PB__REQUEST_CODE__CONFIRM;
 	request.database_name = source;
 	request.tm_val_case = OPEN_LOG_REPLICATOR__PB__REDO_REQUEST__TM_VAL_SCN;
-	request.scn = olr_client_get_c_scn();
+	request.scn = olr_client_get_scn();
+	request.c_scn = olr_client_get_c_scn();
 
 	len = open_log_replicator__pb__redo_request__get_packed_size(&request);
 	buf = palloc0(len + 4);

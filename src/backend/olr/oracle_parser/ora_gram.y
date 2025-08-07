@@ -6438,6 +6438,13 @@ ConstraintAttributeElem:
 			| INITIALLY DEFERRED			{ $$ = CAS_INITIALLY_DEFERRED; }
 			| NOT VALID						{ $$ = CAS_NOT_VALID; }
 			| NO INHERIT					{ $$ = CAS_NO_INHERIT; }
+/* added for synchdb - just a workaround, it does not really supprot enabled or disabled constraint */
+			| DISABLE_P						{ $$ = CAS_NOT_VALID; }
+			| ENABLE_P						{ $$ = CAS_DEFERRABLE; }
+			| ENABLE_P VALIDATE				{ $$ = CAS_DEFERRABLE; }
+//			| ENABLE_P NOVALIDATE			{ $$ = CAS_NOT_VALID; }
+			| DISABLE_P VALIDATE			{ $$ = CAS_DEFERRABLE; }
+//			| DISABLE NOVALIDATE			{ $$ = CAS_NOT_VALID; }
 		;
 
 

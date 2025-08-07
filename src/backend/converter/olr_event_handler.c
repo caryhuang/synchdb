@@ -41,6 +41,7 @@ static void * handle = NULL;
 
 static char * strtoupper(const char *input);
 static OlrType getOlrTypeFromString(const char * typestring);
+static void strip_after_column_def(StringInfoData *sql);
 static bool is_whitelist_sql(StringInfoData * sql);
 static HTAB * build_olr_schema_jsonpos_hash(Jsonb * jb);
 static void destroyOLRDDL(OLR_DDL * ddlinfo);
@@ -99,6 +100,36 @@ getOlrTypeFromString(const char * typestring)
 	return OLRTYPE_UNDEF;
 }
 
+void
+strip_after_column_def(StringInfoData *sql)
+{
+	int paren_level = 0;
+	int i;
+
+	if (!sql || !sql->data)
+		return;
+
+	for (i = 0; i < sql->len; ++i)
+	{
+		if (sql->data[i] == '(')
+		{
+			paren_level++;
+		}
+		else if (sql->data[i] == ')')
+		{
+			paren_level--;
+			if (paren_level == 0)
+			{
+				i++;  // include the closing ')'
+				break;
+			}
+		}
+	}
+	/* Truncate after position i */
+	sql->data[i] = '\0';
+	sql->len = i;
+}
+
 /*
  * is_whitelist_sql
  *
@@ -133,6 +164,13 @@ is_whitelist_sql(StringInfoData * sql)
 		allowed = true;
     }
 
+    /* special case for CREATE TABLE xxx (...) INITRANS 4 PCTFREE 10 ... */
+    if (strstr(sqlupper, "CREATE") && strstr(sqlupper, "TABLE"))
+    {
+    	/* we want to strip all of the post-column options */
+    	strip_after_column_def(sql);
+    	elog(WARNING, "sql after stripping = %s", sql->data);
+    }
     /*
      * we are only interested in the following DDL statements though Some of
      * these may not be parsed successfully by oracle parser. This is okay as
@@ -483,7 +521,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 
 			/* prepare to build primary key list */
 			initStringInfo(&pklist);
-			appendStringInfo(&pklist, "[");
 
 			/* Columns and constraints */
 			olrddl->type = DDL_CREATE_TABLE;
@@ -560,6 +597,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 					if (col->constraints)
 					{
 						elog(DEBUG1, "col %s has inline constraint", col->colname);
+						appendStringInfo(&pklist, "[");
 						foreach(constrCell, col->constraints)
 						{
 							Constraint *constr = (Constraint *) lfirst(constrCell);
@@ -580,13 +618,13 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 					            ddlcol->defaultValueExpression = nodeToString(constr->raw_expr);
 					            elog(DEBUG1, "default value %s", ddlcol->defaultValueExpression);
 					        }
-							else
+							else if (constr->contype == CONSTR_NOTNULL)
 							{
-								elog(DEBUG1, "unsupported constraint type %d", constr->contype);
-								destroyOLRDDL(olrddl);
-								olrddl = NULL;
-								goto end;
+								elog(DEBUG1, "col %s is not null", col->colname);
+								ddlcol->optional = false;
 							}
+							else
+								elog(DEBUG1, "unsupported constraint type %d", constr->contype);
 						}
 						pklist.data[pklist.len - 1] = '\0';
 						pklist.len = pklist.len - 1;
@@ -604,6 +642,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						ListCell * keys;
 
 						elog(DEBUG1, "found a primary key constraint");
+						appendStringInfo(&pklist, "[");
 						foreach(keys, constr->keys)
 						{
 							char *keycol = strVal(lfirst(keys));
@@ -614,17 +653,13 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						pklist.len = pklist.len - 1;
 						appendStringInfo(&pklist, "]");
 					}
-					else
-					{
-						elog(WARNING, "unsupported contraints type %d", constr->contype);
-						destroyOLRDDL(olrddl);
-						olrddl = NULL;
-						goto end;
-					}
 				}
 			}
-			elog(DEBUG1, "pks = %s", pklist.data);
-			olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+			if (pklist.len > 0)
+			{
+				elog(DEBUG1, "pks = %s", pklist.data);
+				olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+			}
 
 			if (pklist.data)
 				pfree(pklist.data);
@@ -655,7 +690,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 
 						/* prepare to build primary key list */
 						initStringInfo(&pklist);
-						appendStringInfo(&pklist, "[");
 
 						/* column name */
 						elog(DEBUG1, "  ADD COLUMN: %s", col->colname);
@@ -723,6 +757,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						if (col->constraints)
 						{
 							elog(DEBUG1, "col %s has inline constraint", col->colname);
+							appendStringInfo(&pklist, "[");
 							foreach(constrCell, col->constraints)
 							{
 								Constraint *constr = (Constraint *) lfirst(constrCell);
@@ -743,19 +778,20 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						            ddlcol->defaultValueExpression = nodeToString(constr->raw_expr);
 						            elog(DEBUG1, "default value %s", ddlcol->defaultValueExpression);
 						        }
-								else
+								else if (constr->contype == CONSTR_NOTNULL)
 								{
-									elog(DEBUG1, "unsupported constraint type %d", constr->contype);
-									destroyOLRDDL(olrddl);
-									olrddl = NULL;
-									goto end;
+									elog(DEBUG1, "col %s is not null", col->colname);
+									ddlcol->optional = false;
 								}
+								else
+									elog(DEBUG1, "unsupported constraint type %d", constr->contype);
 							}
 							pklist.data[pklist.len - 1] = '\0';
 							pklist.len = pklist.len - 1;
 							appendStringInfo(&pklist, "]");
 
-							olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+							if (pklist.len > 0)
+								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
 						}
 						if (pklist.data)
 							pfree(pklist.data);
@@ -779,7 +815,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 
 						/* prepare to build primary key list */
 						initStringInfo(&pklist);
-						appendStringInfo(&pklist, "[");
 
 						/* column name */
 						elog(DEBUG1, "MODIFY COLUMN: %s", cmd->name);
@@ -843,6 +878,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						if (col->constraints)
 						{
 							elog(DEBUG1, "col %s has inline constraint",cmd->name);
+							appendStringInfo(&pklist, "[");
 							foreach(constrCell, col->constraints)
 							{
 								Constraint *constr = (Constraint *) lfirst(constrCell);
@@ -863,19 +899,18 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						            ddlcol->defaultValueExpression = nodeToString(constr->raw_expr);
 						            elog(DEBUG1, "default value %s", ddlcol->defaultValueExpression);
 						        }
-								else
+								else if (constr->contype == CONSTR_NOTNULL)
 								{
-									elog(DEBUG1, "unsupported constraint type %d", constr->contype);
-									destroyOLRDDL(olrddl);
-									olrddl = NULL;
-									goto end;
+									elog(DEBUG1, "col %s is a not null", cmd->name);
+									ddlcol->optional = false;
 								}
 							}
 							pklist.data[pklist.len - 1] = '\0';
 							pklist.len = pklist.len - 1;
 							appendStringInfo(&pklist, "]");
 
-							olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+							if (pklist.len > 0)
+								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
 						}
 						break;
 					}
@@ -888,7 +923,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 
 						/* prepare to build primary key list */
 						initStringInfo(&pklist);
-						appendStringInfo(&pklist, "[");
 
 						if (constr->contype == CONSTR_PRIMARY)
 						{
@@ -896,6 +930,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 							elog(WARNING, "adding primary key constraint %s", constr->conname);
 
 							olrddl->constraintName = pstrdup(constr->conname);
+							appendStringInfo(&pklist, "[");
 							foreach(keys, constr->keys)
 							{
 								char *keycol = strVal(lfirst(keys));
@@ -906,7 +941,8 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 							pklist.len = pklist.len - 1;
 							appendStringInfo(&pklist, "]");
 
-							olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+							if (pklist.len > 0)
+								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
 						}
 						else
 						{
