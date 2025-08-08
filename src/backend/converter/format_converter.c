@@ -570,7 +570,7 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 
 	if (!jsonin)
 	{
-		elog(WARNING, "no valid primary key json");
+		elog(DEBUG1, "no valid primary key json");
 		return;
 	}
 
@@ -3269,7 +3269,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 	}
 	else
 	{
-		elog(WARNING, "unknown ddl type %d. Skipping attribute update", pgddl->type);
+		elog(DEBUG1, "unknown ddl type %d. Skipping attribute update", pgddl->type);
 		return;
 	}
 
