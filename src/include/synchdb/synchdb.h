@@ -42,6 +42,8 @@
 #define SYNCHDB_TRANSFORM_EXPRESSION_SIZE 256
 #define SYNCHDB_JSON_PATH_SIZE 128
 #define SYNCHDB_INVALID_BATCH_ID -1
+#define SYNCHDB_MAX_TZ_LEN 16
+#define SYNCHDB_MAX_TIMESTAMP_LEN 64
 
 #define SYNCHDB_PG_MAJOR_VERSION  PG_VERSION_NUM / 100
 
@@ -49,12 +51,20 @@
  * ex: 	pg_synchdb/[connector]_[name]_offsets.dat
  * 		pg_synchdb/mysql_mysqlconn_offsets.dat
  */
-#define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_offsets.dat"
+
+#define SYNCHDB_METADATA_DIR "pg_synchdb"
+#define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
+#define ORACLE_RAW_PARSER_LIB "liboracle_parser.so"
+#define MAX_PATH_LENGTH 1024
+#define MAX_JAVA_OPTION_LENGTH 256
+#define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_%s_offsets.dat"
 #define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
 #define SYNCHDB_ATTRIBUTE_TABLE "synchdb_attribute"
 #define SYNCHDB_OBJECT_MAPPING_TABLE "synchdb_objmap"
 #define SYNCHDB_ATTRIBUTE_VIEW "synchdb_att_view"
+
+typedef unsigned long long orascn;
 
 /* Enumerations */
 
@@ -67,6 +77,7 @@ typedef enum _connectorType
 	TYPE_MYSQL,
 	TYPE_ORACLE,
 	TYPE_SQLSERVER,
+	TYPE_OLR,
 } ConnectorType;
 
 /**
@@ -144,6 +155,34 @@ typedef enum _DbzLogLevels
 	LOG_LEVEL_OFF,
 	LOG_LEVEL_TRACE
 } DbzLogLevels;
+
+/*
+ * DDL_TYPE
+ *
+ * enum that represents supported DDL command types
+ */
+typedef enum _DdlType
+{
+	DDL_UNDEF,
+	DDL_CREATE_TABLE,
+	DDL_ALTER_TABLE,
+	DDL_DROP_TABLE
+} DdlType;
+
+/*
+ * DDL_TYPE
+ *
+ * enum that represents supported ALTER command sub types
+ */
+typedef enum _AlterSubType
+{
+	SUBTYPE_UNDEF,
+	SUBTYPE_ADD_COLUMN,
+	SUBTYPE_DROP_COLUMN,
+	SUBTYPE_ALTER_COLUMN,
+	SUBTYPE_ADD_CONSTRAINT,
+	SUBTYPE_DROP_CONSTRAINT
+} AlterSubType;
 
 /**
  * BatchInfo - Structure containing the metadata of a batch change request
