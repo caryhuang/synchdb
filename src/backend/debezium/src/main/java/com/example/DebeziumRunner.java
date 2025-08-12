@@ -51,6 +51,7 @@ public class DebeziumRunner {
 	final int TYPE_MYSQL = 1;
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
+	final int TYPE_OPENLOG_REPLICATOR = 4;
 	final int BATCH_QUEUE_SIZE = 5;
 	
 	final int LOG_LEVEL_UNDEF = 0;
@@ -462,7 +463,7 @@ public class DebeziumRunner {
 				props.setProperty("lob.enabled", "true");
 				props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
 
-				/* openlog replicator */
+				/* openlog replicator - via debezium */
 				if (myParameters.olrHost != null && myParameters.olrSource != null && myParameters.olrPort > 0)
 				{
 					props.setProperty("openlogreplicator.source", myParameters.olrSource);
@@ -475,6 +476,27 @@ public class DebeziumRunner {
 
 				break;
 			}
+			case TYPE_OPENLOG_REPLICATOR:
+            {
+				/* openlog replicator - native. Rely on debezium for initial snapshot only */
+                props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
+                offsetfile = "pg_synchdb/openlog_replicator_d_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+                schemahistoryfile = "pg_synchdb/openlog_replicator_d_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+                signalfile = "pg_synchdb/openlog_replicator_d_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
+
+                props.setProperty("database.dbname", myParameters.database);
+                if (myParameters.database.equals("null"))
+                    logger.warn("database is null - skip setting database.include.list property");
+                else
+                {
+                    props.setProperty("database.dbname", myParameters.database);
+                }
+                /* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
+                props.setProperty("schema.include.list", myParameters.user);
+                props.setProperty("lob.enabled", "true");
+                props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
+                break;
+            }
 			case TYPE_SQLSERVER:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");

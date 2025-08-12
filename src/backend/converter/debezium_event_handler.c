@@ -21,6 +21,9 @@
 #include "synchdb/synchdb.h"
 #include "converter/debezium_event_handler.h"
 #include "converter/format_converter.h"
+#ifdef WITH_OLR
+#include "olr/olr_client.h"
+#endif
 
 /* extern globals */
 extern int myConnectorId;
@@ -1511,6 +1514,49 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	    		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 	    }
 	    pfree(tmp);
+
+#ifdef WITH_OLR
+		elog(DEBUG1, "islastsnapshot %d, type %d", islastsnapshot, get_shm_connector_type_enum(myConnectorId));
+	    if (islastsnapshot && get_shm_connector_type_enum(myConnectorId) == TYPE_OLR)
+	    {
+			orascn scn = 0, c_scn = 0;
+			/*
+			 * OLR connector only - get this event's scn and c_scn and set to
+			 * OLR client so that it would start CDC from beyond this last
+			 * snapshot event
+			 */
+			v = getKeyJsonValueFromContainer(&source->root, "scn", strlen("scn"), &vbuf);
+			if (v && v->type != jbvNull)
+			{
+				if (v->type == jbvString)
+				{
+					tmp = pnstrdup(v->val.string.val, v->val.string.len);
+					elog(WARNING, "scn %s", tmp);
+					scn = strtoull(tmp, NULL, 10);
+					pfree(tmp);
+				}
+				else
+					elog(WARNING, "scn not a string...");
+			}
+
+			v = getKeyJsonValueFromContainer(&source->root, "commit_scn", strlen("commit_scn"), &vbuf);
+			if (v && v->type != jbvNull)
+			{
+				if (v->type == jbvString)
+				{
+					tmp = pnstrdup(v->val.string.val, v->val.string.len);
+					elog(WARNING, "commit_scn %s", tmp);
+					c_scn = strtoull(tmp, NULL, 10);
+					pfree(tmp);
+				}
+				else
+					elog(WARNING, "commit scn not a string...");
+			}
+			elog(WARNING, "last snapshot event is at: scn=%llu c_scn=%llu", scn, c_scn);
+
+			olr_client_set_scns(scn, c_scn > 0 ? c_scn : scn);
+	    }
+#endif
     }
     else
     {
@@ -1663,7 +1709,8 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	}
 
        	/* (5) clean up */
-    	set_shm_connector_state(myConnectorId, STATE_SYNCING);
+    	set_shm_connector_state(myConnectorId, (islastsnapshot && schemasync ?
+    			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);
     }

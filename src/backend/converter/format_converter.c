@@ -3293,18 +3293,6 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 void
 fc_initFormatConverter(ConnectorType connectorType)
 {
-	/* init data cache hash */
-	HASHCTL	info;
-
-	info.keysize = sizeof(DataCacheKey);
-	info.entrysize = sizeof(DataCacheEntry);
-	info.hcxt = CurrentMemoryContext;
-
-	dataCacheHash = hash_create("data cache hash",
-							 256,
-							 &info,
-							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-
 	switch (connectorType)
 	{
 		case TYPE_MYSQL:
@@ -3368,6 +3356,41 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 			elog(ERROR, "unsupported connector type");
 		}
 	}
+}
+
+void
+fc_initDataCache(void)
+{
+	/* init data cache hash */
+	HASHCTL	info;
+
+	info.keysize = sizeof(DataCacheKey);
+	info.entrysize = sizeof(DataCacheEntry);
+	info.hcxt = CurrentMemoryContext;
+
+	dataCacheHash = hash_create("data cache hash",
+							 256,
+							 &info,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+void
+fc_deinitDataCache(void)
+{
+	/* destroy data cache hash */
+	if (dataCacheHash)
+	{
+		hash_destroy(dataCacheHash);
+		dataCacheHash = NULL;
+	}
+}
+
+void
+fc_resetDataCache(void)
+{
+	/* deinit followed by another init */
+	fc_deinitDataCache();
+	fc_initDataCache();
 }
 
 bool

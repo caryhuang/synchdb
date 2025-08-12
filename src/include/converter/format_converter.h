@@ -196,6 +196,9 @@ typedef struct transformExpressionHashEntry
 ConnectorType fc_get_connector_type(const char * connector);
 void fc_initFormatConverter(ConnectorType connectorType);
 void fc_deinitFormatConverter(ConnectorType connectorType);
+void fc_initDataCache(void);
+void fc_deinitDataCache(void);
+void fc_resetDataCache(void);
 bool fc_load_objmap(const char * name, ConnectorType connectorType);
 char * escapeSingleQuote(const char * in, bool addquote);
 int getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool removequotes);
