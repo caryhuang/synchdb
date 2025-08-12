@@ -33,6 +33,7 @@ extern int myConnectorId;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 extern HTAB * dataCacheHash;
+extern char * dbz_skipped_operations;
 
 /* Oracle raw parser function prototype */
 typedef List * (*oracle_raw_parser_fn)(const char *str, RawParseMode mode);
@@ -184,6 +185,9 @@ is_whitelist_sql(StringInfoData * sql)
     	allowed = true;
 
     if (strstr(sqlupper, "ALTER") && strstr(sqlupper, "TABLE"))
+    	allowed = true;
+
+    if (strstr(sqlupper, "TRUNCATE") && strstr(sqlupper, "TABLE"))
     	allowed = true;
 
     pfree(sqlupper);
@@ -974,6 +978,16 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 			if (dropStmt->removeType == OBJECT_TABLE)
 			{
 				ListCell *objCell;
+				/* we only expect one entry from this list */
+				if (list_length(dropStmt->objects) > 1)
+				{
+					elog(WARNING, "drop more than 1 table is not supported (%d)",
+							list_length(dropStmt->objects));
+					destroyOLRDDL(olrddl);
+					olrddl = NULL;
+					goto end;
+				}
+
 				foreach(objCell, dropStmt->objects)
 				{
 					List *names = (List *) lfirst(objCell);
@@ -990,6 +1004,44 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 			}
 			else
 				elog(DEBUG1, "unsupported drop type %d", dropStmt->removeType);
+		}
+		else if (IsA(stmt, TruncateStmt))
+		{
+			TruncateStmt *truncateStmt = (TruncateStmt *)stmt;
+			ListCell *objCell;
+			olrddl->type = DDL_TRUNCATE_TABLE;
+
+			if (strstr(dbz_skipped_operations, "t"))
+			{
+				elog(WARNING, "truncate support is not enabled. Remove 't' from "
+						"dbz_skipped_operations GUC to support it");
+				destroyOLRDDL(olrddl);
+				olrddl = NULL;
+				goto end;
+			}
+
+			/* we only expect one entry from this list */
+			if (list_length(truncateStmt->relations) > 1)
+			{
+				elog(WARNING, "truncate more than 1 relations is not supported (%d)",
+						list_length(truncateStmt->relations));
+				destroyOLRDDL(olrddl);
+				olrddl = NULL;
+				goto end;
+			}
+
+			foreach (objCell, truncateStmt->relations)
+			{
+				RangeVar *rv = lfirst(objCell);
+				elog(WARNING, "truncate rv.relname %s", rv->relname);
+
+				/* replace table with the new value to be truncated */
+				if(table)
+				{
+					pfree(table);
+					table = pstrdup(rv->relname);
+				}
+			}
 		}
 		else
 		{
