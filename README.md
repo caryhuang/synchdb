@@ -34,7 +34,8 @@ The following software is required to build and run SynchDB. The versions listed
 * Docker compose 2.28.1 (for testing). Refer to [here](https://docs.docker.com/compose/install/linux/)
 * Unix based operating system like Ubuntu 22.04 or MacOS
 
-### Additional Requirement for Openlog Replicator Connector Support (if enabled in build)
+**Additional Requirement for Openlog Replicator Connector Support (if enabled in build)**
+
 * libprotobuf-c v1.5.2. Refer to [here](https://github.com/protobuf-c/protobuf-c.git) to build from source.
 
 ## Build Procedure
@@ -53,29 +54,26 @@ git clone https://github.com/Hornetlabs/synchdb.git
 ```
 
 ### Prepare Tools & Dependencies
-#### Maven
-If you are working on Ubuntu 22.04.4 LTS, install the Maven as below:
+#### --> Maven
 ``` BASH
+## on Ubuntu
 sudo apt install maven
-```
 
-if you are using MacOS, you can use the brew command to install maven (refer (here)[https://brew.sh/] for how to install Homebrew) without any other settings:
-``` BASH
+## on MacOS
 brew install maven
 ```
 
-#### Install Java (OpenJDK)
+#### --> Java (OpenJDK)
 If you are working on Ubuntu 22.04.4 LTS, install the OpenJDK  as below:
 ``` BASH
+## on Ubuntu
 sudo apt install openjdk-21-jdk
-```
 
-If you are working on MacOS, please install the JDK with brew command:
-``` BASH
+## on MacOS
 brew install openjdk@22
 ```
 
-#### Build and Install libprotobuf-c (optional)
+#### --> libprotobuf-c (optional)
 This library is needed if SynchDB is to be built with openlog replicator support.
 
 ``` BASH
@@ -106,7 +104,7 @@ sudo make install
 
 ### Build SynchDB Main Components
 
-#### Build Debezium Runner Engine
+#### --> Build Debezium Runner Engine
 The commands below build and install the Debezium Runner Engine jar file to your PostgreSQL's lib folder.
 
 ``` BASH
@@ -115,7 +113,7 @@ make build_dbz
 sudo make install_dbz
 ```
 
-#### Build Oracle Parser (optional)
+#### --> Build Oracle Parser (optional)
 This Oracle parser (a shared library) is a modified and isoalted version of IvorySQL's Oracle parser required by openlog replicator to process incoming Oracle DDL statements. The commands below install Oracle Parser to your PostgreSQL's lib folder.
 
 Required if SynchDB is built with openlog replicator support.
@@ -127,7 +125,7 @@ make oracle_parser
 sudo make install_oracle_parser
 ```
 
-#### Build SynchDB
+#### --> Build SynchDB
 The commands below build and install SynchDB extension to your PostgreSQL's lib and share folder.
 
 ``` BASH
@@ -136,7 +134,7 @@ make
 sudo make install
 ```
 
-#### Build SynchDB with openlog replicator support (optional)
+SynchDB can be built with additional Openlog Replicator Connector support
 
 ```BASH
 cd /home/$USER/postgres/contrib/synchdb
