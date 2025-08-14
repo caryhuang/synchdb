@@ -33,6 +33,7 @@ extern int myConnectorId;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 extern HTAB * dataCacheHash;
+extern char * dbz_skipped_operations;
 
 /* Oracle raw parser function prototype */
 typedef List * (*oracle_raw_parser_fn)(const char *str, RawParseMode mode);
@@ -169,7 +170,7 @@ is_whitelist_sql(StringInfoData * sql)
     {
     	/* we want to strip all of the post-column options */
     	strip_after_column_def(sql);
-    	elog(WARNING, "sql after stripping = %s", sql->data);
+    	elog(DEBUG1, "sql after stripping = %s", sql->data);
     }
     /*
      * we are only interested in the following DDL statements though Some of
@@ -184,6 +185,9 @@ is_whitelist_sql(StringInfoData * sql)
     	allowed = true;
 
     if (strstr(sqlupper, "ALTER") && strstr(sqlupper, "TABLE"))
+    	allowed = true;
+
+    if (strstr(sqlupper, "TRUNCATE") && strstr(sqlupper, "TABLE"))
     	allowed = true;
 
     pfree(sqlupper);
@@ -457,37 +461,26 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 	/* Parse the Oracle SQL */
 	PG_TRY();
 	{
-		elog(WARNING, "parsing %s", sql.data);
 		ptree = oracle_raw_parser(sql.data, RAW_PARSE_DEFAULT);
-		if (!ptree)
-		{
-			elog(WARNING, "failed to parse: '%s'", sql.data);
-			destroyOLRDDL(olrddl);
-			olrddl = NULL;
-			goto end;
-		}
 	}
 	PG_CATCH();
 	{
 		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
 		ErrorData  *errdata = CopyErrorData();
 
+		elog(WARNING, "skipping bad DDL statement: '%s'", sql.data);
 		if (errdata)
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "%s.%s: %s | %s",
-					errdata->schema_name == NULL ? "" : errdata->schema_name,
-					errdata->table_name == NULL ? "" : errdata->table_name,
-					errdata->message,
-					errdata->detail == NULL ? "" : errdata->detail);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "    reason: %s",
+					errdata->message);
 			elog(WARNING, "%s", msg);
 			pfree(msg);
 		}
 		FreeErrorData(errdata);
 		MemoryContextSwitchTo(oldctx);
+		FlushErrorState();
 
-		FlushErrorState();  // clear the error
-		elog(WARNING, "failed to parse: '%s'", sql.data);
 		destroyOLRDDL(olrddl);
 		olrddl = NULL;
 		goto end;
@@ -524,6 +517,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 
 			/* Columns and constraints */
 			olrddl->type = DDL_CREATE_TABLE;
+			appendStringInfo(&pklist, "[");
 			foreach(colCell, createStmt->tableElts)
 			{
 				Node *elt = (Node *) lfirst(colCell);
@@ -597,7 +591,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 					if (col->constraints)
 					{
 						elog(DEBUG1, "col %s has inline constraint", col->colname);
-						appendStringInfo(&pklist, "[");
 						foreach(constrCell, col->constraints)
 						{
 							Constraint *constr = (Constraint *) lfirst(constrCell);
@@ -626,9 +619,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 							else
 								elog(DEBUG1, "unsupported constraint type %d", constr->contype);
 						}
-						pklist.data[pklist.len - 1] = '\0';
-						pklist.len = pklist.len - 1;
-						appendStringInfo(&pklist, "]");
 					}
 					olrddl->columns = lappend(olrddl->columns, ddlcol);
 				}
@@ -642,21 +632,21 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						ListCell * keys;
 
 						elog(DEBUG1, "found a primary key constraint");
-						appendStringInfo(&pklist, "[");
 						foreach(keys, constr->keys)
 						{
 							char *keycol = strVal(lfirst(keys));
 							elog(DEBUG1, "  -> PK Column: %s", keycol);
 							appendStringInfo(&pklist, "\"%s\",", keycol);
 						}
-						pklist.data[pklist.len - 1] = '\0';
-						pklist.len = pklist.len - 1;
-						appendStringInfo(&pklist, "]");
 					}
 				}
 			}
-			if (pklist.len > 0)
+
+			if (pklist.len > 1)	/* longer than '[' */
 			{
+				pklist.data[pklist.len - 1] = '\0';
+				pklist.len = pklist.len - 1;
+				appendStringInfo(&pklist, "]");
 				elog(DEBUG1, "pks = %s", pklist.data);
 				olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
 			}
@@ -786,12 +776,14 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 								else
 									elog(DEBUG1, "unsupported constraint type %d", constr->contype);
 							}
-							pklist.data[pklist.len - 1] = '\0';
-							pklist.len = pklist.len - 1;
-							appendStringInfo(&pklist, "]");
 
-							if (pklist.len > 0)
+							if (pklist.len > 1)	/* longer than '[' */
+							{
+								pklist.data[pklist.len - 1] = '\0';
+								pklist.len = pklist.len - 1;
+								appendStringInfo(&pklist, "]");
 								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+							}
 						}
 						if (pklist.data)
 							pfree(pklist.data);
@@ -802,7 +794,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 					{
 						ddlcol = (OLR_DDL_COLUMN *) palloc0(sizeof(OLR_DDL_COLUMN));
 
-						elog(WARNING, "DROP COLUMN: %s", cmd->name);
+						elog(DEBUG1, "DROP COLUMN: %s", cmd->name);
 						olrddl->subtype = SUBTYPE_DROP_COLUMN;
 						ddlcol->name = pstrdup(cmd->name);
 						break;
@@ -905,12 +897,13 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 									ddlcol->optional = false;
 								}
 							}
-							pklist.data[pklist.len - 1] = '\0';
-							pklist.len = pklist.len - 1;
-							appendStringInfo(&pklist, "]");
-
-							if (pklist.len > 0)
+							if (pklist.len > 1)	/* longer than '[' */
+							{
+								pklist.data[pklist.len - 1] = '\0';
+								pklist.len = pklist.len - 1;
+								appendStringInfo(&pklist, "]");
 								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+							}
 						}
 						break;
 					}
@@ -927,7 +920,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 						if (constr->contype == CONSTR_PRIMARY)
 						{
 							ListCell * keys;
-							elog(WARNING, "adding primary key constraint %s", constr->conname);
+							elog(DEBUG1, "adding primary key constraint %s", constr->conname);
 
 							olrddl->constraintName = pstrdup(constr->conname);
 							appendStringInfo(&pklist, "[");
@@ -937,12 +930,14 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 								elog(DEBUG1, "  -> PK Column: %s", keycol);
 								appendStringInfo(&pklist, "\"%s\",", keycol);
 							}
-							pklist.data[pklist.len - 1] = '\0';
-							pklist.len = pklist.len - 1;
-							appendStringInfo(&pklist, "]");
 
-							if (pklist.len > 0)
+							if (pklist.len > 1)	/* longer than '[' */
+							{
+								pklist.data[pklist.len - 1] = '\0';
+								pklist.len = pklist.len - 1;
+								appendStringInfo(&pklist, "]");
 								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+							}
 						}
 						else
 						{
@@ -983,6 +978,16 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 			if (dropStmt->removeType == OBJECT_TABLE)
 			{
 				ListCell *objCell;
+				/* we only expect one entry from this list */
+				if (list_length(dropStmt->objects) > 1)
+				{
+					elog(WARNING, "drop more than 1 table is not supported (%d)",
+							list_length(dropStmt->objects));
+					destroyOLRDDL(olrddl);
+					olrddl = NULL;
+					goto end;
+				}
+
 				foreach(objCell, dropStmt->objects)
 				{
 					List *names = (List *) lfirst(objCell);
@@ -999,6 +1004,44 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 			}
 			else
 				elog(DEBUG1, "unsupported drop type %d", dropStmt->removeType);
+		}
+		else if (IsA(stmt, TruncateStmt))
+		{
+			TruncateStmt *truncateStmt = (TruncateStmt *)stmt;
+			ListCell *objCell;
+			olrddl->type = DDL_TRUNCATE_TABLE;
+
+			if (strstr(dbz_skipped_operations, "t"))
+			{
+				elog(WARNING, "truncate support is not enabled. Remove 't' from "
+						"dbz_skipped_operations GUC to support it");
+				destroyOLRDDL(olrddl);
+				olrddl = NULL;
+				goto end;
+			}
+
+			/* we only expect one entry from this list */
+			if (list_length(truncateStmt->relations) > 1)
+			{
+				elog(WARNING, "truncate more than 1 relations is not supported (%d)",
+						list_length(truncateStmt->relations));
+				destroyOLRDDL(olrddl);
+				olrddl = NULL;
+				goto end;
+			}
+
+			foreach (objCell, truncateStmt->relations)
+			{
+				RangeVar *rv = lfirst(objCell);
+				elog(WARNING, "truncate rv.relname %s", rv->relname);
+
+				/* replace table with the new value to be truncated */
+				if(table)
+				{
+					pfree(table);
+					table = pstrdup(rv->relname);
+				}
+			}
 		}
 		else
 		{
@@ -1870,6 +1913,32 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	elog(DEBUG1, "op is %s", op);
 	if (!strcasecmp(op, "begin") || !strcasecmp(op, "commit"))
 	{
+		orascn scn = 0, c_scn = 0;
+
+		/* scn - required */
+		v = getKeyJsonValueFromContainer(&jb->root, "scn", strlen("scn"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed change request - no scn value");
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
+		scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
+
+		/* commit scn - required */
+		v = getKeyJsonValueFromContainer(&jb->root, "c_scn", strlen("c_scn"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed change request - no c_scn value");
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
+		c_scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
+
 		/* transaction boundary */
 		if (!strcasecmp(op, "begin"))
 		{
@@ -1908,6 +1977,9 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			gettimeofday(&tv, NULL);
 			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
+
+    	olr_client_set_scns(scn, c_scn);
+    	*sendconfirm = true;
 	}
 	else if (!strcasecmp(op, "c") || !strcasecmp(op, "u") || !strcasecmp(op, "d"))
 	{

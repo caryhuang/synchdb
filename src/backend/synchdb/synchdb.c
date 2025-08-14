@@ -166,6 +166,9 @@ static void cleanup(ConnectorType connectorType);
 static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass,
 		const ExtraConnectionInfo * extraConnInfo, const OLRConnectionInfo * olrConnInfo);
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
+#ifdef WITH_OLR
+static void is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * snapshot, bool * cdc);
+#endif
 
 /*
  * count_active_connectors
@@ -1838,7 +1841,8 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 					memset(&myBatchStats, 0, sizeof(myBatchStats));
 
 					dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
-							&myBatchInfo, &myBatchStats, connInfo->isShcemaSync);
+							&myBatchInfo, &myBatchStats,
+							(connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE));
 
 					/*
 					 * if a valid batchid is set by dbz_engine_get_change(), it means we have
@@ -1859,38 +1863,26 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 #ifdef WITH_OLR
 				else
 				{
-					int ret = -1;
-					bool sendconfirm = false;
-
-					/* check if connection is still alive */
-					if (olr_client_get_connect_status())
+					if (connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE)
 					{
-						/* todo: support different snapshot mode */
+						/* continuously poll change events via Debezium */
+						/* reset batchinfo and batchStats*/
+						myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
+						myBatchInfo.batchSize = 0;
 						memset(&myBatchStats, 0, sizeof(myBatchStats));
-						ret = olr_client_get_change(myConnectorId, &dbzExitSignal, &myBatchStats,
-								&sendconfirm);
 
-						/* send confirm message to OLR if it is necessary */
-						if (sendconfirm)
+						dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
+								&myBatchInfo, &myBatchStats, true);
+
+						/*
+						 * if a valid batchid is set by dbz_engine_get_change(), it means we have
+						 * successfully completed a batch change request and we shall notify dbz
+						 * that it's been completed.
+						 */
+						if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
 						{
-							elog(DEBUG1, "successfully applied - send confirm message for "
-									"scn %llu and c_scn %llu", olr_client_get_scn(),
-									olr_client_get_c_scn());
+							dbz_mark_batch_complete(myBatchInfo.batchId);
 
-							olr_client_confirm_scn(connInfo->srcdb);
-
-							/*
-							 * flush scn if needed - if a flush happens, we also set it to
-							 * shared memory to display to user
-							 */
-							if (olr_client_write_scn_state(connectorType, connInfo->name,
-									connInfo->dstdb, false))
-								set_shm_dbz_offset(myConnectorId);
-						}
-
-						/* update statistics if at least one batch is attempted (ret != -2) */
-						if (ret != -2)
-						{
 							/* increment batch connector statistics */
 							increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
 
@@ -1900,42 +1892,94 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 					}
 					else
 					{
-						/*
-						 * peer has disconnected, let's retry connection again with
-						 * a little bit of delay in between...
-						 */
-						sleep(3);
-						elog(WARNING, "reconnecting...");
-						if (olr_client_init(connInfo->hostname, connInfo->port))
-							elog(DEBUG1, "failed to reconnect");
-						else
-						{
-							elog(WARNING, "reconnected, request replication...");
+						int ret = -1;
+						bool sendconfirm = false;
 
-							/* connInfo.srcdb is used as data source for OLR */
-							ret = olr_client_start_or_cont_replication(connInfo->srcdb, true);
-							if (ret == -1)
+						/* is cdc even needed? */
+						if (connInfo->flag & CONNFLAG_NO_CDC_MODE)
+						{
+							elog(WARNING, "CDC is not requested under snapshot mode %s",
+									snapshotMode);
+							set_shm_connector_errmsg(myConnectorId, "CDC is not requested");
+							dbzExitSignal = true;
+							break;
+						}
+
+						/* check if connection is still alive */
+						if (olr_client_get_connect_status())
+						{
+							/* todo: support different snapshot mode */
+							memset(&myBatchStats, 0, sizeof(myBatchStats));
+							ret = olr_client_get_change(myConnectorId, &dbzExitSignal, &myBatchStats,
+									&sendconfirm);
+
+							/* send confirm message to OLR if it is necessary */
+							if (sendconfirm)
 							{
-								set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
-								elog(ERROR, "failed to start replication with olr server");
+								elog(DEBUG1, "successfully applied - send confirm message for "
+										"scn %llu and c_scn %llu", olr_client_get_scn(),
+										olr_client_get_c_scn());
+
+								olr_client_confirm_scn(connInfo->olr.olr_source);
+
+								/*
+								 * flush scn if needed - if a flush happens, we also set it to
+								 * shared memory to display to user
+								 */
+								if (olr_client_write_scn_state(connectorType, connInfo->name,
+										connInfo->dstdb, false))
+									set_shm_dbz_offset(myConnectorId);
 							}
 
-							if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
+							/* update statistics if at least one batch is attempted (ret != -2) */
+							if (ret != -2)
 							{
-								elog(WARNING, "replication already started or starting - sending continue");
-								ret = olr_client_start_or_cont_replication(connInfo->srcdb, false);
+								/* increment batch connector statistics */
+								increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+
+								/* update the batch statistics to shared memory */
+								set_shm_connector_statistics(myConnectorId, &myBatchStats);
+							}
+						}
+						else
+						{
+							/*
+							 * peer has disconnected, let's retry connection again with
+							 * a little bit of delay in between...
+							 */
+							sleep(3);
+							elog(WARNING, "reconnecting...");
+							if (olr_client_init(connInfo->olr.olr_host, connInfo->olr.olr_port))
+								elog(DEBUG1, "failed to reconnect");
+							else
+							{
+								elog(WARNING, "reconnected, request replication...");
+
+								/* connInfo.srcdb is used as data source for OLR */
+								ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, true);
 								if (ret == -1)
 								{
 									set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
 									elog(ERROR, "failed to start replication with olr server");
 								}
-							}
-							if (ret == RES_REPLICATE)
-								elog(WARNING, "replication requested...");
-							else
-							{
-								set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate after reconnection");
-								elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
+
+								if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
+								{
+									elog(WARNING, "replication already started or starting - sending continue");
+									ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, false);
+									if (ret == -1)
+									{
+										set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+										elog(ERROR, "failed to start replication with olr server");
+									}
+								}
+								if (ret == RES_REPLICATE)
+									elog(WARNING, "replication requested...");
+								else
+								{
+									set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate after reconnection");
+									elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
+								}
 							}
 						}
 					}
@@ -1956,11 +2000,49 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 			}
 			case STATE_SCHEMA_SYNC_DONE:
 			{
+#ifdef WITH_OLR
 				if (connectorType == TYPE_OLR)
 				{
-					elog(ERROR, "OLR - schema sync not supported yet");
+					/*
+					 * when schema sync is done, we will just shutdown debezium and destroy
+					 * the JVM as we will then launch openlog replicator client to resume
+					 * with CDC. Also, we need to update offset file to indicate that the
+					 * snapshot has completed and clear the data cache.
+					 */
+
+					if (!olr_client_write_snapshot_state(connectorType, connInfo->name,
+							connInfo->dstdb, true))
+					{
+						elog(WARNING, "failed to write snapshot state...");
+					}
+
+					elog(WARNING, "shut down dbz engine...");
+					if (dbz_engine_stop())
+					{
+						elog(WARNING, "failed to stop dbz engine...");
+					}
+
+					/* destroy JVM */
+					elog(WARNING, "destroying jvm...");
+					(*jvm)->DetachCurrentThread(jvm);
+					(*jvm)->DestroyJavaVM(jvm);
+
+					/* change snapshot mode back to normal */
+					if (snapshotMode)
+					{
+						pfree(snapshotMode);
+						snapshotMode = pstrdup("initial");
+					}
+
+					/* destroy the data cache created during dbz based snapshot */
+					fc_resetDataCache();
+
+					/* exit schema sync mode */
+					connInfo->flag &= ~CONNFLAG_SCHEMA_SYNC_MODE;
+					set_shm_connector_state(myConnectorId, STATE_SYNCING);
 				}
 				else
+#endif
 				{
 					/*
 					 * when schema sync is done, we will put connector into pause state so the user
@@ -1978,7 +2060,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						snapshotMode = pstrdup("initial");
 					}
 					/* exit schema sync mode */
-					connInfo->isShcemaSync = false;
+					connInfo->flag &= ~CONNFLAG_SCHEMA_SYNC_MODE;
 					set_shm_connector_state(myConnectorId, STATE_PAUSED);
 				}
 				break;
@@ -2040,6 +2122,7 @@ cleanup(ConnectorType connectorType)
 		}
 	}
 	fc_deinitFormatConverter(connectorType);
+	fc_deinitDataCache();
 }
 
 /*
@@ -2516,6 +2599,37 @@ set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats)
 
 	LWLockRelease(&sdb_state->lock);
 }
+#ifdef WITH_OLR
+static void
+is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * snapshot, bool * cdc)
+{
+	if (!strcasecmp(snapshotMode, "initial"))
+	{
+		*snapshot = isSnapshotDone ? false : true;
+		*cdc = true;
+	}
+	else if (!strcasecmp(snapshotMode, "initial_only"))
+	{
+		*snapshot = isSnapshotDone ? false : true;
+		*cdc = false;
+	}
+	else if (!strcasecmp(snapshotMode, "no_data"))
+	{
+		*snapshot = isSnapshotDone ? false : true;
+		*cdc = true;
+	}
+	else if (!strcasecmp(snapshotMode, "always"))
+	{
+		*snapshot = true;
+		*cdc = true;
+	}
+	else if (!strcasecmp(snapshotMode, "never"))
+	{
+		*snapshot = false;
+		*cdc = true;
+	}
+}
+#endif
 
 /*
  * increment_connector_statistics - increment statistics
@@ -2564,6 +2678,33 @@ increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics 
 	}
 }
 
+/*
+ * get_shm_connector_type - Get the connector type in enum
+ *
+ * This function gets specified connector type.
+ *
+ * @param connectorId: Connector ID of interest
+ *
+ * @return ConnectorType enum
+ */
+ConnectorType
+get_shm_connector_type_enum(int connectorId)
+{
+	ConnectorType type;
+
+	if (!sdb_state)
+		return TYPE_UNDEF;
+
+	/*
+	 * We're only reading, so shared lock is sufficient.
+	 * This ensures thread-safety without blocking other readers.
+	 */
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	type = sdb_state->connectors[connectorId].type;
+	LWLockRelease(&sdb_state->lock);
+
+	return type;
+}
 
 /*
  * get_shm_connector_stage_enum - Get the current connector stage in enum
@@ -3057,8 +3198,9 @@ synchdb_engine_main(Datum main_arg)
 	set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 	set_shm_connector_errmsg(myConnectorId, NULL);
 
-	/* initialize format converter */
+	/* initialize format converter and its cache */
 	fc_initFormatConverter(connectorType);
+	fc_initDataCache();
 
 	/* load custom object mappings */
 	fc_load_objmap(connInfo.name, connectorType);
@@ -3082,74 +3224,116 @@ synchdb_engine_main(Datum main_arg)
 #ifdef WITH_OLR
 	else
 	{
-		int ret = -1;
+		bool isSnapshotDone = false;
+		bool snapshot = false, cdc = false;
 
-		/* read resume scn if exists */
-		if (!olr_client_init_scn_state(connectorType, connInfo.name, connInfo.dstdb))
-			elog(WARNING, "scn file not flushed yet");
+		if (!olr_client_read_snapshot_state(connectorType, connInfo.name,
+				connInfo.dstdb, &isSnapshotDone))
+		{
+			elog(WARNING, "Snapshot file absent. Assuming snapshot is not done...");
+		}
+
+		is_snapshot_cdc_needed(snapshotMode, isSnapshotDone, &snapshot, &cdc);
+
+		elog(WARNING,"snapshot mode %s: isSnapshotDone %d, snapshot %d, cdc %d",
+				snapshotMode, isSnapshotDone, snapshot, cdc);
+
+		/* set no cdc flag is requested */
+		if (!cdc)
+			connInfo.flag |= CONNFLAG_NO_CDC_MODE;
+
+		if (snapshot)
+		{
+			/* use schemasync mode here */
+			connInfo.flag |= CONNFLAG_SCHEMA_SYNC_MODE;
+
+			/* Initialize JVM */
+			initialize_jvm(&connInfo.jmx);
+
+			/* start Debezium engine */
+			start_debezium_engine(connectorType, &connInfo, snapshotMode);
+
+			elog(LOG, "Going to main loop .... ");
+			/* Main processing loop */
+			main_loop(connectorType, &connInfo, snapshotMode);
+		}
 		else
 		{
-			/* set current scn offset in shared memory for state display */
-			memset(sdb_state->connectors[myConnectorId].dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
-			set_shm_dbz_offset(myConnectorId);
-		}
+			int ret = -1;
 
-		ret = olr_client_init(connInfo.hostname, connInfo.port);
-		if (ret)
-		{
-			set_shm_connector_errmsg(myConnectorId, "failed to init and connect to olr server");
-			elog(ERROR, "failed to init and connect to olr server");
-		}
+			if (connInfo.flag & CONNFLAG_NO_CDC_MODE)
+			{
+				elog(WARNING, "CDC is not requested in snapshot mode '%s'. Exit...", snapshotMode);
+				set_shm_connector_errmsg(myConnectorId, "CDC not requested");
+				proc_exit(0);
+			}
+			/* read resume scn if exists */
+			if (!olr_client_init_scn_state(connectorType, connInfo.name, connInfo.dstdb))
+				elog(WARNING, "scn file not flushed yet");
+			else
+			{
+				/* set current scn offset in shared memory for state display */
+				memset(sdb_state->connectors[myConnectorId].dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
+				set_shm_dbz_offset(myConnectorId);
+			}
 
-		/* connInfo.srcdb is used as data source for OLR */
-		ret = olr_client_start_or_cont_replication(connInfo.srcdb, true);
-		if (ret == -1)
-		{
-			set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
-			elog(ERROR, "failed to start replication with olr server");
-		}
+			ret = olr_client_init(connInfo.olr.olr_host, connInfo.olr.olr_port);
+			if (ret)
+			{
+				set_shm_connector_errmsg(myConnectorId, "failed to init and connect to olr server");
+				elog(ERROR, "failed to init and connect to olr server");
+			}
 
-		if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
-		{
-			elog(WARNING, "replication already started or starting - sending continue");
-			ret = olr_client_start_or_cont_replication(connInfo.srcdb, false);
+			/* connInfo.srcdb is used as data source for OLR */
+			ret = olr_client_start_or_cont_replication(connInfo.olr.olr_source, true);
 			if (ret == -1)
 			{
 				set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
 				elog(ERROR, "failed to start replication with olr server");
 			}
-		}
 
-		if (ret == RES_REPLICATE)
-		{
-			set_shm_connector_state(myConnectorId, STATE_SYNCING);
+			if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
+			{
+				elog(WARNING, "replication already started or starting - sending continue");
+				ret = olr_client_start_or_cont_replication(connInfo.olr.olr_source, false);
+				if (ret == -1)
+				{
+					set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+					elog(ERROR, "failed to start replication with olr server");
+				}
+			}
 
-			elog(LOG, "Going to main loop .... ");
-			main_loop(connectorType, &connInfo, snapshotMode);
+			if (ret == RES_REPLICATE)
+			{
+				set_shm_connector_state(myConnectorId, STATE_SYNCING);
+
+				elog(LOG, "Going to main loop .... ");
+				main_loop(connectorType, &connInfo, snapshotMode);
+			}
+			else if (ret == RES_INVALID_DATABASE)
+			{
+				set_shm_connector_errmsg(myConnectorId, "invalid data source requested");
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid data source requested"),
+						 errhint("make sure srcdb matches data source set in openlog replicator")));
+			}
+			else if (ret == RES_INVALID_COMMAND)
+			{
+				set_shm_connector_errmsg(myConnectorId, "invalid OLR command");
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid OLR command"),
+						 errhint("check the openlog replicator protocol version for potential protocol "
+								 "incompatibility")));
+			}
+			else
+			{
+				set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate");
+				elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
+			}
+			olr_client_shutdown();
 		}
-		else if (ret == RES_INVALID_DATABASE)
-		{
-			set_shm_connector_errmsg(myConnectorId, "invalid data source requested");
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("invalid data source requested"),
-					 errhint("make sure srcdb matches data source set in openlog replicator")));
-		}
-		else if (ret == RES_INVALID_COMMAND)
-		{
-			set_shm_connector_errmsg(myConnectorId, "invalid OLR command");
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("invalid OLR command"),
-					 errhint("check the openlog replicator protocol version for potential protocol "
-							 "incompatibility")));
-		}
-		else
-		{
-			set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate");
-			elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
-		}
-		olr_client_shutdown();
 	}
 #else
 	else
@@ -3198,9 +3382,22 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	if (!strcasecmp(_snapshotMode, "schemasync"))
 	{
 		_snapshotMode = "no_data";
-		connInfo.isShcemaSync = true;
+		connInfo.flag |= CONNFLAG_SCHEMA_SYNC_MODE;
 	}
 
+#ifdef WITH_OLR
+	/* check if OLR conninfo exists and warn user to add it as needed */
+	if (fc_get_connector_type(connector) == TYPE_OLR &&
+		(strlen(connInfo.olr.olr_host) == 0 ||
+		strlen(connInfo.olr.olr_source) == 0 ||
+		connInfo.olr.olr_port <= 0))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("OLR conninfo is missing"),
+				 errhint("use synchdb_add_olr_conninfo to add it")));
+	}
+#endif
 	/*
 	 * attach or initialize synchdb shared memory area so we can assign
 	 * a connector ID for this worker
@@ -3290,6 +3487,19 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 				 errmsg("connection name does not exist"),
 				 errhint("use synchdb_add_conninfo to add one first")));
 
+#ifdef WITH_OLR
+	/* check if OLR conninfo exists and warn user to add it as needed */
+	if (fc_get_connector_type(connector) == TYPE_OLR &&
+		(strlen(connInfo.olr.olr_host) == 0 ||
+		strlen(connInfo.olr.olr_source) == 0 ||
+		connInfo.olr.olr_port <= 0))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("OLR conninfo is missing"),
+				 errhint("use synchdb_add_olr_conninfo to add it")));
+	}
+#endif
 	/*
 	 * attach or initialize synchdb shared memory area so we can assign
 	 * a connector ID for this worker

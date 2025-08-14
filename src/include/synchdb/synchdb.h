@@ -58,6 +58,7 @@
 #define MAX_PATH_LENGTH 1024
 #define MAX_JAVA_OPTION_LENGTH 256
 #define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_%s_offsets.dat"
+#define SYNCHDB_SCHEMA_FILE_PATTERN "pg_synchdb/%s_%s_%s_schemahistory.dat"
 #define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
 #define SYNCHDB_ATTRIBUTE_TABLE "synchdb_attribute"
@@ -65,6 +66,10 @@
 #define SYNCHDB_ATTRIBUTE_VIEW "synchdb_att_view"
 
 typedef unsigned long long orascn;
+
+/* Possible connector flags */
+#define CONNFLAG_SCHEMA_SYNC_MODE 	1 << 0		/* 0001 */
+#define CONNFLAG_NO_CDC_MODE 		1 << 1		/* 0010 */
 
 /* Enumerations */
 
@@ -166,7 +171,8 @@ typedef enum _DdlType
 	DDL_UNDEF,
 	DDL_CREATE_TABLE,
 	DDL_ALTER_TABLE,
-	DDL_DROP_TABLE
+	DDL_DROP_TABLE,
+	DDL_TRUNCATE_TABLE
 } DdlType;
 
 /*
@@ -263,7 +269,7 @@ typedef struct _ConnectionInfo
     char table[SYNCHDB_CONNINFO_TABLELIST_SIZE];
     char snapshottable[SYNCHDB_CONNINFO_TABLELIST_SIZE];
     bool active;
-    bool isShcemaSync;
+    int flag;	/* flag to influence connector behaviors. See above connflags */
     bool isOraCompat; /* added to support ivorysql's oracle compatible mode */
     ExtraConnectionInfo extra;
     JMXConnectionInfo jmx;
@@ -367,6 +373,7 @@ const char * get_shm_connector_name_by_id(int connectorId);
 ConnectorState get_shm_connector_state_enum(int connectorId);
 const char* connectorTypeToString(ConnectorType type);
 void set_shm_connector_stage(int connectorId, ConnectorStage stage);
+ConnectorType get_shm_connector_type_enum(int connectorId);
 ConnectorStage get_shm_connector_stage_enum(int connectorId);
 void increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics which, int incby);
 

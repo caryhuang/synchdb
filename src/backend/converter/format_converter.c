@@ -570,7 +570,7 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 
 	if (!jsonin)
 	{
-		elog(WARNING, "no valid primary key json");
+		elog(DEBUG1, "no valid primary key json");
 		return;
 	}
 
@@ -3269,7 +3269,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 	}
 	else
 	{
-		elog(WARNING, "unknown ddl type %d. Skipping attribute update", pgddl->type);
+		elog(DEBUG1, "unknown ddl type %d. Skipping attribute update", pgddl->type);
 		return;
 	}
 
@@ -3293,18 +3293,6 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 void
 fc_initFormatConverter(ConnectorType connectorType)
 {
-	/* init data cache hash */
-	HASHCTL	info;
-
-	info.keysize = sizeof(DataCacheKey);
-	info.entrysize = sizeof(DataCacheEntry);
-	info.hcxt = CurrentMemoryContext;
-
-	dataCacheHash = hash_create("data cache hash",
-							 256,
-							 &info,
-							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-
 	switch (connectorType)
 	{
 		case TYPE_MYSQL:
@@ -3368,6 +3356,41 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 			elog(ERROR, "unsupported connector type");
 		}
 	}
+}
+
+void
+fc_initDataCache(void)
+{
+	/* init data cache hash */
+	HASHCTL	info;
+
+	info.keysize = sizeof(DataCacheKey);
+	info.entrysize = sizeof(DataCacheEntry);
+	info.hcxt = CurrentMemoryContext;
+
+	dataCacheHash = hash_create("data cache hash",
+							 256,
+							 &info,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+void
+fc_deinitDataCache(void)
+{
+	/* destroy data cache hash */
+	if (dataCacheHash)
+	{
+		hash_destroy(dataCacheHash);
+		dataCacheHash = NULL;
+	}
+}
+
+void
+fc_resetDataCache(void)
+{
+	/* deinit followed by another init */
+	fc_deinitDataCache();
+	fc_initDataCache();
 }
 
 bool
@@ -4916,6 +4939,72 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			elog(ERROR, "OLR connector is not enabled in this synchdb build");
 		}
 #endif
+	}
+	else if (dbzddl->type == DDL_TRUNCATE_TABLE)
+	{
+		mappedObjName = transform_object_name(dbzddl->id, "table");
+		if (mappedObjName)
+		{
+			/*
+			 * we will used the transformed object name here, but first, we will check if
+			 * transformed name is valid. It should be expressed in one of the forms below:
+			 * - schema.table
+			 * - table
+			 */
+			splitIdString(mappedObjName, &db, &schema, &table, false);
+			if (!table)
+			{
+				/* save the error */
+				char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+				snprintf(msg, SYNCHDB_ERRMSG_SIZE, "transformed object ID is invalid: %s",
+						mappedObjName);
+				set_shm_connector_errmsg(myConnectorId, msg);
+
+				/* trigger pg's error shutdown routine */
+				elog(ERROR, "%s", msg);
+			}
+
+			if (schema && table)
+			{
+				/* table stays as table under the schema */
+				appendStringInfo(&strinfo, "TRUNCATE TABLE %s.%s;", schema, table);
+				pgddl->schema = pstrdup(schema);
+				pgddl->tbname = pstrdup(table);
+			}
+			else if (!schema && table)
+			{
+				/* table stays as table but no schema */
+				schema = pstrdup("public");
+				appendStringInfo(&strinfo, "TRUNCATE TABLE %s;", table);
+				pgddl->schema = pstrdup("public");
+				pgddl->tbname = pstrdup(table);
+			}
+		}
+		else
+		{
+			char * idcopy = pstrdup(dbzddl->id);
+			splitIdString(idcopy, &db, &schema, &table, true);
+
+			/* database and table must be present. schema is optional */
+			if (!db || !table)
+			{
+				/* save the error */
+				char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+				snprintf(msg, SYNCHDB_ERRMSG_SIZE, "malformed id field in dbz change event: %s",
+						dbzddl->id);
+				set_shm_connector_errmsg(myConnectorId, msg);
+
+				/* trigger pg's error shutdown routine */
+				elog(ERROR, "%s", msg);
+			}
+			/* make schema points to db */
+			schema = db;
+			appendStringInfo(&strinfo, "TRUNCATE TABLE %s.%s;", schema, table);
+			pgddl->schema = pstrdup(schema);
+			pgddl->tbname = pstrdup(table);
+		}
+		/* no column information needed for TRUNCATE */
+		pgddl->columns = NULL;
 	}
 	else
 	{

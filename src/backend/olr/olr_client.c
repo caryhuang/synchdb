@@ -378,3 +378,59 @@ olr_client_get_connect_status(void)
 {
 	return g_netioCtx.is_connected;
 }
+
+bool
+olr_client_write_snapshot_state(ConnectorType type, const char * name, const char * dstdb, bool done)
+{
+	int fd;
+	char * filename = psprintf(SYNCHDB_SCHEMA_FILE_PATTERN,
+			get_shm_connector_name(type), name, dstdb);
+	unsigned char state = done ? 't' : 'f';
+
+    elog(DEBUG1, "writing snapshot state '%c' to %s...", state, filename);
+	fd = OpenTransientFile(filename, O_WRONLY | O_CREAT | O_TRUNC);
+	if (fd < 0)
+	{
+		set_shm_connector_errmsg(myConnectorId, "cannot open snapshot file to write!");
+		elog(ERROR, "can not open file \"%s\" for writing: %m", filename);
+	}
+
+	if (write(fd, &state, sizeof(state)) != sizeof(state))
+	{
+		int save_errno = errno;
+		CloseTransientFile(fd);
+		errno = save_errno;
+		set_shm_connector_errmsg(myConnectorId, "cannot write to snapshot file");
+		elog(ERROR, "cannot write to file \"%s\": %m", filename);
+	}
+	CloseTransientFile(fd);
+	return true;
+}
+
+bool
+olr_client_read_snapshot_state(ConnectorType type, const char * name, const char * dstdb, bool * done)
+{
+	int fd;
+	unsigned char state;
+	char * filename = psprintf(SYNCHDB_SCHEMA_FILE_PATTERN,
+			get_shm_connector_name(type), name, dstdb);
+
+	elog(DEBUG1, "reading snapshot state file %s...", filename);
+	fd = OpenTransientFile(filename, O_RDONLY);
+	if (fd < 0)
+		return false;
+
+	if (read(fd, &state, sizeof(state)) != sizeof(state))
+	{
+		int save_errno = errno;
+		CloseTransientFile(fd);
+		errno = save_errno;
+		set_shm_connector_errmsg(myConnectorId, "cannot read snapshot state from file");
+		elog(ERROR, "cannot read from file \"%s\": %m", filename);
+	}
+	CloseTransientFile(fd);
+
+	*done = state == 't' ? true : false;
+	elog(LOG, "snapshot state read = %d", *done);
+	return true;
+}
