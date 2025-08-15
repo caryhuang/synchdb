@@ -42,7 +42,7 @@ def test_Insert(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(75)
     else:
-        time.sleep(5)
+        time.sleep(15)
     
     extrows = run_remote_query(dbvendor, f"SELECT a, b FROM inserttable")
     rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.inserttable")
@@ -168,7 +168,7 @@ def test_Delete(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(75)
     else:
-        time.sleep(5)
+        time.sleep(15)
 
     extrows = run_remote_query(dbvendor, f"SELECT a, b FROM deletetable")
     rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.deletetable")
@@ -184,7 +184,7 @@ def test_Delete(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(75)
     else:
-        time.sleep(5)
+        time.sleep(15)
 
     extrows = run_remote_query(dbvendor, f"SELECT a, b FROM deletetable")
     rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.deletetable")
