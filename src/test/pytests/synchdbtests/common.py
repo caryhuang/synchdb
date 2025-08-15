@@ -20,22 +20,35 @@ ORACLE_USER="c##dbzuser"
 ORACLE_PASS="dbz"
 ORACLE_DB="FREE"
 
+ORA19C_HOST="192.168.0.2"
+ORA19C_PORT=1521
+ORA19C_USER="DBZUSER"
+ORA19C_PASS="dbz"
+ORA19C_DB="FREE"
+
+OLR_HOST="192.168.0.3"
+OLR_PORT="7070"
+OLR_SERVICE="ORACLE"
 
 def getConnectorName(dbvendor):
     if dbvendor == "mysql":
         return "mysqlconn"
     elif dbvendor == "sqlserver":
         return "sqlserverconn"
-    else:
+    elif dbvendor == "oracle":
         return "oracleconn"
+    else:
+        return "olrconn"
 
 def getDbname(dbvendor):
     if dbvendor == "mysql":
         return MYSQL_DB
     elif dbvendor == "sqlserver":
         return SQLSERVER_DB
-    else:
+    elif dbvendor == "oracle":
         return ORACLE_DB
+    else:
+        return ORA19C_DB
 
 def getSchema(dbvendor):
     # returns the remote schema name in example databases
@@ -43,8 +56,10 @@ def getSchema(dbvendor):
         return None
     elif dbvendor == "sqlserver":
         return "dbo"
-    else:
+    elif dbvendor == "oracle":
         return "c##dbzuser"
+    else:
+        return "DBZUSER"
 
 def run_pg_query(cursor, query):
     cursor.execute(query)
@@ -143,7 +158,8 @@ def run_remote_query(where, query, srcdb=None):
     db = srcdb or {
         "mysql": MYSQL_DB,
         "sqlserver": SQLSERVER_DB,
-        "oracle": ORACLE_DB
+        "oracle": ORACLE_DB,
+        "olr": ORA19C_DB
     }[where]
 
     try:
@@ -176,9 +192,11 @@ def run_remote_query(where, query, srcdb=None):
             {query};
             exit
             """
-            
-            result = subprocess.check_output(["docker", "exec", "-i", "oracle", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
-
+            if where == "oracle":
+                result = subprocess.check_output(["docker", "exec", "-i", "oracle", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
+            else:
+                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORA19C_USER}/{ORA19C_PASS}@//{ORA19C_HOST}:{ORA19C_PORT}/{db}"], input=sql, text=True).strip()
+                
             rows = []
             for line in result.splitlines():
                 line = line.strip()
@@ -201,7 +219,8 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None):
     db = srcdb or {
         "mysql": MYSQL_DB,
         "sqlserver": SQLSERVER_DB,
-        "oracle": ORACLE_DB
+        "oracle": ORACLE_DB,
+        "olr": ORA19C_DB
     }[vendor]
 
     if vendor == "mysql":
@@ -210,8 +229,11 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None):
     elif vendor == "sqlserver":
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{SQLSERVER_HOST}', {SQLSERVER_PORT}, '{SQLSERVER_USER}', '{SQLSERVER_PASS}', '{db}', 'postgres', 'null', 'null', 'sqlserver');")
 
-    else:
+    elif vendor == "oracle":
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', 'postgres', 'null', 'null', 'oracle');")
+    else:
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORA19C_HOST}', {ORA19C_PORT}, '{ORA19C_USER}', '{ORA19C_PASS}', '{db}', 'postgres', 'null', 'null', 'olr');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_olr_conninfo('{name}','{OLR_HOST}', {OLR_PORT}, '{OLR_SERVICE}');")
 
     return result
 

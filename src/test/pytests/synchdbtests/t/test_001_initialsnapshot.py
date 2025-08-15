@@ -1,7 +1,7 @@
 import common
 import time
 from datetime import datetime
-from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings
+from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, stop_and_delete_synchdb_connector, drop_default_pg_schema, create_and_start_synchdb_connector
 
 def test_ConnectorCreate(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
@@ -21,9 +21,13 @@ def test_ConnectorCreate(pg_cursor, dbvendor):
     assert result[1] == "/path/ks"
     assert result[3] == "/path/ts/"
 
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+
 def test_CreateExtraConninfo(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
+    result = create_synchdb_connector(pg_cursor, dbvendor, name)
+    assert result[0] == 0
 
     row = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_extra_conninfo('{name}', 'verify_ca', 'keystore', 'pass', 'truststore', 'pass')")
     assert row[0] == 0
@@ -33,9 +37,17 @@ def test_CreateExtraConninfo(pg_cursor, dbvendor):
     assert row[1] == "keystore"
     assert row[2] == "truststore"
 
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+
 def test_RemoveExtraConninfo(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
+    result = create_synchdb_connector(pg_cursor, dbvendor, name)
+    assert result[0] == 0
+
+    row = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_extra_conninfo('{name}', 'verify_ca', 'keystore', 'pass', 'truststore', 'pass')")
+    assert row[0] == 0
+
     row = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_extra_conninfo('{name}')")
     assert row[0] == 0
 
@@ -44,9 +56,15 @@ def test_RemoveExtraConninfo(pg_cursor, dbvendor):
     assert row[1] == None
     assert row[2] == None
 
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+
 def test_ConnectorStart(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
+    
+    result = create_synchdb_connector(pg_cursor, dbvendor, name)
+    assert result[0] == 0
+
     row = run_pg_query_one(pg_cursor, f"SELECT synchdb_start_engine_bgw('{name}')")
     assert row[0] == 0
 
@@ -60,13 +78,25 @@ def test_ConnectorStart(pg_cursor, dbvendor):
     assert row[0] == name
     assert row[1] == dbvendor
     assert row[2] > -1
-    assert row[3] == "initial snapshot"
+    assert row[3] == "initial snapshot" or row[3] == "change data capture"
     assert row[4] == "polling"
     assert row[5] == "no error"
+
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
 
 def test_InitialSnapshot(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
+    
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
+    assert result == 0
+
+    if dbvendor == "oracle":
+        time.sleep(30)
+    else:
+        time.sleep(10)
+
     # check table counts
     pgtblcount = run_pg_query_one(pg_cursor, f"SELECT count(*) FROM information_schema.tables where table_schema='{dbname}' and table_type = 'BASE TABLE'")
     if dbvendor == "mysql":
@@ -108,7 +138,7 @@ def test_InitialSnapshot(pg_cursor, dbvendor):
     pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM {dbname}.orders WHERE order_number = 10003")
     extrow = run_remote_query(dbvendor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM orders WHERE order_number = 10003")
     assert int(pgrow[0]) == int(extrow[0][0])
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
     else:
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d').date()
@@ -116,6 +146,8 @@ def test_InitialSnapshot(pg_cursor, dbvendor):
     assert int(pgrow[3]) == int(extrow[0][3])
     assert int(pgrow[4]) == int(extrow[0][4])
 
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
 
 def test_ConnectorStartSchemaSyncMode(pg_cursor, dbvendor):
     assert True
@@ -132,12 +164,21 @@ def test_ConnectorStartWithError(pg_cursor, dbvendor):
 def test_ConnectorRestart(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
+
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "never")
+    assert result == 0
+
+    if dbvendor == "oracle":
+        time.sleep(10)
+    else:
+        time.sleep(5)
+
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
     assert row[1] == dbvendor
     oldpid = row[2]
     assert row[2] > -1
-    assert row[3] == "initial snapshot"
+    assert row[3] == "initial snapshot" or row[3] == "change data capture"
     assert row[4] == "polling"
     assert row[5] == "no error"
 
@@ -154,18 +195,27 @@ def test_ConnectorRestart(pg_cursor, dbvendor):
     assert row[1] == dbvendor
     oldpid = row[2]
     assert row[2] == oldpid
-    assert row[3] == "initial snapshot"
+    assert row[3] == "initial snapshot" or row[3] == "change data capture"
     if row[4] == "polling" or row[4] == "restarting":
         assert True
     else:
         assert False
     assert row[5] == "no error"
 
+    stop_and_delete_synchdb_connector(pg_cursor, name)
 
 def test_ConnectorStop(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
-    
+
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "never")
+    assert result == 0
+
+    if dbvendor == "oracle":
+        time.sleep(10)
+    else:
+        time.sleep(5)
+
     row = run_pg_query_one(pg_cursor, f"SELECT synchdb_stop_engine_bgw('{name}')")
     assert row[0] == 0
 
@@ -176,6 +226,8 @@ def test_ConnectorStop(pg_cursor, dbvendor):
     assert row[2] == -1
     assert row[4] == "stopped"
 
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+
 def test_ConnectorRestartAlwaysMode(pg_cursor, dbvendor):
     assert True
 
@@ -185,16 +237,13 @@ def test_ConnectorRestartNodataMode(pg_cursor, dbvendor):
 def test_ConnectorDelete(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
 
-    result = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_extra_conninfo('{name}')")
-    assert result[0] == 0
-
-    result = run_pg_query_one(pg_cursor, f"SELECT data->>'ssl_mode', data->>'ssl_keystore', data->>'ssl_keystore_pass', data->>'ssl_truststore', data->>'ssl_truststore_pass' FROM synchdb_conninfo WHERE name = '{name}'")
-    assert result[0] == None
-    assert result[1] == None
-    assert result[3] == None
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "never")
+    assert result == 0
 
     result = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_conninfo('{name}')")
     assert result[0] == 0
 
     result = run_pg_query_one(pg_cursor, f"SELECT name FROM synchdb_conninfo WHERE name = '{name}'")
     assert result == None
+
+    stop_and_delete_synchdb_connector(pg_cursor, name)

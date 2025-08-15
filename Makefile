@@ -138,7 +138,7 @@ dbcheck:
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
 	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo >&2 "❌ docker-compose not found in PATH"; exit 1; }
 	@echo "Running tests against dbvendor=$(DB)"
-	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -v -s --dbvendor=$(DB) --capture=tee-sys ./src/test/pytests/synchdbtests/
+	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -x -v -s --dbvendor=$(DB) --capture=tee-sys ./src/test/pytests/synchdbtests/
 	rm -r .pytest_cache ./src/test/pytests/synchdbtests/__pycache__ ./src/test/pytests/synchdbtests/t/__pycache__
 
 dbcheck-tpcc:
@@ -158,6 +158,9 @@ sqlservercheck:
 oraclecheck:
 	$(MAKE) dbcheck DB=oracle
 
+olrcheck:
+	$(MAKE) dbcheck DB=olr
+
 mysqlcheck-benchmark:
 	$(MAKE) dbcheck-tpcc DB=mysql
 
@@ -166,3 +169,5 @@ sqlservercheck-benchmark:
 
 oraclecheck-benchmark:
 	$(MAKE) dbcheck-tpcc DB=oracle
+
+

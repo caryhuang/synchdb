@@ -1434,7 +1434,7 @@ end:
  */
 int
 fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
-		bool schemasync, const char * name, bool isfirst, bool islast)
+		int flag, const char * name, bool isfirst, bool islast)
 {
 	Datum jsonb_datum;
 	Jsonb * jb;
@@ -1495,7 +1495,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		tmp = pnstrdup(v->val.string.val, v->val.string.len);
 	    if (!strcmp(tmp, "true") || !strcmp(tmp, "last"))
 	    {
-	    	if (schemasync)
+	    	if (flag & CONNFLAG_SCHEMA_SYNC_MODE)
 	    	{
 	        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
 	        		set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
@@ -1618,7 +1618,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	}
 
 		/* (4) update attribute map table */
-    	updateSynchdbAttribute(dbzddl, pgddl, type, name);
+    	updateSynchdbAttribute(dbzddl, pgddl, get_shm_connector_type_enum(myConnectorId), name);
 
     	/* (5) record only the first and last change event's processing timestamps only */
     	if (islast)
@@ -1638,7 +1638,8 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	}
 
 		/* (6) clean up */
-    	set_shm_connector_state(myConnectorId, (islastsnapshot && schemasync ?
+    	set_shm_connector_state(myConnectorId, (islastsnapshot &&
+    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_EXIT_ON_SNAPSHOT_DONE)) ?
     			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
     	destroyDBZDDL(dbzddl);
     	destroyPGDDL(pgddl);
@@ -1709,7 +1710,8 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	}
 
        	/* (5) clean up */
-    	set_shm_connector_state(myConnectorId, (islastsnapshot && schemasync ?
+    	set_shm_connector_state(myConnectorId, (islastsnapshot &&
+    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_EXIT_ON_SNAPSHOT_DONE)) ?
     			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);

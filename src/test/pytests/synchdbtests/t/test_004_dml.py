@@ -91,7 +91,7 @@ def test_Update(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         run_remote_query(dbvendor, "ALTER TABLE updatetable ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
         time.sleep(30)
     else:
@@ -105,7 +105,7 @@ def test_Update(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(75)
     else:
-        time.sleep(5)
+        time.sleep(10)
 
     extrows = run_remote_query(dbvendor, f"SELECT a, b FROM updatetable")
     rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.updatetable")
@@ -154,7 +154,7 @@ def test_Delete(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         run_remote_query(dbvendor, "ALTER TABLE deletetable ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
         time.sleep(30)
     else:

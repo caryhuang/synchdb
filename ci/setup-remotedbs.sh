@@ -6,7 +6,6 @@ IFS=$'\n\t'
 
 # read pg major version, error if not provided
 DBTYPE=${DBTYPE:?please provide database type}
-WHICH=${WHICH:?please provide which hammerdb type, or n/a}
 
 # get codename from release file
 . /etc/os-release
@@ -110,7 +109,7 @@ function setup_oracle()
 
 	if [ $needsetup -ne 1 ]; then
         echo "skip setting up oracle, assuming it done..."
-        exit 0
+		return
     fi
     set -e
 
@@ -228,13 +227,19 @@ EOF
 function setup_ora19c()
 {
 	needsetup=0
+	forolr=$1
 
 	set +e
 	echo "setting up oracle 19c..."
-	docker ps -a | grep "ora19c"
+	docker ps -a | grep "ora19c" 
 	if [ $? -ne 0 ]; then
 		# container has not run before. Run a new one
-    	docker run -d --name ora19c -p 1521:1521 -e ORACLE_SID=FREE -e ORACLE_PWD=oracle -e ORACLE_CHARACTERSET=AL32UTF8 doctorkirk/oracle-19c
+		if [ "$forolr" == "olr" ]; then
+			# for openlog replicator, need to connect to docker net and shared oradata directory
+   			docker run -d --name ora19c -p 1521:1521 --network oranet -e ORACLE_SID=FREE -e ORACLE_PWD=oracle -e ORACLE_CHARACTERSET=AL32UTF8 -v ./testenv/olr/oradata:/opt/oracle/oradata doctorkirk/oracle-19c
+		else
+   			docker run -d --name ora19c -p 1521:1521 -e ORACLE_SID=FREE -e ORACLE_PWD=oracle -e ORACLE_CHARACTERSET=AL32UTF8 $EXTRA_DOCKER_ARGS doctorkirk/oracle-19c
+		fi
 		wait_for_container_ready "ora19c" "DATABASE IS READY TO USE"
 		needsetup=1	
 	else
@@ -254,7 +259,7 @@ function setup_ora19c()
 
 	if [ $needsetup -ne 1 ]; then
 		echo "skip setting up oracle 19c, assuming it done..."
-		exit 0
+		return
 	fi
 	set -e
 
@@ -383,6 +388,7 @@ EOF
 
 function setup_hammerdb()
 {
+	WHICH=${WHICH:?please provide which hammerdb type, mysql, sqlserver or oracle}
 	echo "setting up hammerdb for $which..."
 	docker run -d --name hammerdb hgneon/hammerdb:5.0
 	echo "sleep to give container time to startup..."
@@ -393,10 +399,43 @@ function setup_hammerdb()
 	exit 0
 }
 
+function setup_oranet_and_oradata()
+{
+	docker network inspect oranet >/dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		docker network create oranet
+	fi
+
+	if [ ! -d ./testenv/olr/oradata ]; then
+		mkdir ./testenv/olr/oradata
+		sudo chown 54321:54321 -R ./testenv/olr/oradata
+	fi
+}
+
+function setup_olr()
+{
+	echo "setting up openlog replicator $OLRVER..."
+
+	docker ps -a | grep "OpenLogReplicator"
+    if [ $? -ne 0 ]; then
+
+		docker run -d --name OpenLogReplicator \
+			--network oranet \
+			-p 7070:7070 \
+			-v /opt/fast-recovery-area:/opt/fast-recovery-area \
+			-v ./testenv/olr:/opt/OpenLogReplicator/scripts \
+			-v ./testenv/olr/checkpoint:/opt/OpenLogReplicator/checkpoint \
+			-v ./testenv/olr/oradata:/opt/oracle/oradata \
+			--user 54321 \
+			hgneon/openlogreplicator:$OLRVER
+	else
+		echo "openlog repliator is already running..."
+	fi
+}
+
 function setup_remotedb()
 {
 	dbtype="$1"
-	which="$2"
 
 	case "$dbtype" in
 		"mysql")
@@ -412,13 +451,20 @@ function setup_remotedb()
 			setup_ora19c
 			;;
 		"hammerdb")
-			setup_hammerdb $which
+			setup_hammerdb
+			;;
+		"olr")
+			OLRVER=${OLRVER:?please provide OLR version via OLRVER}
+			setup_oranet_and_oradata
+			setup_ora19c "olr"
+			setup_olr
 			;;
 		*)
 			echo "$dbtype not supported"
 			exit 1
 			;;
 	esac
+	exit 0
 }
 
-setup_remotedb "${DBTYPE}" "${WHICH}"
+setup_remotedb "${DBTYPE}"
