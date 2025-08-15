@@ -165,7 +165,7 @@ def test_ConnectorRestart(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
 
-    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "never")
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
 
     if dbvendor == "oracle":
@@ -208,7 +208,7 @@ def test_ConnectorStop(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
 
-    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "never")
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
 
     if dbvendor == "oracle":
