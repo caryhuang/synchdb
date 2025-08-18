@@ -783,9 +783,10 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
         assert isinstance(row[1], str)
         assert isinstance(row[2], str)
 
-    run_remote_query(dbvendor, "DELETE FROM orders WHERE order_number = 10005")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    
+    run_remote_query(dbvendor, "DELETE FROM orders WHERE order_number = 10005")
 
 def test_TransformExpressionWithError(pg_cursor, dbvendor):
     assert True
