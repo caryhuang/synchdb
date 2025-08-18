@@ -786,7 +786,8 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     
-#    run_remote_query(dbvendor, "DELETE FROM orders WHERE order_number = 10005")
+    time.sleep(5)
+    run_remote_query(dbvendor, "DELETE FROM orders WHERE order_number = 10005")
 
 def test_TransformExpressionWithError(pg_cursor, dbvendor):
     assert True
