@@ -18,20 +18,26 @@ basedir="$(pwd)"
 function teardown_mysql()
 {
 	echo "tearing down mysql..."
-	docker-compose -f testenv/mysql/synchdb-mysql-test.yaml down
+	docker stop mysql
+	docker rm mysql
+	#docker-compose -f testenv/mysql/synchdb-mysql-test.yaml down
 }
 
 function teardown_sqlserver()
 {
 
 	echo "tearing down sqlserver..."
-	docker-compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml down
+	docker stop sqlserver
+	docker rm sqlserver
+	#docker-compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml down
 }
 
 function teardown_oracle()
 {
 	echo "tearing down oracle..."
-	docker-compose -f testenv/oracle/synchdb-oracle-test.yaml down
+	docker stop oracle
+	docker rm oracle
+	#docker-compose -f testenv/oracle/synchdb-oracle-test.yaml down
 }
 
 function teardown_ora19c()
@@ -53,12 +59,13 @@ function teardown_olr()
 	echo "tearing down olr..."
 	docker stop OpenLogReplicator
 	docker rm OpenLogReplicator
+	#docker-compose -f testenv/olr/synchdb-olr-test.yaml down
 }
 
-function teardown_oranet()
+function teardown_synchdbnet()
 {
-	echo "tearing down oranet..."
-	docker network rm oranet
+	echo "tearing down synchdbnet..."
+	docker network rm synchdbnet
 }
 
 function teardown_remotedb()
@@ -84,7 +91,10 @@ function teardown_remotedb()
 		"olr")
 			teardown_olr
 			teardown_ora19c
-			teardown_oranet
+			teardown_synchdbnet
+			;;
+		"synchdbnet")
+			teardown_synchdbnet
 			;;
 		*)
 			echo "$dbtype not supported"

@@ -113,6 +113,7 @@ def setup_remote_instance(dbvendor, request):
     env["DBTYPE"] = dbvendor
     env["WHICH"] = "n/a"
     env["OLRVER"] = OLRVER
+    env["INTERNAL"] = "0"
 
     #print(f"[setup] setting up heterogeneous database {dbvendor}...")
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
