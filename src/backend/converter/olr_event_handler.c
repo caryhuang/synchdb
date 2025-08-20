@@ -1887,6 +1887,8 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	}
 	PG_END_TRY();
 
+	elog(DEBUG1, "%s", event);
+
 	/* payload - required */
 	payload = DatumGetJsonbP(jsonb_get_element(jb, &datum_path_payload[0], 2, &isnull, false));
 	if (!payload)

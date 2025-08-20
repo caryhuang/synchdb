@@ -32,7 +32,7 @@ typedef enum _DbzType
 } DbzType;
 
 int fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
-		bool schemasync, const char * name, bool isfirst, bool islast);
+		int flag, const char * name, bool isfirst, bool islast);
 
 
 #endif /* SYNCHDB_SRC_INCLUDE_CONVERTER_DEBEZIUM_EVENT_HANDLER_H_ */

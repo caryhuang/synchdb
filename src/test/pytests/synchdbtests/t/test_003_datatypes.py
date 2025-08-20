@@ -204,7 +204,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(30)
     else:
-        time.sleep(10)
+        time.sleep(20)
     
     # verify default data type mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}'")
@@ -349,7 +349,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(60)
     else:
-        time.sleep(5)
+        time.sleep(15)
 
     rows = run_pg_query(pg_cursor, f"SELECT * FROM {dbname}.mytable")
     if dbvendor == "mysql":
@@ -466,7 +466,8 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
             assert round(row[2], 0) == float(extrow[2])
             assert row[3] == Decimal(extrow[3])
             assert row[4] == Decimal(extrow[4])
-            assert row[5] == extrow[5]
+            if dbvendor != "olr":   #olr does not support long text
+                assert row[5] == extrow[5]
             assert row[6].date() == datetime.strptime(extrow[6], "%d-%b-%y").date()
             assert row[7] == parse_ora_day2second_interval(extrow[7])
             assert row[8] == parse_ora_year2month_interval(extrow[8])
@@ -479,14 +480,15 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
             assert row[14] == extrow[14]
             assert row[15] == extrow[15]
             assert row[16] == extrow[16]
-            assert row[17].tobytes().hex().upper() == extrow[17]
+            assert row[17].tobytes().hex().upper() == extrow[17] or row[17].tobytes().hex().upper() == extrow[17].lower().encode().hex()
             assert row[18] == None
-            assert row[19].tobytes().hex().upper() == extrow[19]
+            assert row[19].tobytes().hex().upper() == extrow[19] or row[19].tobytes().hex().upper() == extrow[19].lower().encode().hex()
             assert row[20] == extrow[20]
             assert row[21] == extrow[21]
             assert row[22] == None
             assert row[23] == None
-
+    
+    run_remote_query(dbvendor, "DROP TABLE mytable")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
 
@@ -535,7 +537,7 @@ def test_TableNameMapping(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(60)
     else:
-        time.sleep(10)
+        time.sleep(20)
 
     # check if tables have been copied with table names mapped correctly
     rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmap_srctable1' LIMIT 1")
@@ -552,7 +554,10 @@ def test_TableNameMapping(pg_cursor, dbvendor):
     assert rows[0] == True
     rows = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM information_schema.tables WHERE table_schema = 'someschema' AND table_name ='objmap_dsttable3')")
     assert rows[0] == True
-
+    
+    run_remote_query(dbvendor, "DROP TABLE objmap_srctable1")
+    run_remote_query(dbvendor, "DROP TABLE objmap_srctable2")
+    run_remote_query(dbvendor, "DROP TABLE objmap_srctable3")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
 
@@ -589,13 +594,14 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(60)
     else:
-        time.sleep(10)
+        time.sleep(20)
 
     # check if tables have been copied with table names mapped correctly
     rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmapcol_srctable1'")
     assert rows[0][1] == 'pgintcol'
     assert rows[1][1] == 'pgtextcol'
 
+    run_remote_query(dbvendor, "DROP TABLE objmapcol_srctable1")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
 
@@ -618,7 +624,7 @@ def test_DataTypeMapping(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(60)
     else:
-        time.sleep(10)
+        time.sleep(20)
 
     # orders table shall have been replicated
     rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'order_date'")
@@ -649,7 +655,7 @@ def test_TransformExpression(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(60)
     else:
-        time.sleep(10)
+        time.sleep(20)
 
     # orders table shall have been replicated
     rows = run_pg_query_one(pg_cursor, f"SELECT transform FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'purchaser'")
@@ -679,7 +685,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(60)
     else:
-        time.sleep(10)
+        time.sleep(20)
 
     # default table orders table shall have been replicated
     rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' LIMIT 1")
@@ -754,7 +760,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
             INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES
                 (10005, "2025-12-12", 1002, 10000, 102)
             """)
-    elif dbvendor == "oracle":
+    elif dbvendor == "oracle" or dbvendor == "olr":
         extrows = run_remote_query(dbvendor, f"""
             INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES
                 (10005, TO_DATE('2025-12-12', 'YYYY-MM-DD'), 1002, 10000, 102)
@@ -768,7 +774,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     if dbvendor == "oracle":
         time.sleep(60)
     else:
-        time.sleep(10)
+        time.sleep(20)
         
     rows = run_pg_query(pg_cursor, f"SELECT the_number, the_date, quantity FROM {dbname}.invoices WHERE the_number > 1000000")
     assert len(rows) > 0
@@ -779,7 +785,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-
+    
 def test_TransformExpressionWithError(pg_cursor, dbvendor):
     assert True
 

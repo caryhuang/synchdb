@@ -18,23 +18,26 @@ basedir="$(pwd)"
 function teardown_mysql()
 {
 	echo "tearing down mysql..."
-	docker-compose -f testenv/mysql/synchdb-mysql-test.yaml down
-	exit 0
+	docker stop mysql
+	docker rm mysql
+	#docker-compose -f testenv/mysql/synchdb-mysql-test.yaml down
 }
 
 function teardown_sqlserver()
 {
 
 	echo "tearing down sqlserver..."
-	docker-compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml down
-	exit 0
+	docker stop sqlserver
+	docker rm sqlserver
+	#docker-compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml down
 }
 
 function teardown_oracle()
 {
 	echo "tearing down oracle..."
-	docker-compose -f testenv/oracle/synchdb-oracle-test.yaml down
-	exit 0
+	docker stop oracle
+	docker rm oracle
+	#docker-compose -f testenv/oracle/synchdb-oracle-test.yaml down
 }
 
 function teardown_ora19c()
@@ -49,7 +52,20 @@ function teardown_hammerdb()
 	echo "tearing down hammerdb..."
 	docker stop	hammerdb
 	docker rm hammerdb
-	exit 0
+}
+
+function teardown_olr()
+{
+	echo "tearing down olr..."
+	docker stop OpenLogReplicator
+	docker rm OpenLogReplicator
+	#docker-compose -f testenv/olr/synchdb-olr-test.yaml down
+}
+
+function teardown_synchdbnet()
+{
+	echo "tearing down synchdbnet..."
+	docker network rm synchdbnet
 }
 
 function teardown_remotedb()
@@ -71,6 +87,14 @@ function teardown_remotedb()
 			;;
 		"hammerdb")
 			teardown_hammerdb
+			;;
+		"olr")
+			teardown_olr
+			teardown_ora19c
+			teardown_synchdbnet
+			;;
+		"synchdbnet")
+			teardown_synchdbnet
 			;;
 		*)
 			echo "$dbtype not supported"

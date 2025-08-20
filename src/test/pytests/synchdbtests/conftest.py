@@ -8,6 +8,7 @@ import pytest
 
 PG_PORT = "5432"
 PG_HOST = "127.0.0.1"
+OLRVER = "1.3.0"
 
 @pytest.fixture(scope="session")
 def pg_instance(request):
@@ -30,6 +31,7 @@ def pg_instance(request):
         f.write("\nsynchdb.dbz_batch_size= 16384\n")
         f.write("\nsynchdb.dbz_queue_size= 32768\n")
         f.write("\nsynchdb.jvm_max_heap_size= 2048\n")
+        f.write("\nlog_min_messages = debug1\n")
 
     # Start Postgres
     #print("[setup] setting up postgresql for test...")
@@ -110,6 +112,8 @@ def setup_remote_instance(dbvendor, request):
     env = os.environ.copy()
     env["DBTYPE"] = dbvendor
     env["WHICH"] = "n/a"
+    env["OLRVER"] = OLRVER
+    env["INTERNAL"] = "0"
 
     #print(f"[setup] setting up heterogeneous database {dbvendor}...")
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)

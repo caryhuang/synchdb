@@ -146,7 +146,7 @@ PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
 static int dbz_engine_stop(void);
 static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
 static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal,
-		BatchInfo * batchinfo, SynchdbStatistics * myBatchStats, bool schemasync);
+		BatchInfo * batchinfo, SynchdbStatistics * myBatchStats, int flag);
 static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode);
 static char *dbz_engine_get_offset(int connectorId);
 static int dbz_mark_batch_complete(int batchid);
@@ -157,7 +157,7 @@ static void prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo
 static const char *connectorStateAsString(ConnectorState state);
 static void reset_shm_request_state(int connectorId);
 static int dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file);
-static void processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId);
+static void processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connectorId);
 static void setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode);
 static void initialize_jvm(JMXConnectionInfo * jmx);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
@@ -664,7 +664,7 @@ dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj)
 static int
 dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId,
 		bool * dbzExitSignal, BatchInfo * batchinfo, SynchdbStatistics * myBatchStats,
-		bool schemasync)
+		int flag)
 {
 	jobject jbytebuffer;
 	int offset = 0;
@@ -755,7 +755,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			if (synchdb_log_event_on_error)
 				g_eventStr = (char *)(data + offset);
 
-			fc_processDBZChangeEvent((char *)(data + offset), myBatchStats, schemasync,
+			fc_processDBZChangeEvent((char *)(data + offset), myBatchStats, flag,
 					get_shm_connector_name_by_id(myConnectorId),
 					(curr == 0), (curr == batchsize - 1));
 
@@ -1390,7 +1390,7 @@ dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char 
  * @param snapshotMode: The new snapshot mode requested
  */
 static void
-processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int connectorId)
+processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connectorId)
 {
 	SynchdbRequest *req, *reqcopy;
 	ConnectorState *currstate, *currstatecopy;
@@ -1429,24 +1429,33 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 			 connectorTypeToString(type),
 			 connectorStateAsString(*currstatecopy),
 			 connectorStateAsString(reqcopy->reqstate));
-
-		elog(DEBUG1, "shut down dbz engine...");
-		ret = dbz_engine_stop();
-		if (ret)
+#ifdef WITH_OLR
+		if (type == TYPE_OLR)
 		{
-			elog(WARNING, "failed to stop dbz engine...");
-			reset_shm_request_state(connectorId);
-			pfree(reqcopy);
-			pfree(currstatecopy);
-			return;
+			olr_client_shutdown();
+			set_shm_connector_state(connectorId, STATE_PAUSED);
 		}
-		set_shm_connector_state(connectorId, STATE_PAUSED);
+		else
+#endif
+		{
+			elog(DEBUG1, "shut down dbz engine...");
+			ret = dbz_engine_stop();
+			if (ret)
+			{
+				elog(WARNING, "failed to stop dbz engine...");
+				reset_shm_request_state(connectorId);
+				pfree(reqcopy);
+				pfree(currstatecopy);
+				return;
+			}
+			set_shm_connector_state(connectorId, STATE_PAUSED);
 
-		/*
-		 * todo: if a connector is marked paused, it should be noted somewhere in
-		 * synchdb_conninfo table so when it restarts next time, it could start with
-		 * initial state = paused rather than syncing.
-		 */
+			/*
+			 * todo: if a connector is marked paused, it should be noted somewhere in
+			 * synchdb_conninfo table so when it restarts next time, it could start with
+			 * initial state = paused rather than syncing.
+			 */
+		}
 	}
 	else if (reqcopy->reqstate == STATE_SYNCING && *currstatecopy == STATE_PAUSED)
 	{
@@ -1455,24 +1464,68 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 			 connectorTypeToString(type),
 			 connectorStateAsString(*currstatecopy),
 			 connectorStateAsString(reqcopy->reqstate));
-
-		/* restart dbz engine */
-		elog(DEBUG1, "restart dbz engine...");
-
-		/*
-		 * always resumes to initial mode for safety reasons. Users can use the restart
-		 * routine to switch to a different snapshot mode as needed
-		 */
-		ret = dbz_engine_start(connInfo, type, "initial");
-		if (ret < 0)
+#ifdef WITH_OLR
+		/* todo: put restart logic in a function */
+		if (type == TYPE_OLR)
 		{
-			elog(WARNING, "Failed to restart dbz engine");
-			reset_shm_request_state(connectorId);
-			pfree(reqcopy);
-			pfree(currstatecopy);
-			return;
+			elog(WARNING, "reconnecting...");
+			if (olr_client_init(connInfo->olr.olr_host, connInfo->olr.olr_port))
+				elog(DEBUG1, "failed to reconnect");
+			else
+			{
+				elog(WARNING, "reconnected, request replication...");
+
+				/* connInfo.srcdb is used as data source for OLR */
+				ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, true);
+				if (ret == -1)
+				{
+					set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+					elog(ERROR, "failed to start replication with olr server");
+				}
+
+				if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
+				{
+					elog(WARNING, "replication already started or starting - sending continue");
+					ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, false);
+					if (ret == -1)
+					{
+						set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+						elog(ERROR, "failed to start replication with olr server");
+					}
+				}
+				if (ret == RES_REPLICATE)
+				{
+					elog(WARNING, "replication requested...");
+					set_shm_connector_state(connectorId, STATE_SYNCING);
+				}
+				else
+				{
+					set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate after reconnection");
+					elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
+				}
+			}
 		}
-		set_shm_connector_state(connectorId, STATE_SYNCING);
+		else
+#endif
+		{
+			/* restart dbz engine */
+			elog(DEBUG1, "restart dbz engine...");
+
+			/*
+			 * always resumes to initial mode for safety reasons. Users can use the restart
+			 * routine to switch to a different snapshot mode as needed
+			 */
+			ret = dbz_engine_start(connInfo, type, "initial");
+			if (ret < 0)
+			{
+				elog(WARNING, "Failed to restart dbz engine");
+				reset_shm_request_state(connectorId);
+				pfree(reqcopy);
+				pfree(currstatecopy);
+				return;
+			}
+			set_shm_connector_state(connectorId, STATE_SYNCING);
+		}
 	}
 	else if (reqcopy->reqstate == STATE_OFFSET_UPDATE && *currstatecopy == STATE_PAUSED)
 	{
@@ -1481,28 +1534,40 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 			 connectorTypeToString(type),
 			 connectorStateAsString(*currstatecopy),
 			 connectorStateAsString(reqcopy->reqstate));
-
-		/* derive offset file*/
-		snprintf(offsetfile, MAX_PATH_LENGTH, SYNCHDB_OFFSET_FILE_PATTERN,
-				get_shm_connector_name(type), connInfo->name, connInfo->srcdb);
-
-		set_shm_connector_state(connectorId, STATE_OFFSET_UPDATE);
-		ret = dbz_engine_set_offset(type, srcdb, reqcopy->reqdata, offsetfile);
-		if (ret < 0)
+#ifdef WITH_OLR
+		if (type == TYPE_OLR)
 		{
-			elog(WARNING, "Failed to set offset for %s connector", connectorTypeToString(type));
+			elog(WARNING, "set offset to openlog replicator not supported yet");
 			reset_shm_request_state(connectorId);
-			set_shm_connector_state(connectorId, STATE_PAUSED);
 			pfree(reqcopy);
 			pfree(currstatecopy);
 			return;
 		}
+		else
+#endif
+		{
+			/* derive offset file*/
+			snprintf(offsetfile, MAX_PATH_LENGTH, SYNCHDB_OFFSET_FILE_PATTERN,
+					get_shm_connector_name(type), connInfo->name, connInfo->srcdb);
 
-		/* after new offset is set, change state back to STATE_PAUSED */
-		set_shm_connector_state(connectorId, STATE_PAUSED);
+			set_shm_connector_state(connectorId, STATE_OFFSET_UPDATE);
+			ret = dbz_engine_set_offset(type, srcdb, reqcopy->reqdata, offsetfile);
+			if (ret < 0)
+			{
+				elog(WARNING, "Failed to set offset for %s connector", connectorTypeToString(type));
+				reset_shm_request_state(connectorId);
+				set_shm_connector_state(connectorId, STATE_PAUSED);
+				pfree(reqcopy);
+				pfree(currstatecopy);
+				return;
+			}
 
-		/* and also update this worker's shm offset */
-		set_shm_dbz_offset(connectorId);
+			/* after new offset is set, change state back to STATE_PAUSED */
+			set_shm_connector_state(connectorId, STATE_PAUSED);
+
+			/* and also update this worker's shm offset */
+			set_shm_dbz_offset(connectorId);
+		}
 	}
 	else if (reqcopy->reqstate == STATE_RESTARTING && *currstatecopy == STATE_SYNCING)
 	{
@@ -1511,42 +1576,54 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 		elog(WARNING, "got a restart request: %s", reqcopy->reqdata);
 		set_shm_connector_state(connectorId, STATE_RESTARTING);
 
-		/* get a copy of more recent conninfo from reqdata */
-		memcpy(&newConnInfo, &(reqcopy->reqconninfo), sizeof(ConnectionInfo));
-
-		elog(WARNING, "stopping dbz engine...");
-		ret = dbz_engine_stop();
-		if (ret)
+#ifdef WITH_OLR
+		if (type == TYPE_OLR)
 		{
-			elog(WARNING, "failed to stop dbz engine...");
-			reset_shm_request_state(connectorId);
-			pfree(reqcopy);
-			pfree(currstatecopy);
+			/* todo support restart */
+			set_shm_connector_state(connectorId, STATE_RESTARTING);
+			sleep(5);
 			set_shm_connector_state(connectorId, STATE_SYNCING);
-			return;
 		}
-		sleep(1);
-
-		elog(LOG, "resuimg dbz engine with host %s, port %u, user %s, src_db %s, "
-				"dst_db %s, table %s, snapshotMode %s",
-				newConnInfo.hostname, newConnInfo.port, newConnInfo.user,
-				strlen(newConnInfo.srcdb) > 0 ? newConnInfo.srcdb : "N/A",
-				newConnInfo.dstdb,
-				strlen(newConnInfo.table) ? newConnInfo.table : "N/A",
-				reqcopy->reqdata);
-
-		elog(WARNING, "resuimg dbz engine with snapshot_mode %s...", reqcopy->reqdata);
-		ret = dbz_engine_start(&newConnInfo, type, reqcopy->reqdata);
-		if (ret < 0)
+		else
+#endif
 		{
-			elog(WARNING, "Failed to restart dbz engine");
-			reset_shm_request_state(connectorId);
-			pfree(reqcopy);
-			pfree(currstatecopy);
-			set_shm_connector_state(connectorId, STATE_STOPPED);
-			return;
+			/* get a copy of more recent conninfo from reqdata */
+			memcpy(&newConnInfo, &(reqcopy->reqconninfo), sizeof(ConnectionInfo));
+
+			elog(WARNING, "stopping dbz engine...");
+			ret = dbz_engine_stop();
+			if (ret)
+			{
+				elog(WARNING, "failed to stop dbz engine...");
+				reset_shm_request_state(connectorId);
+				pfree(reqcopy);
+				pfree(currstatecopy);
+				set_shm_connector_state(connectorId, STATE_SYNCING);
+				return;
+			}
+			sleep(1);
+
+			elog(LOG, "resuimg dbz engine with host %s, port %u, user %s, src_db %s, "
+					"dst_db %s, table %s, snapshotMode %s",
+					newConnInfo.hostname, newConnInfo.port, newConnInfo.user,
+					strlen(newConnInfo.srcdb) > 0 ? newConnInfo.srcdb : "N/A",
+					newConnInfo.dstdb,
+					strlen(newConnInfo.table) ? newConnInfo.table : "N/A",
+					reqcopy->reqdata);
+
+			elog(WARNING, "resuimg dbz engine with snapshot_mode %s...", reqcopy->reqdata);
+			ret = dbz_engine_start(&newConnInfo, type, reqcopy->reqdata);
+			if (ret < 0)
+			{
+				elog(WARNING, "Failed to restart dbz engine");
+				reset_shm_request_state(connectorId);
+				pfree(reqcopy);
+				pfree(currstatecopy);
+				set_shm_connector_state(connectorId, STATE_STOPPED);
+				return;
+			}
+			set_shm_connector_state(connectorId, STATE_SYNCING);
 		}
-		set_shm_connector_state(connectorId, STATE_SYNCING);
 	}
 	else if (reqcopy->reqstate == STATE_MEMDUMP)
 	{
@@ -1842,7 +1919,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 
 					dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
 							&myBatchInfo, &myBatchStats,
-							(connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE));
+							connInfo->flag);
 
 					/*
 					 * if a valid batchid is set by dbz_engine_get_change(), it means we have
@@ -1863,7 +1940,8 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 #ifdef WITH_OLR
 				else
 				{
-					if (connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE)
+					if ((connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE) ||
+						(connInfo->flag & CONNFLAG_EXIT_ON_SNAPSHOT_DONE))
 					{
 						/* continuously poll change events via Debezium */
 						/* reset batchinfo and batchStats*/
@@ -1872,7 +1950,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						memset(&myBatchStats, 0, sizeof(myBatchStats));
 
 						dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
-								&myBatchInfo, &myBatchStats, true);
+								&myBatchInfo, &myBatchStats, connInfo->flag);
 
 						/*
 						 * if a valid batchid is set by dbz_engine_get_change(), it means we have
@@ -2003,13 +2081,17 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 #ifdef WITH_OLR
 				if (connectorType == TYPE_OLR)
 				{
+					/* exit schema sync mode or exit on snapshot done mode first */
+					connInfo->flag &= ~CONNFLAG_SCHEMA_SYNC_MODE;
+					connInfo->flag &= ~CONNFLAG_EXIT_ON_SNAPSHOT_DONE;
+					set_shm_connector_state(myConnectorId, STATE_SYNCING);
+
 					/*
 					 * when schema sync is done, we will just shutdown debezium and destroy
 					 * the JVM as we will then launch openlog replicator client to resume
 					 * with CDC. Also, we need to update offset file to indicate that the
 					 * snapshot has completed and clear the data cache.
 					 */
-
 					if (!olr_client_write_snapshot_state(connectorType, connInfo->name,
 							connInfo->dstdb, true))
 					{
@@ -2036,10 +2118,6 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 
 					/* destroy the data cache created during dbz based snapshot */
 					fc_resetDataCache();
-
-					/* exit schema sync mode */
-					connInfo->flag &= ~CONNFLAG_SCHEMA_SYNC_MODE;
-					set_shm_connector_state(myConnectorId, STATE_SYNCING);
 				}
 				else
 #endif
@@ -2417,7 +2495,7 @@ get_shm_connector_name(ConnectorType type)
 	case TYPE_SQLSERVER:
 		return "sqlserver";
 	case TYPE_OLR:
-		return "openlog_replicator";
+		return "olr";
 	/* todo: support more dbz connector types here */
 	default:
 		return "null";
@@ -2626,6 +2704,13 @@ is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * sna
 	else if (!strcasecmp(snapshotMode, "never"))
 	{
 		*snapshot = false;
+		*cdc = true;
+	}
+	else
+	{
+		elog(WARNING, "snapshot mode %s not handled for OLR connector. Default to initial",
+				snapshotMode);
+		*snapshot = isSnapshotDone ? false : true;
 		*cdc = true;
 	}
 }
@@ -3244,8 +3329,8 @@ synchdb_engine_main(Datum main_arg)
 
 		if (snapshot)
 		{
-			/* use schemasync mode here */
-			connInfo.flag |= CONNFLAG_SCHEMA_SYNC_MODE;
+			/* use exit on snapshot done mode here */
+			connInfo.flag |= CONNFLAG_EXIT_ON_SNAPSHOT_DONE;
 
 			/* Initialize JVM */
 			initialize_jvm(&connInfo.jmx);

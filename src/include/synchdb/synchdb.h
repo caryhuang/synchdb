@@ -68,8 +68,9 @@
 typedef unsigned long long orascn;
 
 /* Possible connector flags */
-#define CONNFLAG_SCHEMA_SYNC_MODE 	1 << 0		/* 0001 */
-#define CONNFLAG_NO_CDC_MODE 		1 << 1		/* 0010 */
+#define CONNFLAG_SCHEMA_SYNC_MODE 			1 << 0		/* 0001 */
+#define CONNFLAG_NO_CDC_MODE 				1 << 1		/* 0010 */
+#define CONNFLAG_EXIT_ON_SNAPSHOT_DONE 		1 << 2		/* 0100 */
 
 /* Enumerations */
 
