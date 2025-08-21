@@ -25,10 +25,23 @@
 int
 netio_connect(NetioContext *ctx, const char *host, int port)
 {
-	struct sockaddr_in serv_addr;
 	int flags, optval = 1, ret = -1;
+	struct addrinfo hints = {0}, *res = NULL;
+	char portstr[16];
 
-	ctx->sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	snprintf(portstr, sizeof portstr, "%d", port);
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+	ret = getaddrinfo(host, portstr, &hints, &res);
+	if (ret != 0 || !res)
+	{
+		elog(WARNING, "getaddrinfo(%s:%s): %s", host, portstr, gai_strerror(ret));
+		return -1;
+	}
+
+	ctx->sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 	if (ctx->sockfd < 0)
 	{
 		return ret;
@@ -54,17 +67,7 @@ netio_connect(NetioContext *ctx, const char *host, int port)
 		goto error;
 	}
 
-	memset(&serv_addr, 0, sizeof(serv_addr));
-	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_port = htons(port);
-
-	if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0)
-	{
-		goto error;
-	}
-
-	if (connect(ctx->sockfd, (struct sockaddr *)&serv_addr,
-			sizeof(serv_addr)) < 0)
+	if (connect(ctx->sockfd, res->ai_addr, res->ai_addrlen) < 0)
 	{
 		int errnum = errno;
 		if (errnum == EINPROGRESS)
