@@ -64,6 +64,7 @@ function teardown_olr()
 
 function teardown_oradata()
 {
+	echo "tearing down oradata..."
     if [ -d ./testenv/olr/oradata ]; then
         sudo rm -r ./testenv/olr/oradata
     fi
@@ -106,6 +107,9 @@ function teardown_remotedb()
 			;;
 		"synchdbnet")
 			teardown_synchdbnet
+			;;
+		"oradata")
+			teardown_oradata
 			;;
 		*)
 			echo "$dbtype not supported"
