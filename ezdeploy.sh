@@ -52,6 +52,11 @@ function teardown-sourcedb()
 	fi
 }
 
+function clear-oradata()
+{
+	DBTYPE=oradata ./ci/teardown-remotedbs.sh
+}
+
 function custom-deployment()
 {
 	echo ""
@@ -184,6 +189,7 @@ case "$choice" in
 	 teardown-sourcedb "ora19c" 
 	 teardown-sourcedb "olr"
 	 teardown-sourcedb "synchdbnet"
+	 clear-oradata
 	 ;;
   *) echo "Invalid choice"; exit 1
 	 ;;

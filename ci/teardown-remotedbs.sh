@@ -66,11 +66,11 @@ function teardown_oradata()
 {
 	echo "tearing down oradata..."
     if [ -d ./testenv/olr/oradata ]; then
-        sudo rm -r ./testenv/olr/oradata
+        sudo rm -rf ./testenv/olr/oradata
     fi
 
     if [ -d ./testenv/olr/checkpoint ]; then
-        sudo rm -r ./testenv/olr/checkpoint
+        sudo rm -rf ./testenv/olr/checkpoint
     fi
 }
 
@@ -103,7 +103,6 @@ function teardown_remotedb()
 		"olr")
 			teardown_olr
 			teardown_ora19c
-			teardown_oradata
 			;;
 		"synchdbnet")
 			teardown_synchdbnet
