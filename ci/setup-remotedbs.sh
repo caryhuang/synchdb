@@ -9,6 +9,14 @@ INTERNAL=${INTERNAL:?please indicate if containers should be deployed as interna
 basedir="$(pwd)"
 MAX_TRIES=200
 
+if docker compose version >/dev/null 2>&1; then
+  docker_compose() { docker compose "$@"; }
+elif command -v docker-compose >/dev/null 2>&1; then
+  docker_compose() { docker-compose "$@"; }
+else
+  echo "ERROR: neither 'docker compose' (v2) nor 'docker-compose' (v1) found." >&2
+  exit 1
+fi
 
 function wait_for_container_ready()
 {
@@ -47,9 +55,9 @@ function setup_mysql()
 {
 	echo "setting up mysql..."
 	if [ $INTERNAL -eq 1 ]; then
-		docker-compose -f testenv/mysql/synchdb-mysql-test-internal.yaml up -d
+		docker_compose -f testenv/mysql/synchdb-mysql-test-internal.yaml up -d
 	else
-		docker-compose -f testenv/mysql/synchdb-mysql-test.yaml up -d
+		docker_compose -f testenv/mysql/synchdb-mysql-test.yaml up -d
 	fi
 	echo "sleep to give container time to startup..."
 	sleep 30  # Give containers time to fully start
@@ -70,9 +78,9 @@ function setup_sqlserver()
 
 	echo "setting up sqlserver..."
 	if [ $INTERNAL -eq 1 ]; then
-		docker-compose -f testenv/sqlserver/synchdb-sqlserver-test-internal.yaml up -d
+		docker_compose -f testenv/sqlserver/synchdb-sqlserver-test-internal.yaml up -d
 	else
-		docker-compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml up -d
+		docker_compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml up -d
 	fi
 	echo "sleep to give container time to startup..."
 	sleep 30  # Give containers time to fully start
@@ -93,9 +101,9 @@ function setup_oracle()
 	if ! docker ps -a --format '{{.Names}}' | grep -q "oracle"; then
         # container has not run before. Run a new one
 		if [ $INTERNAL -eq 1 ]; then
-        	docker-compose -f testenv/oracle/synchdb-oracle-test-internal.yaml up -d
+        	docker_compose -f testenv/oracle/synchdb-oracle-test-internal.yaml up -d
 		else
-			docker-compose -f testenv/oracle/synchdb-oracle-test.yaml up -d
+			docker_compose -f testenv/oracle/synchdb-oracle-test.yaml up -d
 		fi
 		wait_for_container_ready "oracle" "DATABASE IS READY TO USE"
         needsetup=1
@@ -243,15 +251,15 @@ function setup_ora19c()
 		# container has not run before. Run a new one
 		if [ "$forolr" == "olr" ]; then
 			if [ $INTERNAL -eq 1 ]; then
-				docker-compose -f testenv/ora19c/synchdb-ora19c-test-olr-internal.yaml up -d
+				docker_compose -f testenv/ora19c/synchdb-ora19c-test-olr-internal.yaml up -d
 			else
-				docker-compose -f testenv/ora19c/synchdb-ora19c-test-olr.yaml up -d
+				docker_compose -f testenv/ora19c/synchdb-ora19c-test-olr.yaml up -d
 			fi
 		else
 			if [ $INTERNAL -eq 1 ]; then
-				docker-compose -f testenv/ora19c/synchdb-ora19c-test-internal.yaml up -d
+				docker_compose -f testenv/ora19c/synchdb-ora19c-test-internal.yaml up -d
 			else
-				docker-compose -f testenv/ora19c/synchdb-ora19c-test.yaml up -d
+				docker_compose -f testenv/ora19c/synchdb-ora19c-test.yaml up -d
 			fi
 		fi
 		wait_for_container_ready "ora19c" "DATABASE IS READY TO USE"
@@ -432,7 +440,7 @@ function setup_olr()
 	#docker ps -a | grep "OpenLogReplicator" >/dev/null
     #if [ $? -ne 0 ]; then
 	if ! docker ps -a --format '{{.Names}}' | grep -q "OpenLogReplicator"; then
-		docker-compose -f testenv/olr/synchdb-olr-test.yaml up -d
+		docker_compose -f testenv/olr/synchdb-olr-test.yaml up -d
 #		docker run -d --name OpenLogReplicator \
 #			--network synchdbnet \
 #			-p 7070:7070 \

@@ -12,21 +12,20 @@ function have()
 function deploy-synchdb()
 {
 	echo "setting up synchdb..."
-	if docker ps -a --format '{{.Names}}' | grep -q "synchdb"; then
+	if docker inspect synchdb >/dev/null 2>&1; then
 		echo "synchdb already exists: skip it..."
 	else
-		docker-compose -f ./testenv/synchdb/synchdb-test.yaml up -d
+		docker_compose -f ./testenv/synchdb/synchdb-test.yaml up -d
 	fi
 }
 
 function teardown-synchdb()
 {
 	echo "tearing down synchdb..."
-    if docker ps -a --format '{{.Names}}' | grep -q "synchdb"; then
-        docker stop synchdb >/dev/null 2>&1
-        docker rm synchdb >/dev/null 2>&1
-    fi
-	#docker-compose -f ./testenv/synchdb/synchdb-test.yaml down
+	if docker inspect synchdb >/dev/null 2>&1; then
+		docker stop synchdb >/dev/null 2>&1
+		docker rm synchdb >/dev/null 2>&1
+	fi
 }
 
 function deploy-sourcedb()
@@ -47,7 +46,7 @@ function teardown-sourcedb()
 		name=$1
 	fi
 
-	if docker ps -a --format '{{.Names}}' | grep -q "$name"; then
+	if docker inspect $name >/dev/null 2>&1; then
 		DBTYPE=$1 ./ci/teardown-remotedbs.sh	
 	fi
 }
@@ -61,7 +60,7 @@ function custom-deployment()
 {
 	echo ""
 	echo "please list source databases separate by comma"
-    echo "possible values: (mysql, sqlserver, oracle23ai, oracle19c, olr)"
+	echo "possible values: (mysql, sqlserver, oracle23ai, oracle19c, olr)"
 
 	read -rp "your selection: " RAW_CHOICES
 	IFS=', ' read -r -a _tokens <<< "$RAW_CHOICES"
@@ -117,18 +116,13 @@ if ! have docker; then
 	exit 1
 fi
 
-if ! have docker-compose; then
-
-	# eheck if docker compose is available
-	docker compose >/dev/null 2>&1
-	if [ $? -ne 0 ]; then 
-		echo "docker-compose is missing. Exit..."
-		exit 1
-	else
-		echo "docker compose is available, but not docker-compose. Please create an alias and try again."
-		echo "example: alias docker-compose=\"docker compose\"" 
-		exit 1
-	fi
+if docker compose version >/dev/null 2>&1; then
+	docker_compose() { docker compose "$@"; }
+elif command -v docker-compose >/dev/null 2>&1; then
+	docker_compose() { docker-compose "$@"; }
+else
+	echo "docker-compose or docker compose is missing. Exit..."
+	exit 1
 fi
 
 # check required scripts
