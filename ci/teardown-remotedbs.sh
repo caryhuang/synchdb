@@ -65,7 +65,7 @@ function teardown_olr()
 function teardown_oradata()
 {
     if [ -d ./testenv/olr/oradata ]; then
-        sudo rm -r /testenv/olr/oradata
+        sudo rm -r ./testenv/olr/oradata
     fi
 
     if [ -d ./testenv/olr/checkpoint ]; then
