@@ -6,5 +6,5 @@ services:
   oracle:
     container_name: oracle
     image: hgneon/testdb-oracle:23ai
-      ports:
+    ports:
       - 1521:1521

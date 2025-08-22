@@ -6,11 +6,17 @@ set -euo pipefail
 DBTYPE=${DBTYPE:?please provide database type via DBTYPE env variable}
 INTERNAL=${INTERNAL:?please indicate if containers should be deployed as internal via INTERNAL env variable (0 or 1)}
 
-echo INTERNAL=$INTERNAL
-
 basedir="$(pwd)"
 MAX_TRIES=200
 
+if docker compose version >/dev/null 2>&1; then
+  docker_compose() { docker compose "$@"; }
+elif command -v docker-compose >/dev/null 2>&1; then
+  docker_compose() { docker-compose "$@"; }
+else
+  echo "ERROR: neither 'docker compose' (v2) nor 'docker-compose' (v1) found." >&2
+  exit 1
+fi
 
 function wait_for_container_ready()
 {
@@ -19,15 +25,16 @@ function wait_for_container_ready()
 	ready=0
 
 	set +e
-	docker ps | grep $name > /dev/null
-	if [ $? -ne 0 ]; then
+	if ! docker inspect $name >/dev/null 2>&1; then
 		echo "$name is not running or failed to start!"
+		return
 	fi	
 
 	for ((i=1; i<=MAX_TRIES; i++));
 	do
 		docker logs "$name" 2>&1 | grep "$keyword"
 		if [ $? -eq 0 ]; then
+		#if docker logs "$name" 2>/dev/null | grep "$keyword"; then
 			echo "$name is ready to use"
 			ready=1
 			break
@@ -48,9 +55,9 @@ function setup_mysql()
 {
 	echo "setting up mysql..."
 	if [ $INTERNAL -eq 1 ]; then
-		docker-compose -f testenv/mysql/synchdb-mysql-test-internal.yaml up -d
+		docker_compose -f testenv/mysql/synchdb-mysql-test-internal.yaml up -d
 	else
-		docker-compose -f testenv/mysql/synchdb-mysql-test.yaml up -d
+		docker_compose -f testenv/mysql/synchdb-mysql-test.yaml up -d
 	fi
 	echo "sleep to give container time to startup..."
 	sleep 30  # Give containers time to fully start
@@ -71,15 +78,15 @@ function setup_sqlserver()
 
 	echo "setting up sqlserver..."
 	if [ $INTERNAL -eq 1 ]; then
-		docker-compose -f testenv/sqlserver/synchdb-sqlserver-test-internal.yaml up -d
+		docker_compose -f testenv/sqlserver/synchdb-sqlserver-test-internal.yaml up -d
 	else
-		docker-compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml up -d
+		docker_compose -f testenv/sqlserver/synchdb-sqlserver-test.yaml up -d
 	fi
 	echo "sleep to give container time to startup..."
 	sleep 30  # Give containers time to fully start
-	docker cp ./testenv/sqlserver/inventory.sql sqlserver:/
-	docker exec -i sqlserver /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION" > /dev/null
-	docker exec -i sqlserver /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql > /dev/null
+	docker cp ./testenv/sqlserver/inventory.sql sqlserver:/  >/dev/null 2>&1
+	docker exec -i sqlserver /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION"  >/dev/null 2>&1
+	docker exec -i sqlserver /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql  >/dev/null 2>&1
 	exit 0
 }
 
@@ -89,28 +96,27 @@ function setup_oracle()
 
 	set +e
 	echo "setting up oracle..."
-	docker ps -a | grep "oracle" | grep -v oracle-19c > /dev/null
-	if [ $? -ne 0 ]; then
+	#docker ps -a | grep "oracle" | grep -v oracle-19c > /dev/null
+	#if [ $? -ne 0 ]; then
+	if ! docker ps -a --format '{{.Names}}' | grep -q "oracle"; then
         # container has not run before. Run a new one
 		if [ $INTERNAL -eq 1 ]; then
-        	docker-compose -f testenv/oracle/synchdb-oracle-test-internal.yaml up -d
+        	docker_compose -f testenv/oracle/synchdb-oracle-test-internal.yaml up -d
 		else
-			docker-compose -f testenv/oracle/synchdb-oracle-test.yaml up -d
+			docker_compose -f testenv/oracle/synchdb-oracle-test.yaml up -d
 		fi
 		wait_for_container_ready "oracle" "DATABASE IS READY TO USE"
         needsetup=1
     else
-        docker ps -a | grep "oracle" | grep -i "Exited" > /dev/null
-        if [ $? -eq 0 ]; then
-            # container has been run before but stopped. Start it
-            docker start oracle
-            wait_for_container_ready "oracle" "DATABASE IS READY TO USE"
+		state=$(docker inspect -f '{{.State.Status}}' oracle 2>/dev/null || echo unknown)
+		if [ $state == "running" ]; then
+            echo "oracle23ai is already running..."
+        elif [ $state == "exited" ]; then
+            echo "oracle23ai exited, starting it again..."
+            docker start oracle >/dev/null 2>&1
+			wait_for_container_ready "oracle" "DATABASE IS READY TO USE"
         else
-            docker ps -a | grep "oracle" | grep -i "Up" > /dev/null
-            if [ $? -eq 0 ]; then
-                # container is running. Just use it
-                echo "using exisitng oracle 19c container..."
-            fi
+            echo "oracle23ai in unknown state. Remove it and try again..."
         fi
 		return
     fi
@@ -239,37 +245,36 @@ function setup_ora19c()
 
 	set +e
 	echo "setting up oracle 19c..."
-	docker ps -a | grep "ora19c" > /dev/null
-	if [ $? -ne 0 ]; then
+	#docker ps -a | grep "ora19c" > /dev/null
+	#if [ $? -ne 0 ]; then
+	if ! docker ps -a --format '{{.Names}}' | grep -q "ora19c"; then
 		# container has not run before. Run a new one
 		if [ "$forolr" == "olr" ]; then
 			if [ $INTERNAL -eq 1 ]; then
-				docker-compose -f testenv/ora19c/synchdb-ora19c-test-olr-internal.yaml up -d
+				docker_compose -f testenv/ora19c/synchdb-ora19c-test-olr-internal.yaml up -d
 			else
-				docker-compose -f testenv/ora19c/synchdb-ora19c-test-olr.yaml up -d
+				docker_compose -f testenv/ora19c/synchdb-ora19c-test-olr.yaml up -d
 			fi
 		else
 			if [ $INTERNAL -eq 1 ]; then
-				docker-compose -f testenv/ora19c/synchdb-ora19c-test-internal.yaml up -d
+				docker_compose -f testenv/ora19c/synchdb-ora19c-test-internal.yaml up -d
 			else
-				docker-compose -f testenv/ora19c/synchdb-ora19c-test.yaml up -d
+				docker_compose -f testenv/ora19c/synchdb-ora19c-test.yaml up -d
 			fi
 		fi
 		wait_for_container_ready "ora19c" "DATABASE IS READY TO USE"
 		needsetup=1	
 	else
-		docker ps -a | grep "ora19c" | grep -i "Exited" > /dev/null
-		if [ $? -eq 0 ]; then
-			# container has been run before but stopped. Start it
-			docker start ora19c
+		state=$(docker inspect -f '{{.State.Status}}' ora19c 2>/dev/null || echo unknown)
+		if [ $state == "running" ]; then
+            echo "oracle19c is already running..."
+        elif [ $state == "exited" ]; then
+            echo "oracle19c exited, starting it again..."
+            docker start ora19c >/dev/null 2>&1
 			wait_for_container_ready "ora19c" "DATABASE IS READY TO USE"
-		else
-			docker ps -a | grep "ora19c" | grep -i "Up" > /dev/null
-			if [ $? -eq 0 ]; then
-				# container is running. Just use it
-				echo "using exisitng oracle 19c container..."
-			fi
-		fi
+        else
+            echo "oracle19c in unknown state. Remove it and try again..."
+        fi
 		return
 	fi
 
@@ -415,13 +420,8 @@ function setup_hammerdb()
 	exit 0
 }
 
-function setup_oranet_and_oradata()
+function setup_oradata()
 {
-	#docker network inspect oranet >/dev/null 2>&1
-	#if [ $? -ne 0 ]; then
-	#	docker network create oranet
-	#fi
-
 	if [ ! -d ./testenv/olr/oradata ]; then
 		mkdir ./testenv/olr/oradata
 		sudo chown 54321:54321 -R ./testenv/olr/oradata
@@ -437,9 +437,10 @@ function setup_olr()
 {
 	echo "setting up openlog replicator $OLRVER..."
 
-	docker ps -a | grep "OpenLogReplicator" >/dev/null
-    if [ $? -ne 0 ]; then
-		docker-compose -f testenv/olr/synchdb-olr-test.yaml up -d
+	#docker ps -a | grep "OpenLogReplicator" >/dev/null
+    #if [ $? -ne 0 ]; then
+	if ! docker ps -a --format '{{.Names}}' | grep -q "OpenLogReplicator"; then
+		docker_compose -f testenv/olr/synchdb-olr-test.yaml up -d
 #		docker run -d --name OpenLogReplicator \
 #			--network synchdbnet \
 #			-p 7070:7070 \
@@ -450,17 +451,15 @@ function setup_olr()
 #			--user 54321 \
 #			hgneon/openlogreplicator:$OLRVER
 	else
-        docker ps -a | grep "OpenLogReplicator" | grep -i "Exited" > /dev/null
-        if [ $? -eq 0 ]; then
-            # container has been run before but stopped. Start it
-			echo "starting OpenLogReplicator..."
-            docker start OpenLogReplicator
-			sleep 15
+		state=$(docker inspect -f '{{.State.Status}}' OpenLogReplicator 2>/dev/null || echo unknown)
+        #docker ps -a | grep "OpenLogReplicator" | grep -i "Exited" > /dev/null
+        if [ $state == "running" ]; then
+			echo "openlog repliator is already running..."
+		elif [ $state == "exited" ]; then
+			echo "OpenLogReplicator exited, starting it again..."
+            docker start OpenLogReplicator >/dev/null 2>&1
         else
-            docker ps -a | grep "OpenLogReplicator" | grep -i "Up" > /dev/null
-            if [ $? -eq 0 ]; then
-				echo "openlog repliator is already running..."
-            fi
+			echo "OpenLogReplicator in unknown state. Remove it and try again..."
         fi
     fi
 }
@@ -487,7 +486,7 @@ function setup_remotedb()
 			;;
 		"olr")
 			OLRVER=${OLRVER:?please provide OLR version via OLRVER env variable}
-			setup_oranet_and_oradata
+			setup_oradata
 			setup_ora19c "olr"
 			setup_olr
 			;;
