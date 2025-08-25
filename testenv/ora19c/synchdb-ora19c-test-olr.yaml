@@ -6,7 +6,7 @@ services:
   ora19c:
     container_name: ora19c
     image: doctorkirk/oracle-19c
-      ports:
+    ports:
       - 1521:1521
     environment:
       - ORACLE_SID=FREE
