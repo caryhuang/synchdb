@@ -9,6 +9,37 @@ function have()
 	command -v "$1" >/dev/null 2>&1;
 }
 
+function deploy-monitoring()
+{
+	echo "setting up prometheus..."
+	if docker inspect prometheus >/dev/null 2>&1; then
+                echo "prometheus already exists: skip it..."
+        else
+                docker_compose -f ./src/monitoring/docker-compose.yaml up -d prometheus
+        fi
+	echo "setting up grafana..."
+	if docker inspect grafana >/dev/null 2>&1; then
+                echo "grafaaana already exists: skip it..."
+        else
+                docker_compose -f ./src/monitoring/docker-compose.yaml up -d grafana
+        fi
+}
+
+function teardown-monitoring()
+{
+	echo "tearing down grafana..."
+	if docker inspect grafana >/dev/null 2>&1; then
+		docker stop grafana >/dev/null 2>&1
+		docker rm grafana >/dev/null 2>&1
+	fi
+
+	echo "tearing down prometheus"
+	if docker inspect prometheus >/dev/null 2>&1; then
+		docker stop prometheus >/dev/null 2>&1
+		docker rm prometheus >/dev/null 2>&1
+	fi
+}
+
 function deploy-synchdb()
 {
 	echo "setting up synchdb..."
@@ -138,15 +169,16 @@ echo "-----> Welcome to ezdeploy! <-----"
 echo "----------------------------------"
 echo ""
 echo "please select a quick deploy option:"
-echo -e "\t1) synchdb only"
-echo -e "\t2) synchdb + mysql"
-echo -e "\t3) synchdb + sqlserver"
-echo -e "\t4) synchdb + oracle23ai"
-echo -e "\t5) synchdb + oracle19c"
-echo -e "\t6) synchdb + olr(oracle19c)"
-echo -e "\t7) synchdb + all source databases"
-echo -e "\t8) custom deployment"
-echo -e "\t9) teardown deployment"
+echo -e "\t 1) synchdb only"
+echo -e "\t 2) synchdb + mysql"
+echo -e "\t 3) synchdb + sqlserver"
+echo -e "\t 4) synchdb + oracle23ai"
+echo -e "\t 5) synchdb + oracle19c"
+echo -e "\t 6) synchdb + olr(oracle19c)"
+echo -e "\t 7) synchdb + all source databases"
+echo -e "\t 8) custom deployment"
+echo -e "\t 9) deploy monitoring"
+echo -e "\t10) teardown deployment"
 
 read -rp "enter your selection: " choice
 
@@ -172,18 +204,21 @@ case "$choice" in
 	 deploy-sourcedb "mysql"
 	 deploy-sourcedb "sqlserver" 
 	 deploy-sourcedb "oracle" 
-	 deploy-sourcedb "olr"
+	 #deploy-sourcedb "olr"
 	 ;;
   8) custom-deployment 
 	 ;;
-  9) teardown-synchdb
+  9) deploy-monitoring
+	 ;;
+ 10) teardown-synchdb
 	 teardown-sourcedb "mysql"
 	 teardown-sourcedb "sqlserver" 
 	 teardown-sourcedb "oracle" 
 	 teardown-sourcedb "ora19c" 
 	 teardown-sourcedb "olr"
-	 teardown-sourcedb "synchdbnet"
+	 teardown-monitoring
 	 clear-oradata
+	 teardown-sourcedb "synchdbnet"
 	 ;;
   *) echo "Invalid choice"; exit 1
 	 ;;
