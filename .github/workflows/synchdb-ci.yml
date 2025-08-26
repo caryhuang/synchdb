@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-22.04
     name: Initialize parameters
     outputs:
-      pg16_version: '{ "major": "16", "full": "16.8" }'
-      pg17_version: '{ "major": "17", "full": "17.4" }'
+      pg16_version: '{ "major": "16", "full": "REL_16_10" }'
+      pg17_version: '{ "major": "17", "full": "REL_17_6" }'
     steps:
       - name: set up parameters
         run: echo 'noop'
@@ -45,7 +45,9 @@ jobs:
         sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
         sudo apt-get install -y postgresql-server-dev-${{ fromJson(matrix.pg_version).major }}
     - name: Expose $PG_MAJOR to Github Env
-      run: echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
+      run: |
+        echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
+        echo "PG_BRANCH=$(echo '${{ matrix.pg_version }}' | jq -r .full)" >> $GITHUB_ENV
       shell: bash
     - name: Build
       run: "./ci/build-synchdb.sh"
