@@ -6,7 +6,6 @@ IFS=$'\n\t'
 
 # read pg major version, error if not provided
 PG_MAJOR=${PG_MAJOR:?please provide the postgres major version}
-WITH_OLR=${WITH_OLR:?please provide with_olr flag}
 
 # get codename from release file
 . /etc/os-release
@@ -19,9 +18,7 @@ basedir="$(pwd)"
 function build_synchdb()
 {
 	pg_major="$1"
-	witholr=$2
 
-	echo "witholr=$witholr"
 	installdir="${basedir}/synchdb-install-${pg_major}"
 	mkdir -p $installdir
 	echo "Beginning build for PostgreSQL ${pg_major}..." >&2
@@ -39,4 +36,4 @@ function build_synchdb()
 	mv synchdb-install-${pg_major}.tar.gz $basedir
 }
 
-build_synchdb "${PG_MAJOR}" $WITH_OLR
+build_synchdb "${PG_MAJOR}"
