@@ -111,6 +111,8 @@ RUN		make WITH_OLR=1 install_dbz
 
 ENV 	PATH="/usr/lib/postgresql/${POSTGRES_VERSION}/bin:${PATH}"
 COPY 	init-synchdb.sh /usr/local/bin
+COPY	jmx_prometheus_javaagent-1.3.0.jar $USER_HOME
+COPY	jmxexport.conf $USER_HOME
 RUN		chmod +x /usr/local/bin/init-synchdb.sh
 
 RUN		mkdir -p /var/run/postgresql \
