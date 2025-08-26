@@ -7,11 +7,6 @@ IFS=$'\n\t'
 # read pg major version, error if not provided
 DBTYPE=${DBTYPE:?please provide database type}
 
-# get codename from release file
-. /etc/os-release
-codename=${VERSION#*(}
-codename=${codename%)*}
-
 # we'll do everything with absolute paths
 basedir="$(pwd)"
 
