@@ -37,7 +37,7 @@ function build_synchdb()
             --with-icu \
             --with-ssl=openssl && \
         make && \
-        make install
+        sudo make install
 	)
 
 	echo "im at $PWD after pg build"
