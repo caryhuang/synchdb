@@ -53,6 +53,8 @@ function build_synchdb()
         	make install
 	)
 
+	du -h $installdir
+
 	mkdir -p postgres/contrib/synchdb
 	rsync -a --delete \
 			--exclude '.git/' \
@@ -67,7 +69,7 @@ function build_synchdb()
 			make oracle_parser && \
 			make install_oracle_parser && \
 			make WITH_OLR=1 build_dbz && \
-			make WITH_OLR=1 && \
+			make WITH_OLR=1 PG_CFLAGS+=" -I$installdir/include" PG_CPPFLAGS+=" -I$installdir/include" && \
 			make WITH_OLR=1 install && \
 			make WITH_OLR=1 install_dbz
 	)	
