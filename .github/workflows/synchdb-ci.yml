@@ -66,7 +66,7 @@ jobs:
     strategy:
       matrix:
         pg_version:
-          - ${{ needs.params.outputs.pg16_version }}
+          #- ${{ needs.params.outputs.pg16_version }}
           - ${{ needs.params.outputs.pg17_version }}
         dbtypes:
           - mysql
@@ -108,10 +108,6 @@ jobs:
         sudo ldconfig
     - name: Install Base PG and SynchDB
       run: |
-        sudo apt-get update
-        echo -ne "\n" | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
-        sudo apt-get install -y postgresql-client-${{ fromJson(matrix.pg_version).major }}
-        sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
         sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
         sudo apt-get install -y docker-compose
         docker-compose --version
