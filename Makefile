@@ -44,8 +44,8 @@ endif
 
 JDK_LIB_PATH := $(JDK_HOME_PATH)/lib/server
 
-PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include
-PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include
+PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include -I${PROTOBUF_C_INCLUDE_DIR}
+PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include -I${PROTOBUF_C_INCLUDE_DIR}
 PG_LDFLAGS = -L$(JDK_LIB_PATH) -ljvm
 
 
@@ -55,7 +55,7 @@ OBJS += src/backend/converter/olr_event_handler.o \
 		src/backend/utils/netio_utils.o \
 		src/backend/olr/olr_client.o
 
-PG_LDFLAGS += -lprotobuf-c
+PG_LDFLAGS += -lprotobuf-c -L$(PROTOBUF_C_LIB_DIR)
 PG_CFLAGS += -DWITH_OLR
 PG_CPPFLAGS += -DWITH_OLR
 endif
