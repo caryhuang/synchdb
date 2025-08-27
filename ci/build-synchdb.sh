@@ -53,8 +53,6 @@ function build_synchdb()
         	make install
 	)
 
-	du -h $installdir
-
 	mkdir -p postgres/contrib/synchdb
 	rsync -a --delete \
 			--exclude '.git/' \
@@ -85,12 +83,8 @@ function build_synchdb()
 	#sudo USE_PGXS=1 make install_dbz pkglibdir=${installdir}/usr/lib/postgresql/${pg_major}/lib  PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
 
 	cd $installdir
-	du -h .
 	tar czvf synchdb-install-${pg_major}.tar.gz *
 	mv synchdb-install-${pg_major}.tar.gz $basedir
-	
-	ls $basedir
-	exit 1
 }
 
 build_synchdb "${PG_MAJOR}"
