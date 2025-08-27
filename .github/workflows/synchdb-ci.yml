@@ -109,7 +109,7 @@ jobs:
     - name: Install Base PG and SynchDB
       run: |
         sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
-        sudo apt-get install -y docker-compose
+        apt-get install -y docker-compose
         docker-compose --version
     - name: Install Protobuf
       run: |
