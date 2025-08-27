@@ -28,7 +28,7 @@ function build_synchdb()
 	git clone https://github.com/postgres/postgres.git --branch ${PG_BRANCH}
 	(
 		cd postgres && \
-        	./configure --prefix=/usr/lib/postgresql/${PG_MAJOR} \
+        	./configure --prefix=${installdir}/usr/lib/postgresql/${PG_MAJOR} \
             --enable-cassert \
             -enable-rpath \
             --enable-injection-points \
@@ -36,15 +36,34 @@ function build_synchdb()
             --with-libxml \
             --with-icu \
             --with-ssl=openssl && \
-        make && \
-        sudo make install
+        	make && \
+        	make install
+
+		cd contrib && \
+			make && \
+			make install
+	)
+	
+	git clone https://github.com/protobuf-c/protobuf-c.git --branch v1.5.2
+	(
+		cd protobuf-c && \
+			./autogen.sh && \
+        	./configure --prefix=${installdir} && \
+        	make && \
+        	make install
 	)
 
-	echo "im at $PWD after pg build"
 	ln -s $PWD postgres/contrib/synchdb
+	(
+		cd postgres/contrib/synchdb && \
+			make oracle_parser && \
+			make install_oracle_parser && \
+			make WITH_OLR=1 build_dbz && \
+			make WITH_OLR=1 && \
+			make WITH_OLR=1 install && \
+			make WITH_OLR=1 install_dbz
+	)	
 
-
-	exit 1
 	#mkdir -p "${builddir}" && cd "${builddir}"
 	
 	
@@ -56,9 +75,12 @@ function build_synchdb()
 	#sudo USE_PGXS=1 make install_dbz pkglibdir=${installdir}/usr/lib/postgresql/${pg_major}/lib  PG_CONFIG=/usr/lib/postgresql/${pg_major}/bin/pg_config
 
 	cd $installdir
-	ls
+	du -h .
 	tar czvf synchdb-install-${pg_major}.tar.gz *
 	mv synchdb-install-${pg_major}.tar.gz $basedir
+	
+	ls $basedir
+	exit 1
 }
 
 build_synchdb "${PG_MAJOR}"
