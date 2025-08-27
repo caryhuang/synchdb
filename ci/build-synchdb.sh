@@ -48,7 +48,7 @@ function build_synchdb()
 	(
 		cd protobuf-c && \
 			./autogen.sh && \
-        	./configure --prefix=${installdir} && \
+        	./configure --prefix=${installdir}/usr/local && \
         	make && \
         	make install
 	)
@@ -67,7 +67,7 @@ function build_synchdb()
 			make oracle_parser && \
 			make install_oracle_parser && \
 			make WITH_OLR=1 build_dbz && \
-			make WITH_OLR=1 PROTOBUF_C_INCLUDE_DIR=$installdir/include PROTOBUF_C_LIB_DIR=$installdir/lib && \
+			make WITH_OLR=1 PROTOBUF_C_INCLUDE_DIR=$installdir/usr/local/include PROTOBUF_C_LIB_DIR=$installdir/usr/local/lib && \
 			make WITH_OLR=1 install && \
 			make WITH_OLR=1 install_dbz
 	)	
