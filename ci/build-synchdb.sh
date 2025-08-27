@@ -38,7 +38,7 @@ function build_synchdb()
             --with-ssl=openssl && \
         make && \
         make install
-	}
+	)
 
 	echo "im at $PWD after pg build"
 	ln -s $PWD postgres/contrib/synchdb
