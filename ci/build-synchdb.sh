@@ -26,18 +26,19 @@ function build_synchdb()
 	echo "Beginning build for PostgreSQL ${pg_major}..." >&2
 
 	git clone https://github.com/postgres/postgres.git --branch ${PG_BRANCH}
-	cd postgres && \
+	(
+		cd postgres && \
         	./configure --prefix=/usr/lib/postgresql/${PG_MAJOR} \
             --enable-cassert \
             -enable-rpath \
             --enable-injection-points \
             --with-libedit-preferred \
             --with-libxml \
-            --with-libxslt \
             --with-icu \
             --with-ssl=openssl && \
         make && \
         make install
+	}
 
 	echo "im at $PWD after pg build"
 	ln -s $PWD postgres/contrib/synchdb
