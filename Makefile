@@ -64,12 +64,15 @@ ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+PG_MAJOR := $(shell $(PG_CONFIG) --majorversion)
 else
 subdir = contrib/synchdb
 top_builddir = ../..
 include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk
+PG_MAJOR := $(MAJORVERSION)
 endif
+
 
 check_protobufc:
 	@echo "Checking protobuf-c installation"
@@ -124,13 +127,16 @@ install_dbz:
 	cp -rp $(DBZ_ENGINE_PATH)/target/* $(pkglibdir)/dbz_engine
 
 oracle_parser:
-	make -C src/backend/olr/oracle_parser
+	@echo "building against pgmajor ${PG_MAJOR}"
+	 make -C src/backend/olr/oracle_parser${PG_MAJOR}
 
 clean_oracle_parser:
-	make -C src/backend/olr/oracle_parser clean
+	@echo "cleaning against pgmajor ${PG_MAJOR}"
+	make clean -C src/backend/olr/oracle_parser${PG_MAJOR}
 
 install_oracle_parser:
-	make -C src/backend/olr/oracle_parser install
+	@echo "installing against pgmajor ${PG_MAJOR}"
+	make install -C src/backend/olr/oracle_parser${PG_MAJOR}
 
 .PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck dbcheck-tpcc mysqlcheck-tpcc sqlservercheck-tpcc oraclecheck-tpcc
 dbcheck:
