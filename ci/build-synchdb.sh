@@ -53,7 +53,15 @@ function build_synchdb()
         	make install
 	)
 
-	ln -s $PWD postgres/contrib/synchdb
+	mkdir -p postgres/contrib/synchdb
+	rsync -a --delete \
+			--exclude '.git/' \
+			--exclude='.github/' \
+			--exclude='ci/' \
+			--exclude='testenv/' \
+			--exclude='postgres/' \
+			--exclude='protobuf-c/' \
+			./ postgres/contrib/synchdb/
 	(
 		cd postgres/contrib/synchdb && \
 			make oracle_parser && \
