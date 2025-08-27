@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     name: Initialize parameters
     outputs:
-      pg16_version: '{ "major": "16", "full": "REL_16_10" }'
+      pg16_version: '{ "major": "16", "full": "REL_16_4" }'
       pg17_version: '{ "major": "17", "full": "REL_17_4" }'
     steps:
       - name: set up parameters
