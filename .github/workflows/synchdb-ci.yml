@@ -37,13 +37,6 @@ jobs:
       uses: stCarolas/setup-maven@v4.5
       with:
         maven-version: 3.9.8
-    #- name: Install pg
-    #  run: |
-    #    sudo apt-get update
-    #    echo -ne "\n" | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
-    #    sudo apt-get install -y postgresql-client-${{ fromJson(matrix.pg_version).major }}
-    #    sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
-    #    sudo apt-get install -y postgresql-server-dev-${{ fromJson(matrix.pg_version).major }}
     - name: Install Protobuf
       run: |
         sudo apt-get update
@@ -72,6 +65,7 @@ jobs:
           - mysql
           - oracle
           - sqlserver
+          - olr
     runs-on: ubuntu-22.04
     needs:
     - params
@@ -123,7 +117,7 @@ jobs:
         export PATH=$PATH:/usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/bin
         mkdir -p /var/run/postgresql
         sudo chown -R $(whoami) /var/run/postgresql
-        make USE_PGXS=1 ${{ matrix.dbtypes }}check
+        make ${{ matrix.dbtypes }}check
     - uses: actions/upload-artifact@v4
       if: always()
       with:
