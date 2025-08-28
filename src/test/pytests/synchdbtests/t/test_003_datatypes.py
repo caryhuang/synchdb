@@ -771,7 +771,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
                 ("2025-12-12", 1002, 10000, 102)
             """)
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
