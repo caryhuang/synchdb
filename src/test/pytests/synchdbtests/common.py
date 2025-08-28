@@ -22,7 +22,7 @@ def get_container_ip(name: str, network: str = "synchdbnet") -> str | None:
         # e.g. "Error: No such object: <name>"
         err = (proc.stderr or "").strip()
         if "No such object" in err:
-            print(f"[ERROR] cannot get container IP for {name}")
+            # print(f"[ERROR] cannot get container IP for {name}")
             return None
         raise RuntimeError(f"docker inspect failed: {err}")
 
@@ -224,6 +224,10 @@ def run_remote_query(where, query, srcdb=None):
             if where == "oracle":
                 result = subprocess.check_output(["docker", "exec", "-i", "oracle", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
             else:
+                global ORA19C_HOST
+                if ORA19C_HOST == None:
+                    ORA19C_HOST = get_container_ip(name="ora19c")
+
                 result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORA19C_USER}/{ORA19C_PASS}@//{ORA19C_HOST}:{ORA19C_PORT}/{db}"], input=sql, text=True).strip()
                 
             rows = []
@@ -261,6 +265,12 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None):
     elif vendor == "oracle":
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', 'postgres', 'null', 'null', 'oracle');")
     else:
+        global ORA19C_HOST
+        global OLR_HOST
+        if ORA19C_HOST == None:
+            ORA19C_HOST = get_container_ip(name="ora19c")
+        if OLR_HOST == None:
+            OLR_HOST = get_container_ip(name="OpenLogReplicator")
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORA19C_HOST}', {ORA19C_PORT}, '{ORA19C_USER}', '{ORA19C_PASS}', '{db}', 'postgres', 'null', 'null', 'olr');")
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_olr_conninfo('{name}','{OLR_HOST}', {OLR_PORT}, '{OLR_SERVICE}');")
 
