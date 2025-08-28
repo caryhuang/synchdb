@@ -1,6 +1,7 @@
 
 import subprocess
 import socket
+import time
 
 def get_container_ip(name: str, network: str = "synchdbnet") -> str | None:
     # Go template with the specific network:
@@ -225,8 +226,13 @@ def run_remote_query(where, query, srcdb=None):
                 result = subprocess.check_output(["docker", "exec", "-i", "oracle", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
             else:
                 global ORA19C_HOST
-                if ORA19C_HOST == None:
+                max_tries = 20
+                tries = 0
+
+                while ORA19C_HOST is None and tries < max_tries:
                     ORA19C_HOST = get_container_ip(name="ora19c")
+                    tries += 1
+                    time.sleep(1)
 
                 result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORA19C_USER}/{ORA19C_PASS}@//{ORA19C_HOST}:{ORA19C_PORT}/{db}"], input=sql, text=True).strip()
                 
@@ -267,10 +273,21 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None):
     else:
         global ORA19C_HOST
         global OLR_HOST
-        if ORA19C_HOST == None:
+        max_tries = 20
+        tries = 0
+
+        while ORA19C_HOST is None and tries < max_tries:
             ORA19C_HOST = get_container_ip(name="ora19c")
-        if OLR_HOST == None:
+            tries += 1
+            time.sleep(1)
+        
+        tries = 0
+        while OLR_HOST is None and tries < max_tries:
             OLR_HOST = get_container_ip(name="OpenLogReplicator")
+            tries += 1
+            time.sleep(1)
+        
+        assert ORA19C_HOST != None and OLR_HOST != None
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORA19C_HOST}', {ORA19C_PORT}, '{ORA19C_USER}', '{ORA19C_PASS}', '{db}', 'postgres', 'null', 'null', 'olr');")
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_olr_conninfo('{name}','{OLR_HOST}', {OLR_PORT}, '{OLR_SERVICE}');")
 
