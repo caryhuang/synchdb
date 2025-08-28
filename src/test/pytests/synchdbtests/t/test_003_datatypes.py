@@ -682,7 +682,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
@@ -785,6 +785,9 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+
+    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number=10005")
+    time.sleep(5)
     
 def test_TransformExpressionWithError(pg_cursor, dbvendor):
     assert True

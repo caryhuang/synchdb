@@ -73,7 +73,7 @@ netio_connect(NetioContext *ctx, const char *host, int port)
 		if (errnum == EINPROGRESS)
 		{
 			struct pollfd pfd = { .fd = ctx->sockfd, .events = POLLOUT };
-			if (poll(&pfd, 1, 20000) > 0)	/* todo: configurable conn timeout */
+			if (poll(&pfd, 1, 5000) > 0)	/* todo: configurable conn timeout */
 			{
 				int err = 0;
 				socklen_t len = sizeof(err);
