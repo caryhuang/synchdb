@@ -2,9 +2,9 @@ name: SynchDB CI
 on:
   workflow_dispatch:
   push:
-    branches: [ main, synchdb-devel, github-action-test]
+    branches: [ main, synchdb-devel]
   pull_request:
-    branches: [ main, synchdb-devel, github-action-test]
+    branches: [ main, synchdb-devel]
 jobs:
   params:
     runs-on: ubuntu-22.04
