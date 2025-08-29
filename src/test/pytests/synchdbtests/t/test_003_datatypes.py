@@ -488,9 +488,10 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
             assert row[22] == None
             assert row[23] == None
     
-    run_remote_query(dbvendor, "DROP TABLE mytable")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    
+    run_remote_query(dbvendor, "DROP TABLE mytable")
 
 def test_TableNameMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_tnm"
@@ -555,11 +556,13 @@ def test_TableNameMapping(pg_cursor, dbvendor):
     rows = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM information_schema.tables WHERE table_schema = 'someschema' AND table_name ='objmap_dsttable3')")
     assert rows[0] == True
     
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
+    
     run_remote_query(dbvendor, "DROP TABLE objmap_srctable1")
     run_remote_query(dbvendor, "DROP TABLE objmap_srctable2")
     run_remote_query(dbvendor, "DROP TABLE objmap_srctable3")
-    stop_and_delete_synchdb_connector(pg_cursor, name)
-    drop_default_pg_schema(pg_cursor, dbvendor)
+    time.sleep(5)
 
 def test_ColumnNameMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_cnm"
@@ -601,9 +604,11 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
     assert rows[0][1] == 'pgintcol'
     assert rows[1][1] == 'pgtextcol'
 
-    run_remote_query(dbvendor, "DROP TABLE objmapcol_srctable1")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    
+    run_remote_query(dbvendor, "DROP TABLE objmapcol_srctable1")
+    time.sleep(5)
 
 def test_DataTypeMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_dtm"
