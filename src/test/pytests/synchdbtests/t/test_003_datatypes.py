@@ -201,7 +201,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(20)
@@ -346,7 +346,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(15)
@@ -534,7 +534,7 @@ def test_TableNameMapping(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
     
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
@@ -591,7 +591,7 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
     
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
@@ -621,7 +621,7 @@ def test_DataTypeMapping(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
@@ -652,7 +652,7 @@ def test_TransformExpression(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
