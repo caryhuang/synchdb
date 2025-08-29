@@ -492,6 +492,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     
     run_remote_query(dbvendor, "DROP TABLE mytable")
+    time.sleep(5)
 
 def test_TableNameMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_tnm"

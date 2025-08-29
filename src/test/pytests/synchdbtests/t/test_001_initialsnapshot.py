@@ -237,7 +237,7 @@ def test_ConnectorRestartNodataMode(pg_cursor, dbvendor):
 def test_ConnectorDelete(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
 
-    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "never")
+    result = create_synchdb_connector(pg_cursor, dbvendor, name)
     assert result == 0
 
     result = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_conninfo('{name}')")
