@@ -1,3 +1,0 @@
-# initializing database system by copying initdb template
-# using temp instance on port 55316 with PID 964187
-# command failed: "psql" -X -q -c "CREATE EXTENSION IF NOT EXISTS \"pgcrypto\"" "contrib_regression"Bail out!

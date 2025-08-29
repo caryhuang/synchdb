@@ -127,6 +127,12 @@ function setup_oracle()
     fi
     set -e
 
+	# check if oracle has been initialized
+	isinit=$(docker exec oracle sh -c '[ -d /opt/oracle/oradata/recovery_area ]' && echo exists || echo missing)
+	if [ "$isinit" == "exists" ]; then
+		echo "oracle23ai has been setup already. Skip setup..."
+		return
+	fi
 	docker exec -i oracle mkdir /opt/oracle/oradata/recovery_area
 	docker exec -i oracle sqlplus / as sysdba <<EOF
 Alter user sys identified by oracle;
@@ -283,6 +289,13 @@ function setup_ora19c()
 		return
 	fi
 	set -e
+
+	# check if oracle has been initialized
+    isinit=$(docker exec ora19c sh -c '[ -d /opt/oracle/oradata/recovery_area ]' && echo exists || echo missing)
+    if [ "$isinit" == "exists" ]; then
+        echo "oracle19c has been setup already. Skip setup..."
+        return
+    fi
 
 	docker exec -i ora19c mkdir /opt/oracle/oradata/recovery_area
 	sleep 1
