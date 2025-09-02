@@ -14,3 +14,11 @@ services:
       - ORACLE_CHARACTERSET=AL32UTF8
     volumes:
       - ../olr/oradata:/opt/oracle/oradata
+    networks:
+      - synchdbnet
+
+networks:
+  synchdbnet:
+    name: synchdbnet
+    driver: bridge
+    internal: true

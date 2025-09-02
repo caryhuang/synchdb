@@ -44,8 +44,8 @@ endif
 
 JDK_LIB_PATH := $(JDK_HOME_PATH)/lib/server
 
-PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include
-PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include
+PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include -I${PROTOBUF_C_INCLUDE_DIR}
+PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include -I${PROTOBUF_C_INCLUDE_DIR}
 PG_LDFLAGS = -L$(JDK_LIB_PATH) -ljvm
 
 
@@ -55,7 +55,7 @@ OBJS += src/backend/converter/olr_event_handler.o \
 		src/backend/utils/netio_utils.o \
 		src/backend/olr/olr_client.o
 
-PG_LDFLAGS += -lprotobuf-c
+PG_LDFLAGS += -lprotobuf-c -L$(PROTOBUF_C_LIB_DIR)
 PG_CFLAGS += -DWITH_OLR
 PG_CPPFLAGS += -DWITH_OLR
 endif
@@ -64,12 +64,15 @@ ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+PG_MAJOR := $(shell $(PG_CONFIG) --majorversion)
 else
 subdir = contrib/synchdb
 top_builddir = ../..
 include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk
+PG_MAJOR := $(MAJORVERSION)
 endif
+
 
 check_protobufc:
 	@echo "Checking protobuf-c installation"
@@ -124,13 +127,16 @@ install_dbz:
 	cp -rp $(DBZ_ENGINE_PATH)/target/* $(pkglibdir)/dbz_engine
 
 oracle_parser:
-	make -C src/backend/olr/oracle_parser
+	@echo "building against pgmajor ${PG_MAJOR}"
+	 make -C src/backend/olr/oracle_parser${PG_MAJOR}
 
 clean_oracle_parser:
-	make -C src/backend/olr/oracle_parser clean
+	@echo "cleaning against pgmajor ${PG_MAJOR}"
+	make clean -C src/backend/olr/oracle_parser${PG_MAJOR}
 
 install_oracle_parser:
-	make -C src/backend/olr/oracle_parser install
+	@echo "installing against pgmajor ${PG_MAJOR}"
+	make install -C src/backend/olr/oracle_parser${PG_MAJOR}
 
 .PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck dbcheck-tpcc mysqlcheck-tpcc sqlservercheck-tpcc oraclecheck-tpcc
 dbcheck:
