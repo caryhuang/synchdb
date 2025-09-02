@@ -73,30 +73,34 @@ netio_connect(NetioContext *ctx, const char *host, int port)
 		if (errnum == EINPROGRESS)
 		{
 			struct pollfd pfd = { .fd = ctx->sockfd, .events = POLLOUT };
-			if (poll(&pfd, 1, 5000) > 0)
+			if (poll(&pfd, 1, 5000) > 0)	/* todo: configurable conn timeout */
 			{
 				int err = 0;
 				socklen_t len = sizeof(err);
 				if (getsockopt(ctx->sockfd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0)
 				{
 					/* Connection established */
+					elog(DEBUG1, "OLR connected");
 				}
 				else
 				{
 					/* Connection failed: err has errno-like value */
 					elog(WARNING, "connect failed: %s (errno=%d)", strerror(err), err);
+					ret = -1;
 					goto error;
 				}
 			}
 			else
 			{
 				elog(WARNING, "connect timed out or poll error");
+				ret = -1;
 				goto error;
 			}
 		}
 		else
 		{
 			elog(WARNING, "connect failed errno = %d", errnum);
+			ret = -1;
 			goto error;
 		}
 	}

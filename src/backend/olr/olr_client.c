@@ -39,7 +39,6 @@ olr_client_init(const char * hostname, unsigned int port)
 		elog(WARNING, "failed to connect to OLR");
 		return -1;
 	}
-	elog(DEBUG1, "OLR connected");
 	return 0;
 }
 

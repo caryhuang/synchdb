@@ -1,6 +1,34 @@
 
 import subprocess
 import socket
+import time
+
+def get_container_ip(name: str, network: str = "synchdbnet") -> str | None:
+    # Go template with the specific network:
+    tmpl = f'{{{{(index .NetworkSettings.Networks "{network}").IPAddress}}}}'
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "--format", tmpl, name],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("docker is not installed or not on PATH")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("docker inspect timed out")
+
+    if proc.returncode != 0:
+        # e.g. "Error: No such object: <name>"
+        err = (proc.stderr or "").strip()
+        if "No such object" in err:
+            # print(f"[ERROR] cannot get container IP for {name}")
+            return None
+        raise RuntimeError(f"docker inspect failed: {err}")
+
+    ip = proc.stdout.strip()
+    return ip or None  # None if not attached to that network
 
 MYSQL_HOST="127.0.0.1"
 MYSQL_PORT=3306
@@ -20,13 +48,15 @@ ORACLE_USER="c##dbzuser"
 ORACLE_PASS="dbz"
 ORACLE_DB="FREE"
 
-ORA19C_HOST="192.168.0.2"
+# ora19c and olr are put to a dedicated docker network called synchdb to test
+# so we need to resolve their container UPs
+ORA19C_HOST=get_container_ip(name="ora19c")
 ORA19C_PORT=1521
 ORA19C_USER="DBZUSER"
 ORA19C_PASS="dbz"
 ORA19C_DB="FREE"
 
-OLR_HOST="192.168.0.3"
+OLR_HOST=get_container_ip(name="OpenLogReplicator")
 OLR_PORT="7070"
 OLR_SERVICE="ORACLE"
 
@@ -195,6 +225,15 @@ def run_remote_query(where, query, srcdb=None):
             if where == "oracle":
                 result = subprocess.check_output(["docker", "exec", "-i", "oracle", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
             else:
+                global ORA19C_HOST
+                max_tries = 20
+                tries = 0
+
+                while ORA19C_HOST is None and tries < max_tries:
+                    ORA19C_HOST = get_container_ip(name="ora19c")
+                    tries += 1
+                    time.sleep(1)
+
                 result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORA19C_USER}/{ORA19C_PASS}@//{ORA19C_HOST}:{ORA19C_PORT}/{db}"], input=sql, text=True).strip()
                 
             rows = []
@@ -232,6 +271,23 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None):
     elif vendor == "oracle":
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', 'postgres', 'null', 'null', 'oracle');")
     else:
+        global ORA19C_HOST
+        global OLR_HOST
+        max_tries = 20
+        tries = 0
+
+        while ORA19C_HOST is None and tries < max_tries:
+            ORA19C_HOST = get_container_ip(name="ora19c")
+            tries += 1
+            time.sleep(1)
+        
+        tries = 0
+        while OLR_HOST is None and tries < max_tries:
+            OLR_HOST = get_container_ip(name="OpenLogReplicator")
+            tries += 1
+            time.sleep(1)
+        
+        assert ORA19C_HOST != None and OLR_HOST != None
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORA19C_HOST}', {ORA19C_PORT}, '{ORA19C_USER}', '{ORA19C_PASS}', '{db}', 'postgres', 'null', 'null', 'olr');")
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_olr_conninfo('{name}','{OLR_HOST}', {OLR_PORT}, '{OLR_SERVICE}');")
 
@@ -249,8 +305,8 @@ def stop_and_delete_synchdb_connector(cursor, name):
 
 def drop_default_pg_schema(cursor, vendor):
     if vendor == "mysql":
-        row = run_pg_query_one(cursor, f"DROP SCHEMA inventory CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS inventory CASCADE")
     elif vendor == "sqlserver":
-        row = run_pg_query_one(cursor, f"DROP SCHEMA testdb CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS testdb CASCADE")
     else:
-        row = run_pg_query_one(cursor, f"DROP SCHEMA free CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS free CASCADE")
