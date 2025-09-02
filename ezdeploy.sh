@@ -204,7 +204,7 @@ case "$choice" in
 	 deploy-sourcedb "mysql"
 	 deploy-sourcedb "sqlserver" 
 	 deploy-sourcedb "oracle" 
-	 #deploy-sourcedb "olr"
+	 deploy-sourcedb "olr"
 	 ;;
   8) custom-deployment 
 	 ;;

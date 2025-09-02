@@ -201,7 +201,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(20)
@@ -346,7 +346,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(15)
@@ -488,9 +488,11 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
             assert row[22] == None
             assert row[23] == None
     
-    run_remote_query(dbvendor, "DROP TABLE mytable")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    
+    run_remote_query(dbvendor, "DROP TABLE mytable")
+    time.sleep(5)
 
 def test_TableNameMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_tnm"
@@ -534,7 +536,7 @@ def test_TableNameMapping(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
     
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
@@ -555,11 +557,13 @@ def test_TableNameMapping(pg_cursor, dbvendor):
     rows = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM information_schema.tables WHERE table_schema = 'someschema' AND table_name ='objmap_dsttable3')")
     assert rows[0] == True
     
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
+    
     run_remote_query(dbvendor, "DROP TABLE objmap_srctable1")
     run_remote_query(dbvendor, "DROP TABLE objmap_srctable2")
     run_remote_query(dbvendor, "DROP TABLE objmap_srctable3")
-    stop_and_delete_synchdb_connector(pg_cursor, name)
-    drop_default_pg_schema(pg_cursor, dbvendor)
+    time.sleep(5)
 
 def test_ColumnNameMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_cnm"
@@ -591,7 +595,7 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
     
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
@@ -601,9 +605,11 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
     assert rows[0][1] == 'pgintcol'
     assert rows[1][1] == 'pgtextcol'
 
-    run_remote_query(dbvendor, "DROP TABLE objmapcol_srctable1")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    
+    run_remote_query(dbvendor, "DROP TABLE objmapcol_srctable1")
+    time.sleep(5)
 
 def test_DataTypeMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_dtm"
@@ -621,7 +627,7 @@ def test_DataTypeMapping(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
@@ -652,7 +658,7 @@ def test_TransformExpression(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
@@ -682,7 +688,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
@@ -771,7 +777,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
                 ("2025-12-12", 1002, 10000, 102)
             """)
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
     else:
         time.sleep(20)
@@ -785,6 +791,9 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+
+    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number=10005")
+    time.sleep(5)
     
 def test_TransformExpressionWithError(pg_cursor, dbvendor):
     assert True
