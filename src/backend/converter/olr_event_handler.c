@@ -1921,6 +1921,10 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	}
 	op = pnstrdup(v->val.string.val, v->val.string.len);
 
+	/* update stage if needed */
+	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+
 	elog(DEBUG1, "op is %s", op);
 	if (!strcasecmp(op, "begin") || !strcasecmp(op, "commit"))
 	{
