@@ -45,6 +45,8 @@
 #define SYNCHDB_MAX_TZ_LEN 16
 #define SYNCHDB_MAX_TIMESTAMP_LEN 64
 
+#define INFINISPAN_TYPE_SIZE 32
+
 #define SYNCHDB_PG_MAJOR_VERSION  PG_VERSION_NUM / 100
 
 /*
@@ -255,6 +257,16 @@ typedef struct _OLRConnectionInfo
 } OLRConnectionInfo;
 
 /**
+ * Infinispan settings - alternative caching mechanism for oracle connector
+ */
+typedef struct _IspnInfo
+{
+	char ispn_cache_type[INFINISPAN_TYPE_SIZE];
+	char ispn_memory_type[INFINISPAN_TYPE_SIZE];
+	unsigned int ispn_memory_size;
+} IspnInfo;
+
+/**
  * ConnectionInfo - DBZ Connection info. These are put in shared memory so
  * connector background workers can access when they are spawned.
  */
@@ -275,6 +287,7 @@ typedef struct _ConnectionInfo
     ExtraConnectionInfo extra;
     JMXConnectionInfo jmx;
     OLRConnectionInfo olr;
+    IspnInfo ispn;
 } ConnectionInfo;
 
 /**

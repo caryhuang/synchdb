@@ -79,6 +79,8 @@ PG_FUNCTION_INFO_V1(synchdb_add_jmx_exporter_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_jmx_exporter_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_add_olr_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_olr_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_add_infinispan);
+PG_FUNCTION_INFO_V1(synchdb_del_infinispan);
 
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
@@ -164,7 +166,8 @@ static void start_debezium_engine(ConnectorType connectorType, const ConnectionI
 static void main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
 static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass,
-		const ExtraConnectionInfo * extraConnInfo, const OLRConnectionInfo * olrConnInfo);
+		const ExtraConnectionInfo * extraConnInfo, const OLRConnectionInfo * olrConnInfo,
+		const IspnInfo * ispnInfo);
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
 #ifdef WITH_OLR
 static void is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * snapshot, bool * cdc);
@@ -199,17 +202,18 @@ count_active_connectors(void)
  * @return: void
  */
 static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo,
-		const OLRConnectionInfo * olrConnInfo)
+		const OLRConnectionInfo * olrConnInfo, const IspnInfo * ispnInfo)
 {
 	jmethodID setBatchSize, setQueueSize, setSkippedOperations, setConnectTimeout, setQueryTimeout;
 	jmethodID setSnapshotThreadNum, setSnapshotFetchSize, setSnapshotMinRowToStreamResults;
 	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
 	jmethodID setOffsetFlushIntervalMs, setCaptureOnlySelectedTableDDL;
 	jmethodID setSslmode, setSslKeystore, setSslKeystorePass, setSslTruststore, setSslTruststorePass;
-	jmethodID setLogLevel, setOlr;
+	jmethodID setLogLevel, setOlr, setIspn;
 	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
 	jstring jdbz_sslmode, jdbz_sslkeystore, jdbz_sslkeystorepass, jdbz_ssltruststore, jdbz_ssltruststorepass;
 	jstring jolrHost, jolrSource;
+	jstring jispnMemoryType, jispnCacheType;
 
 	setBatchSize = (*env)->GetMethodID(env, myParametersClass, "setBatchSize",
 			"(I)Lcom/example/DebeziumRunner$MyParameters;");
@@ -538,6 +542,32 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 				(*env)->DeleteLocalRef(env, jolrHost);
 		if (jolrSource)
 				(*env)->DeleteLocalRef(env, jolrSource);
+	}
+
+	/* Infinispan Options for Oracle */
+	if (strcasecmp(ispnInfo->ispn_cache_type, "null"))
+	{
+		jispnCacheType = (*env)->NewStringUTF(env, ispnInfo->ispn_cache_type);
+		jispnMemoryType = (*env)->NewStringUTF(env, ispnInfo->ispn_memory_type);
+
+		setIspn = (*env)->GetMethodID(env, myParametersClass, "setIspn",
+				"(Ljava/lang/String;Ljava/lang/String;I)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setIspn)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIspn, jispnCacheType,
+					jispnMemoryType, ispnInfo->ispn_memory_size);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setIspn method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setIspn method");
+
+		if (jispnCacheType)
+				(*env)->DeleteLocalRef(env, jispnCacheType);
+		if (jispnMemoryType)
+				(*env)->DeleteLocalRef(env, jispnMemoryType);
 	}
 	/*
 	 * additional parameters that we want to pass to Debezium on the java side
@@ -887,7 +917,8 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	}
 
 	/* set extra parameters */
-	set_extra_dbz_parameters(myParametersObj, myParametersClass, &(connInfo->extra), &(connInfo->olr));
+	set_extra_dbz_parameters(myParametersObj, myParametersClass, &(connInfo->extra), &(connInfo->olr),
+			&(connInfo->ispn));
 
 	/* Find the startEngine method */
 	mid = (*env)->GetMethodID(env, cls, "startEngine", "(Lcom/example/DebeziumRunner$MyParameters;)V");
@@ -947,9 +978,10 @@ cleanup:
 static char *
 dbz_engine_get_offset(int connectorId)
 {
-	jstring jdb, result, jName;
+	jstring jdb, result, jName, jdstdb;
 	char *resultStr = NULL;
 	char *db = NULL, *name = NULL;
+	char *dstdb = NULL;
 	const char *tmp;
 	jthrowable exception;
 
@@ -974,6 +1006,15 @@ dbz_engine_get_offset(int connectorId)
 		return NULL;
 	}
 
+	/* Get the destination database name based on connector type */
+	dstdb = sdb_state->connectors[connectorId].conninfo.dstdb;
+	if (!dstdb)
+	{
+		elog(WARNING, "Destination database name not set for connector type: %d",
+				sdb_state->connectors[connectorId].type);
+		return NULL;
+	}
+
 	/* Get the unique name */
 	name = sdb_state->connectors[connectorId].conninfo.name;
 	if (!name)
@@ -986,7 +1027,8 @@ dbz_engine_get_offset(int connectorId)
 	if (!getoffsets)
 	{
 		getoffsets = (*env)->GetMethodID(env, cls, "getConnectorOffset",
-										 "(ILjava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+										 "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)"
+										 "Ljava/lang/String;");
 		if (getoffsets == NULL)
 		{
 			elog(WARNING, "Failed to find getConnectorOffset method");
@@ -996,9 +1038,10 @@ dbz_engine_get_offset(int connectorId)
 
 	jdb = (*env)->NewStringUTF(env, db);
 	jName = (*env)->NewStringUTF(env, name);
+	jdstdb = (*env)->NewStringUTF(env, dstdb);
 
 	result = (jstring)(*env)->CallObjectMethod(env, obj, getoffsets,
-			(int)sdb_state->connectors[connectorId].type, jdb, jName);
+			(int)sdb_state->connectors[connectorId].type, jdb, jName, jdstdb);
 	/* Check for exceptions */
 	exception = (*env)->ExceptionOccurred(env);
 	if (exception)
@@ -5083,5 +5126,85 @@ synchdb_del_objmap(PG_FUNCTION_ARGS)
 			NameStr(*objtype),
 			NameStr(*srcobj));
 
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_add_infinispan
+ *
+ * This function configures an existing oracle connector to use infinispan as
+ * cache mechanism to support potentiall large transactions
+ */
+Datum
+synchdb_add_infinispan(PG_FUNCTION_ARGS)
+{
+	/* Parse input arguments */
+	Name name = PG_GETARG_NAME(0);
+	Name memoryType = PG_GETARG_NAME(1);	/* heap or off heap*/
+	unsigned int memorySize = PG_GETARG_UINT32(2);
+
+	IspnInfo ispninfo = {0};
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	/* only embedded infinispan is supported as of now */
+	strlcpy(ispninfo.ispn_cache_type, "embedded", INFINISPAN_TYPE_SIZE);
+
+	if (strcasecmp(NameStr(*memoryType), "heap") && strcasecmp(NameStr(*memoryType), "off heap"))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid infinispan memory type: expect 'heap' or 'off heap'")));
+	}
+	strlcpy(ispninfo.ispn_memory_type, NameStr(*memoryType), INFINISPAN_TYPE_SIZE);
+
+	if (memorySize == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid infinispan memory size")));
+	}
+	ispninfo.ispn_memory_size = memorySize;
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
+			"'ispn_cache_type', '%s', "	/* only embedded infinispan is supported */
+			"'ispn_memory_type', '%s', "
+			"'ispn_memory_size', %u)::jsonb "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			ispninfo.ispn_cache_type,
+			ispninfo.ispn_memory_type,
+			ispninfo.ispn_memory_size,
+			NameStr(*name));
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_del_infinispan
+ *
+ * This function deletes infinispan configuration from an existing oracle connector.
+ * This removes the configuration as well as the on-disk meta data and cached files.
+ */
+Datum
+synchdb_del_infinispan(PG_FUNCTION_ARGS)
+{
+	/* Parse input arguments */
+	Name name = PG_GETARG_NAME(0);
+
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	/*
+	 * todo: on-disk cache still exists and can only be removed when the
+	 * connector is stopped
+	 */
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
+			"'ispn_cache_type', "
+			"'ispn_memory_type', "
+			"'ispn_memory_size'] "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			NameStr(*name));
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
 }
