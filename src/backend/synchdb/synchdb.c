@@ -96,7 +96,8 @@ int dbz_queue_size = 8192;
 char * dbz_skipped_operations = "t";
 int dbz_connect_timeout_ms = 30000;
 int dbz_query_timeout_ms = 600000;
-int jvm_max_heap_size = 0;
+int jvm_max_heap_size = 1024;
+int jvm_max_direct_buffer_size = 1024;
 int dbz_snapshot_thread_num = 2;
 int dbz_snapshot_fetch_size = 0; /* 0: auto */
 int dbz_snapshot_min_row_to_stream_results = 0; /* 0: always stream */
@@ -1804,7 +1805,8 @@ initialize_jvm(JMXConnectionInfo * jmx)
 	/* Configure JVM options */
 	options[optcount++].optionString = psprintf("-Djava.class.path=%s", jar_path);
 	options[optcount++].optionString = "-Xrs"; // Reduce use of OS signals by JVM
-	options[optcount++].optionString = psprintf("-Xmx%dm", jvm_max_heap_size == 0 ? 0 : jvm_max_heap_size);
+	options[optcount++].optionString = psprintf("-Xmx%dm", jvm_max_heap_size);
+	options[optcount++].optionString = psprintf("-XX:MaxDirectMemorySize=%dm", jvm_max_direct_buffer_size);
 
 	/* jmx parameters if enabled */
 	if (jmx && strcasecmp(jmx->jmx_listenaddr, "null") &&
@@ -3255,6 +3257,17 @@ _PG_init(void)
 							64,
 							8,
 							128,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.jvm_max_direct_buffer_size",
+							"max direct buffer size to allocate safely to hold JSON change events",
+							NULL,
+							&jvm_max_direct_buffer_size,
+							1024,
+							0,
+							65536,
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
@@ -5190,15 +5203,48 @@ Datum
 synchdb_del_infinispan(PG_FUNCTION_ARGS)
 {
 	/* Parse input arguments */
+	int connectorId;
+	pid_t pid;
+	char * ispn_dir = NULL;
 	Name name = PG_GETARG_NAME(0);
 
 	StringInfoData strinfo;
 	initStringInfo(&strinfo);
 
 	/*
-	 * todo: on-disk cache still exists and can only be removed when the
-	 * connector is stopped
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
 	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						NameStr(*name)),
+				 errhint("use synchdb_start_engine_bgw() to assign one first")));
+
+	pid = get_shm_connector_pid(connectorId);
+	if (pid != InvalidPid)
+	{
+		/* still running, check the connector state */
+		ereport(ERROR,
+				(errmsg("the connector needs to be in stopped state before infinispan "
+						"settings can be removed"),
+				errhint("use synchdb_stop_engine_bgw() to stop it first")));
+	}
+
+	/* remove on-disk cache and metadata created by infinispan */
+	ispn_dir = psprintf(SYNCHDB_INFINISPAN_DIR, NameStr(*name), get_database_name(MyDatabaseId));
+
+	if (!rmtree(ispn_dir, true))
+		elog(WARNING, "some infinispan metadata files may be left behind in %s",
+				ispn_dir);
+
 	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
 			"'ispn_cache_type', "
 			"'ispn_memory_type', "

@@ -61,6 +61,7 @@
 #define MAX_JAVA_OPTION_LENGTH 256
 #define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_%s_offsets.dat"
 #define SYNCHDB_SCHEMA_FILE_PATTERN "pg_synchdb/%s_%s_%s_schemahistory.dat"
+#define SYNCHDB_INFINISPAN_DIR "pg_synchdb/ispn_%s_%s"
 #define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
 #define SYNCHDB_ATTRIBUTE_TABLE "synchdb_attribute"

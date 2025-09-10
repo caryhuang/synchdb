@@ -362,7 +362,7 @@ public class DebeziumRunner {
 		String offsetfile = null;
 		String schemahistoryfile = null;
 		String signalfile = null;
-		String ispn_metadata_prefix = null;
+		String ispn_metadata_dir = null;
 		
 		Properties props = new Properties();
 
@@ -469,7 +469,7 @@ public class DebeziumRunner {
 				offsetfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
 				schemahistoryfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
 				signalfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
-				ispn_metadata_prefix = "pg_synchdb/ispn_" + myParameters.connectorName + "_" + myParameters.dstdb;
+				ispn_metadata_dir = "pg_synchdb/ispn_" + myParameters.connectorName + "_" + myParameters.dstdb;
 
                 props.setProperty("database.dbname", myParameters.database);
 				if (myParameters.database.equals("null"))
@@ -500,14 +500,13 @@ public class DebeziumRunner {
 				{
 					String memtype = "HEAP";
 
-					if (myParameters.ispnCacheType == "embedded")
+					if (myParameters.ispnCacheType.equals("embedded"))
 						props.setProperty("log.mining.buffer.type", "infinispan_embedded");
 					else
 						/* todo: we always default to embedded as that is the mode we support now */
 						props.setProperty("log.mining.buffer.type", "infinispan_embedded");
 	
-					if (myParameters.ispnMemoryType.equals("off heap") ||
-					    myParameters.ispnMemoryType.equals("off_heap"))
+					if (myParameters.ispnMemoryType.equals("off heap"))
 						memtype = "OFF_HEAP";
 					else if (myParameters.ispnMemoryType.equals("heap"))
 						memtype = "HEAP";
@@ -535,8 +534,8 @@ public class DebeziumRunner {
 					    "<memory storage=\"" + memtype + "\" max-size=\"" + myParameters.ispnMemorySize + "MB\" when-full=\"REMOVE\"/>" +
 					    "<persistence passivation=\"true\">" +
 					      "<file-store read-only=\"false\" preload=\"false\" shared=\"false\">" +
-					        "<data path=\"" + ispn_metadata_prefix + "/events/data\"/>" +
-				    	    "<index path=\"" + ispn_metadata_prefix + "/events/index\"/>" +
+					        "<data path=\"" + ispn_metadata_dir + "/events/data\"/>" +
+				    	    "<index path=\"" + ispn_metadata_dir + "/events/index\"/>" +
 				        	"<write-behind/>" +
 					      "</file-store>" +
 					    "</persistence>" +
@@ -554,8 +553,8 @@ public class DebeziumRunner {
 					    "<memory storage=\"" + memtype + "\" max-size=\"" + myParameters.ispnMemorySize +"MB\" when-full=\"REMOVE\"/>" +
 				    	"<persistence passivation=\"true\">" +
 					      "<file-store read-only=\"false\" preload=\"false\" shared=\"false\">" +
-					        "<data path=\"" + ispn_metadata_prefix + "/transactions/data\"/>" +
-					        "<index path=\"" + ispn_metadata_prefix + "/transactions/index\"/>" +
+					        "<data path=\"" + ispn_metadata_dir + "/transactions/data\"/>" +
+					        "<index path=\"" + ispn_metadata_dir + "/transactions/index\"/>" +
 					        "<write-behind/>" +
 					      "</file-store>" +
 				    	"</persistence>" +
@@ -573,8 +572,8 @@ public class DebeziumRunner {
 				    	"<memory storage=\"" + memtype + "\" max-size=\"" + myParameters.ispnMemorySize +"MB\" when-full=\"REMOVE\"/>" +
 					    "<persistence passivation=\"true\">" +
 					      "<file-store read-only=\"false\" preload=\"false\" shared=\"false\">" +
-					        "<data path=\"" + ispn_metadata_prefix + "/processed/data\"/>" +
-					        "<index path=\"" + ispn_metadata_prefix + "/processed/index\"/>" +
+					        "<data path=\"" + ispn_metadata_dir + "/processed/data\"/>" +
+					        "<index path=\"" + ispn_metadata_dir + "/processed/index\"/>" +
 					        "<write-behind/>" +
 				    	  "</file-store>" +
 					    "</persistence>" +
@@ -592,8 +591,8 @@ public class DebeziumRunner {
 					    "<memory storage=\"" + memtype + "\" max-size=\"" + myParameters.ispnMemorySize + "MB\" when-full=\"REMOVE\"/>" +
 					    "<persistence passivation=\"true\">" +
 					      "<file-store read-only=\"false\" preload=\"false\" shared=\"false\">" +
-				    	    "<data path=\"" + ispn_metadata_prefix + "/schema/data\"/>" +
-					        "<index path=\"" + ispn_metadata_prefix + "/schema/index\"/>" +
+				    	    "<data path=\"" + ispn_metadata_dir + "/schema/data\"/>" +
+					        "<index path=\"" + ispn_metadata_dir + "/schema/index\"/>" +
 					        "<write-behind/>" +
 					      "</file-store>" +
 					    "</persistence>" +
