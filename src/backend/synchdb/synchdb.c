@@ -172,6 +172,8 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
 #ifdef WITH_OLR
 static void is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * snapshot, bool * cdc);
+static void try_reconnect_olr(ConnectionInfo * connInfo);
+static int olr_set_offset_from_raw(char * offsetdata);
 #endif
 
 /*
@@ -1509,45 +1511,10 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 			 connectorStateAsString(*currstatecopy),
 			 connectorStateAsString(reqcopy->reqstate));
 #ifdef WITH_OLR
-		/* todo: put restart logic in a function */
 		if (type == TYPE_OLR)
 		{
-			elog(WARNING, "reconnecting...");
-			if (olr_client_init(connInfo->olr.olr_host, connInfo->olr.olr_port))
-				elog(DEBUG1, "failed to reconnect");
-			else
-			{
-				elog(WARNING, "reconnected, request replication...");
-
-				/* connInfo.srcdb is used as data source for OLR */
-				ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, true);
-				if (ret == -1)
-				{
-					set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
-					elog(ERROR, "failed to start replication with olr server");
-				}
-
-				if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
-				{
-					elog(WARNING, "replication already started or starting - sending continue");
-					ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, false);
-					if (ret == -1)
-					{
-						set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
-						elog(ERROR, "failed to start replication with olr server");
-					}
-				}
-				if (ret == RES_REPLICATE)
-				{
-					elog(WARNING, "replication requested...");
-					set_shm_connector_state(connectorId, STATE_SYNCING);
-				}
-				else
-				{
-					set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate after reconnection");
-					elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
-				}
-			}
+			try_reconnect_olr(connInfo);
+			set_shm_connector_state(connectorId, STATE_SYNCING);
 		}
 		else
 #endif
@@ -1581,11 +1548,23 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 #ifdef WITH_OLR
 		if (type == TYPE_OLR)
 		{
-			elog(WARNING, "set offset to openlog replicator not supported yet");
-			reset_shm_request_state(connectorId);
-			pfree(reqcopy);
-			pfree(currstatecopy);
-			return;
+			set_shm_connector_state(connectorId, STATE_OFFSET_UPDATE);
+			ret = olr_set_offset_from_raw(reqcopy->reqdata);
+			if (ret < 0)
+			{
+				elog(WARNING, "Failed to set offset for %s connector", connectorTypeToString(type));
+				reset_shm_request_state(connectorId);
+				set_shm_connector_state(connectorId, STATE_PAUSED);
+				pfree(reqcopy);
+				pfree(currstatecopy);
+				return;
+			}
+
+			/* after new offset is set, change state back to STATE_PAUSED */
+			set_shm_connector_state(connectorId, STATE_PAUSED);
+
+			/* and also update this worker's shm offset */
+			set_shm_dbz_offset(connectorId);
 		}
 		else
 #endif
@@ -1620,20 +1599,21 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 		elog(WARNING, "got a restart request: %s", reqcopy->reqdata);
 		set_shm_connector_state(connectorId, STATE_RESTARTING);
 
+		/* get a copy of more recent conninfo from reqdata */
+		memcpy(&newConnInfo, &(reqcopy->reqconninfo), sizeof(ConnectionInfo));
+
 #ifdef WITH_OLR
 		if (type == TYPE_OLR)
 		{
-			/* todo support restart */
 			set_shm_connector_state(connectorId, STATE_RESTARTING);
+			olr_client_shutdown();
 			sleep(5);
+			try_reconnect_olr(&newConnInfo);
 			set_shm_connector_state(connectorId, STATE_SYNCING);
 		}
 		else
 #endif
 		{
-			/* get a copy of more recent conninfo from reqdata */
-			memcpy(&newConnInfo, &(reqcopy->reqconninfo), sizeof(ConnectionInfo));
-
 			elog(WARNING, "stopping dbz engine...");
 			ret = dbz_engine_stop();
 			if (ret)
@@ -2071,39 +2051,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 							 * a little bit of delay in between...
 							 */
 							sleep(3);
-							elog(WARNING, "reconnecting...");
-							if (olr_client_init(connInfo->olr.olr_host, connInfo->olr.olr_port))
-								elog(DEBUG1, "failed to reconnect");
-							else
-							{
-								elog(WARNING, "reconnected, request replication...");
-
-								/* connInfo.srcdb is used as data source for OLR */
-								ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, true);
-								if (ret == -1)
-								{
-									set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
-									elog(ERROR, "failed to start replication with olr server");
-								}
-
-								if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
-								{
-									elog(WARNING, "replication already started or starting - sending continue");
-									ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, false);
-									if (ret == -1)
-									{
-										set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
-										elog(ERROR, "failed to start replication with olr server");
-									}
-								}
-								if (ret == RES_REPLICATE)
-									elog(WARNING, "replication requested...");
-								else
-								{
-									set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate after reconnection");
-									elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
-								}
-							}
+							try_reconnect_olr(connInfo);
 						}
 					}
 				}
@@ -2759,7 +2707,84 @@ is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * sna
 		*cdc = true;
 	}
 }
+
+static void
+try_reconnect_olr(ConnectionInfo * connInfo)
+{
+	int ret = -1;
+
+	if (olr_client_get_connect_status())
+	{
+		elog(WARNING, "already connected.");
+		return;
+	}
+
+	elog(WARNING, "reconnecting...");
+	if (olr_client_init(connInfo->olr.olr_host, connInfo->olr.olr_port))
+		elog(DEBUG1, "failed to reconnect");
+	else
+	{
+		elog(WARNING, "reconnected, request replication...");
+
+		/* connInfo.srcdb is used as data source for OLR */
+		ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, true);
+		if (ret == -1)
+		{
+			set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+			elog(ERROR, "failed to start replication with olr server");
+		}
+
+		if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
+		{
+			elog(WARNING, "replication already started or starting - sending continue");
+			ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, false);
+			if (ret == -1)
+			{
+				set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+				elog(ERROR, "failed to start replication with olr server");
+			}
+		}
+		if (ret == RES_REPLICATE)
+			elog(WARNING, "replication requested...");
+		else
+		{
+			set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate after reconnection");
+			elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
+		}
+	}
+}
+
+static int
+olr_set_offset_from_raw(char * offsetdata)
+{
+	orascn scn = 0, c_scn = 0;
+	const char *scn_pos = strstr(offsetdata, "\"scn\":");
+	const char *c_scn_pos = strstr(offsetdata, "\"c_scn\":");
+
+	if (scn_pos)
+	{
+		sscanf(scn_pos, "\"scn\":%llu", &scn);
+	}
+	else
+	{
+		elog(WARNING, "bad offset string: scn missing...");
+		return -1;
+	}
+	if (c_scn_pos)
+	{
+		sscanf(c_scn_pos, "\"c_scn\":%llu", &c_scn);
+	}
+	else
+	{
+		elog(WARNING, "bad offset string: c_scn missing...");
+		return -1;
+	}
+	elog(WARNING, "new offset: scn:%llu c_scn:%llu", scn, c_scn);
+	olr_client_set_scns(scn, c_scn);
+	return 0;
+}
 #endif
+
 
 /*
  * increment_connector_statistics - increment statistics
