@@ -194,6 +194,16 @@ typedef enum _AlterSubType
 	SUBTYPE_DROP_CONSTRAINT
 } AlterSubType;
 
+/*
+ *
+ */
+typedef enum _OralogminerStreamMode
+{
+	LOGMINER_MODE_UNDEF,
+	LOGMINER_MODE_UNCOMMITTED,
+	LOGMINER_MODE_COMMITTED
+} OraLogminerStreamMode;
+
 /**
  * BatchInfo - Structure containing the metadata of a batch change request
  */

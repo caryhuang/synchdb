@@ -110,6 +110,7 @@ int synchdb_error_strategy = STRAT_EXIT_ON_ERROR;
 int dbz_log_level = LOG_LEVEL_WARN;
 bool synchdb_log_event_on_error = true;
 int olr_read_buffer_size = 64;	/* in kilobytes */
+int dbz_logminer_stream_mode = LOGMINER_MODE_UNCOMMITTED;
 
 static const struct config_enum_entry error_strategies[] =
 {
@@ -129,6 +130,13 @@ static const struct config_enum_entry dbz_log_levels[] =
 	{"fatal", LOG_LEVEL_FATAL, false},
 	{"off", LOG_LEVEL_OFF, false},
 	{"trace", LOG_LEVEL_TRACE, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry ora_logminer_stream_mode[] =
+{
+	{"uncommitted", LOGMINER_MODE_UNCOMMITTED, false},
+	{"committed", LOGMINER_MODE_COMMITTED, false},
 	{NULL, 0, false}
 };
 
@@ -212,11 +220,12 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
 	jmethodID setOffsetFlushIntervalMs, setCaptureOnlySelectedTableDDL;
 	jmethodID setSslmode, setSslKeystore, setSslKeystorePass, setSslTruststore, setSslTruststorePass;
-	jmethodID setLogLevel, setOlr, setIspn;
+	jmethodID setLogLevel, setOlr, setIspn, setLogminerStreamMode;
 	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
 	jstring jdbz_sslmode, jdbz_sslkeystore, jdbz_sslkeystorepass, jdbz_ssltruststore, jdbz_ssltruststorepass;
 	jstring jolrHost, jolrSource;
 	jstring jispnMemoryType, jispnCacheType;
+	jstring jlogminerStreamMode;
 
 	setBatchSize = (*env)->GetMethodID(env, myParametersClass, "setBatchSize",
 			"(I)Lcom/example/DebeziumRunner$MyParameters;");
@@ -572,6 +581,41 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 		if (jispnMemoryType)
 				(*env)->DeleteLocalRef(env, jispnMemoryType);
 	}
+
+	/* Oracle logminer stream mode if defined */
+	if (dbz_logminer_stream_mode != LOGMINER_MODE_UNDEF)
+	{
+		if (dbz_logminer_stream_mode == LOGMINER_MODE_UNCOMMITTED)
+			jlogminerStreamMode = (*env)->NewStringUTF(env, "logminer");
+		else if (dbz_logminer_stream_mode == LOGMINER_MODE_COMMITTED)
+			/*
+			 * XXX: current version of debezium 2.7.x does not yet support
+			 * logminer in committed mode: "logminer_unbuffered", so we will
+			 * default to "logminer" as of now. When we upgrade debezium to
+			 * 3.2.x, we will fix this part accordingly. This can be considered
+			 * as a placeholder for now.
+			 */
+			jlogminerStreamMode = (*env)->NewStringUTF(env, "logminer");
+		else
+			jlogminerStreamMode = (*env)->NewStringUTF(env, "logminer");
+
+		setLogminerStreamMode = (*env)->GetMethodID(env, myParametersClass, "setLogminerStreamMode",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setLogminerStreamMode)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setLogminerStreamMode, jlogminerStreamMode);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setLogminerStreamMode method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setLogminerStreamMode method");
+
+		if (jlogminerStreamMode)
+			(*env)->DeleteLocalRef(env, jlogminerStreamMode);
+	}
+
 	/*
 	 * additional parameters that we want to pass to Debezium on the java side
 	 * will be added here, Make sure to add the matching methods in the MyParameters
@@ -3297,6 +3341,18 @@ _PG_init(void)
 							0,
 							NULL, NULL, NULL);
 
+	DefineCustomEnumVariable("synchdb.dbz_logminer_stream_mode",
+							 "debezium oracle connector logminer stream mode ",
+							 NULL,
+							 &dbz_logminer_stream_mode,
+							 LOGMINER_MODE_UNCOMMITTED,
+							 ora_logminer_stream_mode,
+							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	if (process_shared_preload_libraries_in_progress)
 	{
 		/* can't define PGC_POSTMASTER variable after startup */
@@ -5247,20 +5303,17 @@ synchdb_del_infinispan(PG_FUNCTION_ARGS)
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
 	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to assign one first")));
-
-	pid = get_shm_connector_pid(connectorId);
-	if (pid != InvalidPid)
+	if (connectorId > 0)
 	{
-		/* still running, check the connector state */
-		ereport(ERROR,
-				(errmsg("the connector needs to be in stopped state before infinispan "
-						"settings can be removed"),
-				errhint("use synchdb_stop_engine_bgw() to stop it first")));
+		pid = get_shm_connector_pid(connectorId);
+		if (pid != InvalidPid)
+		{
+			/* still running, check the connector state */
+			ereport(ERROR,
+					(errmsg("the connector needs to be in stopped state before infinispan "
+							"settings can be removed"),
+					errhint("use synchdb_stop_engine_bgw() to stop it first")));
+		}
 	}
 
 	/* remove on-disk cache and metadata created by infinispan */
