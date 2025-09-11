@@ -11,7 +11,7 @@ services:
     user: "54321:54321"
     volumes:
       - /opt/fast-recovery-area:/opt/fast-recovery-area
-      - ./:/opt/OpenLogReplicator/scripts
+      - ./${OLRVER}:/opt/OpenLogReplicator/scripts
       - ./checkpoint:/opt/OpenLogReplicator/checkpoint
       - ./oradata:/opt/oracle/oradata
     

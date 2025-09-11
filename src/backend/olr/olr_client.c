@@ -134,7 +134,7 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 		return -2;
 	}
 
-	nbytes = netio_read(&g_netioCtx, &g_strinfo, olr_read_buffer_size*1024);
+	nbytes = netio_read(&g_netioCtx, &g_strinfo, olr_read_buffer_size*1024*1024);
 	if (nbytes > 0)
 	{
 		elog(DEBUG1, "%ld bytes read", nbytes);
