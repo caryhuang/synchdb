@@ -106,6 +106,7 @@ public class DebeziumRunner {
 		private String ispnCacheType;
 		private String ispnMemoryType;
 		private int ispnMemorySize;
+		private String logminerStreamMode;
 
 		/* constructor requires all required parameters for a connector to work */
 		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb)
@@ -226,6 +227,11 @@ public class DebeziumRunner {
 			this.ispnMemorySize = ispnMemorySize;
 			return this;
 		}
+		public MyParameters setLogminerStreamMode(String logminerStreamMode)
+		{
+			this.logminerStreamMode = logminerStreamMode;
+			return this;
+		}
 
 		/* add more setters here to incrementally set parameters */
 		public void print()
@@ -259,6 +265,7 @@ public class DebeziumRunner {
 			logger.warn("sslTruststorePass = " + this.sslTruststorePass);
 			logger.warn("logLevel = " + this.logLevel);
 			logger.warn("snapshottable = " + this.snapshottable);
+			logger.warn("logminerStreamMode = " + this.logminerStreamMode);
 			
 			logger.warn("olrHost = " + this.olrHost);
 			logger.warn("olrPort = " + this.olrPort);
@@ -493,6 +500,12 @@ public class DebeziumRunner {
 				}
         		else
             		logger.warn("olrHost is null - skip setting Openlog Replicator property");
+				if (myParameters.logminerStreamMode != null)
+				{
+					props.setProperty("database.connection.adapter", myParameters.logminerStreamMode);
+				}
+				else
+					logger.warn("logminerStreamMode is null - using the default mode");
 
 				if (myParameters.ispnCacheType != null &&
 					myParameters.ispnMemoryType != null &&
