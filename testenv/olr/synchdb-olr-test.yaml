@@ -14,6 +14,7 @@ services:
       - ./${OLRVER}:/opt/OpenLogReplicator/scripts
       - ./checkpoint:/opt/OpenLogReplicator/checkpoint
       - ./oradata:/opt/oracle/oradata
+      - ./olrswap:/opt/OpenLogReplicator/olrswap
     
     networks:
       - synchdbnet

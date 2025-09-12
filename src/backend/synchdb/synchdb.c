@@ -109,7 +109,7 @@ int synchdb_max_connector_workers = 30;
 int synchdb_error_strategy = STRAT_EXIT_ON_ERROR;
 int dbz_log_level = LOG_LEVEL_WARN;
 bool synchdb_log_event_on_error = true;
-int olr_read_buffer_size = 64;	/* in kilobytes */
+int olr_read_buffer_size = 64;	/* in MB */
 int dbz_logminer_stream_mode = LOGMINER_MODE_UNCOMMITTED;
 
 static const struct config_enum_entry error_strategies[] =
@@ -2801,9 +2801,10 @@ try_reconnect_olr(ConnectionInfo * connInfo)
 static int
 olr_set_offset_from_raw(char * offsetdata)
 {
-	orascn scn = 0, c_scn = 0;
+	orascn scn = 0, c_scn = 0, c_idx = 0;
 	const char *scn_pos = strstr(offsetdata, "\"scn\":");
 	const char *c_scn_pos = strstr(offsetdata, "\"c_scn\":");
+	const char *c_idx_pos = strstr(offsetdata, "\"c_idx\":");
 
 	if (scn_pos)
 	{
@@ -2823,8 +2824,18 @@ olr_set_offset_from_raw(char * offsetdata)
 		elog(WARNING, "bad offset string: c_scn missing...");
 		return -1;
 	}
-	elog(WARNING, "new offset: scn:%llu c_scn:%llu", scn, c_scn);
-	olr_client_set_scns(scn, c_scn);
+	if (c_idx_pos)
+	{
+		sscanf(c_scn_pos, "\"c_idx\":%llu", &c_idx);
+	}
+	else
+	{
+		elog(WARNING, "bad offset string: c_idx missing...");
+		return -1;
+	}
+	elog(WARNING, "new offset: scn:%llu c_scn:%llu c_idx:%llu",
+			scn, c_scn, c_idx);
+	olr_client_set_scns(scn, c_scn, c_idx);
 	return 0;
 }
 #endif
@@ -3056,8 +3067,9 @@ set_shm_dbz_offset(int connectorId)
 #ifdef WITH_OLR
 	if (sdb_state->connectors[connectorId].type == TYPE_OLR)
 	{
-		offset = psprintf("{\"scn\":%llu, \"c_scn\":%llu}",
-				olr_client_get_scn(), olr_client_get_c_scn());
+		offset = psprintf("{\"scn\":%llu, \"c_scn\":%llu, \"c_idx\":%llu}",
+				olr_client_get_scn(), olr_client_get_c_scn(),
+				olr_client_get_c_idx());
 	}
 	else
 #endif
@@ -3325,7 +3337,7 @@ _PG_init(void)
 							&olr_read_buffer_size,
 							64,
 							8,
-							128,
+							512,
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
