@@ -794,7 +794,7 @@ public class DebeziumRunner {
 		props.setProperty("incremental.snapshot.watermarking.strategy", myParameters.incrementalSnapshotWatermarkingStrategy);
 		props.setProperty("incremental.snapshot.allow.schema.changes", "false");
 		props.setProperty("min.row.count.to.stream.results", String.valueOf(myParameters.snapshotMinRowToStreamResults));
-
+		//props.setProperty("provide.transaction.metadata", "true");
 		//props.setProperty("read.only", "true");
 		
 

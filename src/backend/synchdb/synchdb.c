@@ -2874,6 +2874,9 @@ increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics 
 		case STATS_DELETE:
 			myStats->stats_delete += incby;
 			break;
+		case STATS_TX:
+			myStats->stats_tx += incby;
+			break;
 		case STATS_BAD_CHANGE_EVENT:
 			myStats->stats_bad_change_event += incby;
 			break;

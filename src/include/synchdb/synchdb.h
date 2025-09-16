@@ -49,6 +49,18 @@
 
 #define SYNCHDB_PG_MAJOR_VERSION  PG_VERSION_NUM / 100
 
+#define GET_JSONB_ELEM(jb, datum_elems, num_elems)			\
+({															\
+	Datum	__jsonbdatum;									\
+	bool	__isnull;										\
+	__jsonbdatum = jsonb_get_element(jb,					\
+					datum_elems,							\
+					num_elems,								\
+					&__isnull,								\
+					false);									\
+	__isnull ? NULL : DatumGetJsonbP(__jsonbdatum);			\
+})
+
 /*
  * ex: 	pg_synchdb/[connector]_[name]_offsets.dat
  * 		pg_synchdb/mysql_mysqlconn_offsets.dat
@@ -132,6 +144,7 @@ typedef enum _connectorStatistics
 	STATS_CREATE,
 	STATS_UPDATE,
 	STATS_DELETE,
+	STATS_TX,
 	STATS_BAD_CHANGE_EVENT,
 	STATS_TOTAL_CHANGE_EVENT,
 	STATS_BATCH_COMPLETION,
@@ -335,6 +348,7 @@ typedef struct _SynchdbStatistics
 	unsigned long long stats_create;			/* INSERT events generated during CDC */
 	unsigned long long stats_update;			/* UPDATE events generated during CDC */
 	unsigned long long stats_delete;			/* DELETE events generated during CDC */
+	unsigned long long stats_tx;				/* transaction boundary events like BEGIN and COMMIT */
 	unsigned long long stats_bad_change_event;	/* number of bad change events */
 	unsigned long long stats_total_change_event;/* number of total change events */
 	unsigned long long stats_batch_completion;	/* number of batches completed */

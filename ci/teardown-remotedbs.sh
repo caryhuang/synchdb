@@ -67,6 +67,10 @@ function teardown_oradata()
     if [ -d ./testenv/olr/checkpoint ]; then
         sudo rm -rf ./testenv/olr/checkpoint
     fi
+    
+	if [ -d ./testenv/olr/olrswap ]; then
+        sudo rm -rf ./testenv/olr/olrswap
+    fi
 }
 
 function teardown_synchdbnet()

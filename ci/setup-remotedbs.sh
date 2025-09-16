@@ -444,6 +444,11 @@ function setup_oradata()
 		mkdir ./testenv/olr/checkpoint
 		sudo chown 54321:54321 -R ./testenv/olr/checkpoint
 	fi
+	
+	if [ ! -d ./testenv/olr/olrswap ]; then
+		mkdir ./testenv/olr/olrswap
+		sudo chown 54321:54321 -R ./testenv/olr/olrswap
+	fi
 }
 
 function setup_olr()

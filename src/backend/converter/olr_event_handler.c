@@ -208,7 +208,6 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 	int i = 0, j = 0;
 	unsigned int contsize = 0;
 	Datum datum_elems[1] ={CStringGetTextDatum("columns")};
-	bool isnull;
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
@@ -219,8 +218,8 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 							512,
 							&hash_ctl,
 							HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
-	/* fixme - can crash if jsonb_get_element cannot find the element */
-	schemadata = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 1, &isnull, false));
+
+	schemadata = GET_JSONB_ELEM(jb, &datum_elems[0], 1);
 	if (schemadata)
 	{
 		contsize = JsonContainerSize(&schemadata->root);
@@ -359,7 +358,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	Jsonb * jbschema;
 	OLR_DDL * olrddl = NULL;
 	OLR_DDL_COLUMN * ddlcol = NULL;
-	bool isnull = false;
 	Datum datum_path_schema[1] = {CStringGetTextDatum("schema")};
 	char * db = NULL, * schema = NULL, * table = NULL;
 	StringInfoData sql;
@@ -404,7 +402,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	db = pnstrdup(v->val.string.val, v->val.string.len);
 
 	/* fetch payload.0.schema */
-	jbschema = DatumGetJsonbP(jsonb_get_element(payload, &datum_path_schema[0], 1, &isnull, false));
+	jbschema = GET_JSONB_ELEM(payload, &datum_path_schema[0], 1);
 	if (!jbschema)
 	{
 		elog(WARNING, "malformed change request - no payload.0.schema struct");
@@ -1083,7 +1081,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	JsonbValue * v = NULL;
 	JsonbValue vbuf;
 	Jsonb * jbschema;
-	bool isnull = false;
 	OLR_DML * olrdml = NULL;
 	StringInfoData strinfo, objid;
 	bool found;
@@ -1159,7 +1156,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	elog(DEBUG1, "scn %llu c_scn %llu db %s op is %c", *scn, *c_scn, db, op);
 
 	/* fetch payload.0.schema */
-	jbschema = DatumGetJsonbP(jsonb_get_element(payload, &datum_path_schema[0], 1, &isnull, false));
+	jbschema = GET_JSONB_ELEM(payload, &datum_path_schema[0], 1);
 	if (!jbschema)
 	{
 		elog(WARNING, "malformed change request - no payload.0.schema struct");
@@ -1372,7 +1369,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			DBZ_DML_COLUMN_VALUE * colval = NULL;
 			Datum datum_elems[1] = {CStringGetTextDatum("after")};
 
-			dmldata = DatumGetJsonbP(jsonb_get_element(payload, &datum_elems[0], 1, &isnull, false));
+			dmldata = GET_JSONB_ELEM(payload, &datum_elems[0], 1);
 			if (dmldata)
 			{
 				int pause = 0;
@@ -1534,9 +1531,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			for (i = 0; i < 2; i++)
 			{
 				if (i == 0)
-					dmldata = DatumGetJsonbP(jsonb_get_element(payload, &datum_elems_before[0], 1, &isnull, false));
+					dmldata = GET_JSONB_ELEM(payload, &datum_elems_before[0], 1);
 				else
-					dmldata = DatumGetJsonbP(jsonb_get_element(payload, &datum_elems_after[0], 1, &isnull, false));
+					dmldata = GET_JSONB_ELEM(payload, &datum_elems_after[0], 1);
 				if (dmldata)
 				{
 					int pause = 0;
@@ -1702,7 +1699,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			DBZ_DML_COLUMN_VALUE * colval = NULL;
 			Datum datum_elems[1] = {CStringGetTextDatum("before")};
 
-			dmldata = DatumGetJsonbP(jsonb_get_element(payload, &datum_elems[0], 1, &isnull, false));
+			dmldata = GET_JSONB_ELEM(payload, &datum_elems[0], 1);
 			if (dmldata)
 			{
 				int pause = 0;
@@ -1886,7 +1883,6 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	JsonbValue vbuf;
 	char * op = NULL;
 	int ret = -1;
-	bool isnull = false;
 	MemoryContext tempContext, oldContext;
 	struct timeval tv;
 
@@ -1918,7 +1914,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	elog(DEBUG1, "%s", event);
 
 	/* payload - required */
-	payload = DatumGetJsonbP(jsonb_get_element(jb, &datum_path_payload[0], 2, &isnull, false));
+	payload = GET_JSONB_ELEM(jb, &datum_path_payload[0], 2);
 	if (!payload)
 	{
 		elog(WARNING, "malformed change request - no payload struct");
@@ -1989,12 +1985,12 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		if (!strcasecmp(op, "begin"))
 		{
 			/* todo */
-			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			increment_connector_statistics(myBatchStats, STATS_TX, 1);
 		}
 		else if (!strcasecmp(op, "commit"))
 		{
 			/* todo */
-			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			increment_connector_statistics(myBatchStats, STATS_TX, 1);
 		}
 		set_shm_connector_state(myConnectorId, STATE_SYNCING);
 

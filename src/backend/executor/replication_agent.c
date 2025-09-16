@@ -1003,8 +1003,8 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"jmx_auth=%s jmx_auth_passwdfile=%s jmx_auth_accessfile=%s jmx_ssl=%s "
 			"jmx_ssl_keystore=%s jmx_ssl_keystore_pass=%s jmx_ssl_truststore=%s "
 			"jmx_ssl_truststore_pass=%s jmx_exporter=%s jmx_exporter_port=%d "
-			"jmx_exporter_conf=%s)"
-			"olr(olr_host=%s olr_port=%d olr_source=%s)"
+			"jmx_exporter_conf=%s) "
+			"olr(olr_host=%s olr_port=%d olr_source=%s) "
 			"ispn(ispn_cache_type='%s' ispn_memory_type='%s' ispn_memory_size=%u)",
 			conninfo->name, conninfo->hostname, conninfo->port,
 			conninfo->user, conninfo->pwd, conninfo->srcdb,

@@ -574,8 +574,19 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 		return;
 	}
 
-	jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonin));
-	jb = DatumGetJsonbP(jsonb_datum);
+	/* Convert event string to JSONB */
+	PG_TRY();
+	{
+		jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonin));
+		jb = DatumGetJsonbP(jsonb_datum);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		elog(WARNING, "bad primary key json message: %s", jsonin);
+		return;
+	}
+	PG_END_TRY();
 
 	it = JsonbIteratorInit(&jb->root);
 	while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
@@ -1473,8 +1484,19 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 			if (colval->timerep == DATA_VARIABLE_SCALE)
 			{
 				initStringInfo(&strinfo);
-				jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
-				jb = DatumGetJsonbP(jsonb_datum);
+
+				PG_TRY();
+				{
+					jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
+					jb = DatumGetJsonbP(jsonb_datum);
+				}
+				PG_CATCH();
+				{
+					FlushErrorState();
+					elog(WARNING, "bad json struct to expand: %s", in);
+					return;
+				}
+				PG_END_TRY();
 
 				getPathElementString(jb, "scale", &strinfo, true);
 				if (!strcasecmp(strinfo.data, "null"))
@@ -2776,8 +2798,20 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		 */
 		if (out[0] == '{' && out[strlen(out) - 1] == '}' && strstr(out, "\"wkb\""))
 		{
-			jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(out));
-			jb = DatumGetJsonbP(jsonb_datum);
+
+			PG_TRY();
+			{
+				jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(out));
+				jb = DatumGetJsonbP(jsonb_datum);
+			}
+			PG_CATCH();
+			{
+				FlushErrorState();
+				elog(WARNING, "bad geometric expression out: %s", out);
+				/* skip transform on out */
+				return out;
+			}
+			PG_END_TRY();
 
 			getPathElementString(jb, "wkb", &strinfo, true);
 			if (!strcasecmp(strinfo.data, "null"))

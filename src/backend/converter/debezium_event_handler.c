@@ -137,7 +137,6 @@ build_schema_jsonpos_hash(Jsonb * jb)
 	unsigned int contsize = 0;
 	Datum datum_elems[4] ={CStringGetTextDatum("schema"), CStringGetTextDatum("fields"),
 			CStringGetTextDatum("0"), CStringGetTextDatum("fields")};
-	bool isnull;
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
@@ -149,7 +148,7 @@ build_schema_jsonpos_hash(Jsonb * jb)
 							&hash_ctl,
 							HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
-	schemadata = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 4, &isnull, false));
+	schemadata = GET_JSONB_ELEM(jb, &datum_elems[0], 4);
 	if (schemadata)
 	{
 		contsize = JsonContainerSize(&schemadata->root);
@@ -362,9 +361,7 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 		/* fetch payload.tableChanges.0.table.columns as jsonb */
     	Datum datum_elems[5] ={CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges"),
     			CStringGetTextDatum("0"), CStringGetTextDatum("table"), CStringGetTextDatum("columns")};
-    	bool isnull;
-
-    	ddlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 5, &isnull, false));
+    	ddlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 5);
 		/*
 		 * following parser expects this json array named 'columns' from DBZ embedded:
 		 * "columns": [
@@ -598,7 +595,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	Relation rel;
 	TupleDesc tupdesc;
 	int attnum, j = 0;
-	bool isnull = false;
 	HTAB * typeidhash;
 	HTAB * namejsonposhash;
 	HASHCTL hash_ctl;
@@ -904,7 +900,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			 * 	in the above example.
 			 */
 			Datum datum_elems[2] ={CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
-			dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+			dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
 			if (dmlpayload)
 			{
 				int pause = 0;
@@ -1063,7 +1059,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			 * 	}
 			 */
 			Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
-			dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+			dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
 			if (dmlpayload)
 			{
 				int pause = 0;
@@ -1236,12 +1232,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 				if (i == 0)
 				{
 					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
-					dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+					dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
 				}
 				else
 				{
 					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
-					dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+					dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
 				}
 				if (dmlpayload)
 				{
@@ -1439,6 +1435,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	Datum jsonb_datum;
 	Jsonb * jb;
 	Jsonb * source = NULL;
+	Jsonb * payload = NULL;
 	StringInfoData strinfo;
 	ConnectorType type;
 	MemoryContext tempContext, oldContext;
@@ -1446,7 +1443,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	int ret = -1;
 	struct timeval tv;
 	Datum datum_elems[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("source")};
-	bool isnull;
+	Datum datum_payload[1] = {CStringGetTextDatum("payload")};
 
 	tempContext = AllocSetContextCreate(TopMemoryContext,
 										"FORMAT_CONVERTER",
@@ -1457,11 +1454,24 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	initStringInfo(&strinfo);
 
     /* Convert event string to JSONB */
-    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
-    jb = DatumGetJsonbP(jsonb_datum);
+	PG_TRY();
+	{
+	    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
+	    jb = DatumGetJsonbP(jsonb_datum);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		elog(WARNING, "bad json message: %s", event);
+		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+		MemoryContextSwitchTo(oldContext);
+		MemoryContextDelete(tempContext);
+		return -1;
+	}
+	PG_END_TRY();
 
     /* Obtain source element - required */
-	source = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+	source = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
     if (source)
     {
 		JsonbValue * v = NULL;
@@ -1569,11 +1579,66 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     }
     else
     {
-    	elog(WARNING, "malformed change request - no source element");
-    	increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-    	MemoryContextSwitchTo(oldContext);
-    	MemoryContextDelete(tempContext);
-		return -1;
+		/* if payload.source is absent we assume this is a transaction boundary event */
+		payload = GET_JSONB_ELEM(jb, &datum_payload[0], 1);
+		if (payload)
+		{
+			JsonbValue * v = NULL;
+			JsonbValue vbuf;
+			char * tmp = NULL;
+
+			/* payload.status - required */
+			v = getKeyJsonValueFromContainer(&payload->root, "status", strlen("status"), &vbuf);
+			if (!v)
+			{
+				elog(WARNING, "malformed change request - no status in transaction boundary payload");
+				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+				MemoryContextSwitchTo(oldContext);
+				MemoryContextDelete(tempContext);
+				return -1;
+			}
+			increment_connector_statistics(myBatchStats, STATS_TX, 1);
+			tmp = pnstrdup(v->val.string.val, v->val.string.len);
+			elog(DEBUG1, "transaction boundary status: %s", tmp);
+			pfree(tmp);
+
+			/* tm - only at first and last record within a batch */
+			/* update processing timestamps */
+			if (islast)
+			{
+				v = getKeyJsonValueFromContainer(&payload->root, "ts_ms", strlen("ts_ms"), &vbuf);
+				if (v)
+				{
+					myBatchStats->stats_last_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+							NumericGetDatum(v->val.numeric)));
+				}
+				gettimeofday(&tv, NULL);
+				myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			}
+
+			if (isfirst)
+			{
+				v = getKeyJsonValueFromContainer(&jb->root, "ts_ms", strlen("ts_ms"), &vbuf);
+				if (v)
+				{
+					myBatchStats->stats_first_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+							NumericGetDatum(v->val.numeric)));
+				}
+				gettimeofday(&tv, NULL);
+				myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			}
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
+		else
+		{
+			elog(WARNING, "malformed change request - no source element");
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
     }
 
     /* Check if it's a DDL or DML event */
