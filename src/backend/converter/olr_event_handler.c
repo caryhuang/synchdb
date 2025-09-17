@@ -661,6 +661,18 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 			if (pklist.data)
 				pfree(pklist.data);
+
+			/*
+			 * special checking on potential table name mismatch, always use the table name
+			 * from the parser
+			 */
+			if (strcasecmp(tableName, table))
+			{
+				elog(WARNING, "table name mismatch, using %s instead of %s",
+						tableName, table);
+				pfree(table);
+				table = pstrdup(tableName);
+			}
 		}
 		else if (IsA(stmt, AlterTableStmt))
 		{

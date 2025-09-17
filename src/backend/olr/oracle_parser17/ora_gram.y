@@ -700,6 +700,9 @@ static void determineLanguage(List *options);
 					json_object_constructor_null_clause_opt
 					json_array_constructor_null_clause_opt
 
+/* added for synchdb to support notvalid without adding keyword */
+%type <ival> EnableOpts
+
 /*
  * Non-keyword token types.  These are hard-wired into the "flex" lexer.
  * They must be listed first so that their numeric codes do not depend on
@@ -4194,6 +4197,17 @@ ColConstraintElem:
 					n->initially_valid = true;
 					$$ = (Node *) n;
 				}
+			/* added for synchdb */
+			| DEFAULT ON NULL_P b_expr
+				{
+					Constraint *n = makeNode(Constraint);
+
+                    n->contype = CONSTR_DEFAULT;
+                    n->location = @1;
+                    n->raw_expr = $4;
+                    n->cooked_expr = NULL;
+                    $$ = (Node *) n;
+				}
 			| DEFAULT b_expr
 				{
 					Constraint *n = makeNode(Constraint);
@@ -6431,6 +6445,22 @@ ConstraintAttributeSpec:
 				}
 		;
 
+/* added for synchdb as workaround - whatever token comes after ENABLE or DISABLE,
+ * we do nothing
+ */
+EnableOpts:
+			/* empty */			{ $$ = 0; }
+			| VALIDATE			{ $$ = 0; }
+    		| IDENT
+				{
+					if (pg_strcasecmp($1, "novalidate") == 0)
+						$$ = 0;
+					else
+						$$ = 0;
+					pfree($1);
+				}
+		;
+
 ConstraintAttributeElem:
 			NOT DEFERRABLE					{ $$ = CAS_NOT_DEFERRABLE; }
 			| DEFERRABLE					{ $$ = CAS_DEFERRABLE; }
@@ -6439,12 +6469,8 @@ ConstraintAttributeElem:
 			| NOT VALID						{ $$ = CAS_NOT_VALID; }
 			| NO INHERIT					{ $$ = CAS_NO_INHERIT; }
 /* added for synchdb - just a workaround, it does not really supprot enabled or disabled constraint */
-			| DISABLE_P						{ $$ = CAS_NOT_VALID; }
-			| ENABLE_P						{ $$ = CAS_DEFERRABLE; }
-			| ENABLE_P VALIDATE				{ $$ = CAS_DEFERRABLE; }
-//			| ENABLE_P NOVALIDATE			{ $$ = CAS_NOT_VALID; }
-			| DISABLE_P VALIDATE			{ $$ = CAS_DEFERRABLE; }
-//			| DISABLE NOVALIDATE			{ $$ = CAS_NOT_VALID; }
+			| DISABLE_P EnableOpts			{ $$ = 0; }
+			| ENABLE_P EnableOpts			{ $$ = 0; }
 		;
 
 
