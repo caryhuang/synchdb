@@ -2544,7 +2544,7 @@ alter_table_cmd:
 					n->def = $4;
 					$$ = (Node *) n;
 				}
-						/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP INVISIBLE */
+			/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP INVISIBLE */
 			| ALTER opt_column ColId DROP INVISIBLE
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
@@ -2563,19 +2563,88 @@ alter_table_cmd:
 			| MODIFY ColId Typename opt_collate_clause alter_using
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
-                    ColumnDef *def = makeNode(ColumnDef);
+					ColumnDef *def = makeNode(ColumnDef);
 
-                    n->subtype = AT_AlterColumnType;
-                    n->name = $2;
-                    n->def = (Node *) def;
-                    /* We only use these fields of the ColumnDef node */
-                    def->typeName = $3;
-                    def->collClause = (CollateClause *) $4;
-                    def->raw_default = $5;
-                    //def->location = @3;
-                    $$ = (Node *) n;
-
+					n->subtype = AT_AlterColumnType;
+					n->name = $2;
+					n->def = (Node *) def;
+					/* We only use these fields of the ColumnDef node */
+					def->typeName = $3;
+					def->collClause = (CollateClause *) $4;
+					def->raw_default = $5;
+					//def->location = @3;
+					$$ = (Node *) n;
 				}
+			| MODIFY '(' ColId Typename opt_collate_clause alter_using ')'
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					ColumnDef *def = makeNode(ColumnDef);
+
+					n->subtype = AT_AlterColumnType;
+					n->name = $3;
+					n->def = (Node *) def;
+					/* We only use these fields of the ColumnDef node */
+					def->typeName = $4;
+					def->collClause = (CollateClause *) $5;
+					def->raw_default = $6;
+					//def->location = @3;
+					$$ = (Node *) n;
+				}
+			| MODIFY ColId DEFAULT a_expr
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+			        
+					n->subtype = AT_ColumnDefault;
+					n->name = $2;
+					n->def = (Node *) $4;   /* expression for the DEFAULT */
+					$$ = (Node *) n;
+				}
+			| MODIFY '(' ColId DEFAULT a_expr ')'
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+
+					n->subtype = AT_ColumnDefault;
+					n->name = $3;
+					n->def = (Node *) $5;   /* expression for the DEFAULT */
+					$$ = (Node *) n;
+				}
+			| MODIFY ColId NOT NULL_P
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+
+					n->subtype = AT_SetNotNull;
+					n->name = $2;
+					n->def = NULL;
+					$$ = (Node *) n;
+			    }
+			| MODIFY '(' ColId NOT NULL_P ')'
+                {
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+
+					n->subtype = AT_SetNotNull;
+					n->name = $3;
+					n->def = NULL;
+					$$ = (Node *) n;
+                }
+			| MODIFY ColId NULL_P
+                {
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+
+					n->subtype = AT_DropNotNull;
+					n->name = $2;
+					n->def = NULL;
+					$$ = (Node *) n;
+                }
+            | MODIFY '(' ColId NULL_P ')'
+                {
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+
+					n->subtype = AT_DropNotNull;
+					n->name = $3;
+					n->def = NULL;
+					$$ = (Node *) n;
+                }
+
 			//| MODIFY ColId INVISIBLE
 			//	{
 			//		AlterTableCmd *n = makeNode(AlterTableCmd);

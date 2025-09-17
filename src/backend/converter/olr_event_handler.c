@@ -975,9 +975,26 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						olrddl->subtype = SUBTYPE_DROP_CONSTRAINT;
 						break;
 					}
+					case AT_ColumnDefault:
+					{
+						elog(WARNING, "AT_ColumnDefault not supported yet");
+						destroyOLRDDL(olrddl);
+						olrddl = NULL;
+						goto end;
+						break;
+					}
+					case AT_DropNotNull:
+					case AT_SetNotNull:
+					{
+						elog(WARNING, "AT_SetNotNull or AT_DropNotNull not supported yet");
+						destroyOLRDDL(olrddl);
+						olrddl = NULL;
+						goto end;
+						break;
+					}
 					default:
 					{
-						elog(WARNING, "  Unhandled ALTER subtype: %d", cmd->subtype);
+						elog(WARNING, "Unhandled ALTER subtype: %d", cmd->subtype);
 						destroyOLRDDL(olrddl);
 						olrddl = NULL;
 						goto end;
