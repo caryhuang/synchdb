@@ -5,11 +5,11 @@ FROM    ubuntu:24.04
 
 # We don't want a prompt during installation
 ENV     DEBIAN_FRONTEND=noninteractive
-ENV 	POSTGRES_VERSION=17
+ENV 	POSTGRES_VERSION=16
 ENV 	JAVA_VERSION=17
 ENV		SYNCHDB_BRANCH=synchdb-devel
 ENV		LIBPROTOBUF_C_VERSION=v1.5.2
-ENV		POSTGRES_BRANCH=REL_17_6
+ENV		POSTGRES_BRANCH=REL_16_4
 
 # Install necessary
 RUN     apt-get update
