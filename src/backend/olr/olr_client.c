@@ -15,6 +15,7 @@
 #include "utils/datetime.h"
 #include "access/xact.h"
 #include "utils/snapmgr.h"
+#include "utils/builtins.h"
 
 /* extern globals */
 extern int myConnectorId;
@@ -167,7 +168,11 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 		while (g_offset + 4 <= g_strinfo.len && curr < batchsize)
 		{
 			int json_len = 0;
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+			text  * json_payload;
+#else
 			char * json_payload;
+#endif
 			memcpy(&json_len, g_strinfo.data + g_offset, 4);
 
 			elog(DEBUG1, "json len %d", json_len);
@@ -184,14 +189,21 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 				break;
 			}
 			/*
-			 * XXX: payload is not null-terminated so we make a copy of it first - kind of
-			 * inefficient here.
+			 * payload is not null-terminated so we try to turn it to a text * if supported.
+			 * Otherwise, we make a copy of it as a null-terminated string
 			 */
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+			json_payload = cstring_to_text_with_len(g_strinfo.data + g_offset + 4, json_len);
+#else
 			json_payload = pnstrdup(g_strinfo.data + g_offset + 4, json_len);
+#endif
 
 			if (synchdb_log_event_on_error)
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+				g_eventStr = text_to_cstring(json_payload);
+#else
 				g_eventStr = json_payload;
-
+#endif
 			/* process it */
 			ret = fc_processOLRChangeEvent(json_payload, myBatchStats,
 					get_shm_connector_name_by_id(myConnectorId), sendconfirm,

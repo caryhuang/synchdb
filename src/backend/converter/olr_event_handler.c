@@ -16,6 +16,7 @@
 #include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/snapmgr.h"
+#include "utils/jsonfuncs.h"
 #include "parser/parser.h"
 #include "mb/pg_wchar.h"
 #include "nodes/parsenodes.h"
@@ -1902,7 +1903,7 @@ end:
  * Main function to process Openlog Replicator change event
  */
 int
-fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
+fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 		const char * name, bool * sendconfirm, bool isfirst, bool islast)
 {
 	Datum jsonb_datum;
@@ -1926,13 +1927,21 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     /* Convert event string to JSONB */
 	PG_TRY();
 	{
-	    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+		jsonb_datum = jsonb_from_text((text *) event, false);
+#else
+	    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum((char *) event));
+#endif
 	    jb = DatumGetJsonbP(jsonb_datum);
 	}
 	PG_CATCH();
 	{
 		FlushErrorState();
-		elog(WARNING, "bad json message: %s", event);
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+		elog(WARNING, "bad json message: %s", text_to_cstring(event));
+#else
+		elog(WARNING, "bad json message: %s", (char *) event);
+#endif
 		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 		MemoryContextSwitchTo(oldContext);
 		MemoryContextDelete(tempContext);
@@ -1940,7 +1949,11 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	}
 	PG_END_TRY();
 
-	elog(DEBUG1, "%s", event);
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+	elog(DEBUG1, "%s", text_to_cstring(event));
+#else
+	elog(DEBUG1, "%s", (char *) event);
+#endif
 
 	/* payload - required */
 	payload = GET_JSONB_ELEM(jb, &datum_path_payload[0], 2);
