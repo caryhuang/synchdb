@@ -35,6 +35,8 @@ extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 extern HTAB * dataCacheHash;
 extern char * dbz_skipped_operations;
+extern bool synchdb_log_event_on_error;
+extern char * g_eventStr;
 
 /* Oracle raw parser function prototype */
 typedef List * (*oracle_raw_parser_fn)(const char *str, RawParseMode mode);
@@ -415,6 +417,13 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	if (v)
 	{
 		schema = pnstrdup(v->val.string.val, v->val.string.len);
+
+		/* we want to make sure the owner matches our conninfo record */
+		if (strcasecmp(schema, get_shm_connector_user_by_id(myConnectorId)))
+		{
+			elog(DEBUG1, "skip ddl with non matching owner...");
+			goto end;
+		}
 	}
 	else
 	{
@@ -1083,6 +1092,9 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 		}
 		else
 		{
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
 			elog(WARNING, "unsupported stmt type: %d ",  nodeTag(stmt));
 			destroyOLRDDL(olrddl);
 			olrddl = NULL;
@@ -1301,6 +1313,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", olrdml->schema);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
 			/* trigger pg's error shutdown routine */
 			elog(ERROR, "%s", msg);
 		}
@@ -1311,6 +1326,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", olrdml->table);
 			set_shm_connector_errmsg(myConnectorId, msg);
+
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
 
 			/* trigger pg's error shutdown routine */
 			elog(ERROR, "%s", msg);

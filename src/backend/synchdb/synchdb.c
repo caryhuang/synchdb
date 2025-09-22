@@ -3124,6 +3124,23 @@ get_shm_connector_name_by_id(int connectorId)
 }
 
 /*
+ * get_shm_conn_user_by_id - Get the username associated with connector id
+ *
+ * This method gets the username value of the given connector from shared memory
+ *
+ * @param connectorId: Connector ID of interest
+ */
+const char *
+get_shm_connector_user_by_id(int connectorId)
+{
+	if (!sdb_state)
+		return "n/a";
+
+	return (sdb_state->connectors[connectorId].conninfo.user[0] != '\0') ?
+			sdb_state->connectors[connectorId].conninfo.user : "no user";
+}
+
+/*
  * _PG_init - Initialize the SynchDB extension
  */
 void
