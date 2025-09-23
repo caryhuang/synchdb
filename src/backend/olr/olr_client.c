@@ -23,6 +23,8 @@ extern int dbz_offset_flush_interval_ms;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 extern int olr_read_buffer_size;
+extern int olr_connect_timeout_ms;
+extern int olr_read_timeout_ms;
 
 /* static globals */
 static NetioContext g_netioCtx = {0};
@@ -37,7 +39,7 @@ int
 olr_client_init(const char * hostname, unsigned int port)
 {
 	g_read_buffer_size = olr_read_buffer_size * 1024 * 1024;
-
+	netio_set_timeouts(olr_connect_timeout_ms, olr_read_timeout_ms);
 	initStringInfo(&g_strinfo);
 	if (netio_connect(&g_netioCtx, hostname, port))
 	{
