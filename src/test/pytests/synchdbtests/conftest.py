@@ -26,13 +26,11 @@ def pg_instance(request):
     
     conf_file = os.path.join(data_dir, "postgresql.conf")
     with open(conf_file, "a") as f:
-#        f.write("\nlog_min_messages = debug1\n")
         f.write("\nsynchdb.naptime = 10\n")
         f.write("\nsynchdb.dbz_batch_size= 16384\n")
         f.write("\nsynchdb.dbz_queue_size= 32768\n")
         f.write("\nsynchdb.jvm_max_heap_size= 2048\n")
         f.write("\nsynchdb.olr_read_buffer_size = 128\n")
-        #f.write("\nlog_min_messages = debug1\n")
 
     # Start Postgres
     #print("[setup] setting up postgresql for test...")
