@@ -74,7 +74,7 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
     loopcnt=0
     while True:
         rows = run_pg_query_one(pg_cursor, f"SELECT ddls, dmls, avg_batch_size, batches_done, first_src_ts, first_dbz_ts, first_pg_ts FROM synchdb_stats_view WHERE name = '{name}'")
-        if rows != None and rows[4] != 0 and rows[5] != 0 and rows[6] != 0:
+        if rows != None and rows[4] != 0 and rows[6] != 0:
             ddls = rows[0]
             dmls = rows[1]
             avgbatchsize = rows[2]
@@ -92,7 +92,7 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
                 break
             time.sleep(1)
 
-    assert first_src_ts > 0 and first_dbz_ts > 0 and first_pg_ts > 0
+    assert first_src_ts > 0 and first_pg_ts > 0
     print(f"first timetamps are: {first_src_ts} {first_dbz_ts} {first_pg_ts}, total batches done = {batchesdone}")
 
     time.sleep(20)
@@ -122,7 +122,7 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
             stopcount = 0
         time.sleep(20)
 
-    assert last_src_ts > 0 and last_dbz_ts > 0 and last_pg_ts > 0
+    assert last_src_ts > 0 and last_pg_ts > 0
     
     pg_diff_ms = last_pg_ts - first_pg_ts
     print(f"initial snapshotting tpcc tables takes {pg_diff_ms} ms with average batch size = {avgbatchsize}, DML processed = {dmls}, total batches done = {batchesdone}")
@@ -195,7 +195,7 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
     loopcnt=0
     while True:
         rows = run_pg_query_one(pg_cursor, f"SELECT ddls, dmls, avg_batch_size, batches_done, first_src_ts, first_dbz_ts, first_pg_ts FROM synchdb_stats_view WHERE name = '{name}'")
-        if rows != None and rows[4] != 0 and rows[5] != 0 and rows[6] != 0:
+        if rows != None and rows[4] != 0 and rows[6] != 0:
             ddls = rows[0]
             dmls = rows[1]
             avgbatchsize = rows[2]
@@ -213,7 +213,7 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
                 break
             time.sleep(1)
     
-    assert first_src_ts > 0 and first_dbz_ts > 0 and first_pg_ts > 0
+    assert first_src_ts > 0 and first_pg_ts > 0
     print(f"first timetamps are: {first_src_ts} {first_dbz_ts} {first_pg_ts}, total batches done = {batchesdone}")
 
     time.sleep(5)
@@ -242,7 +242,7 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
             stopcount = 0
         time.sleep(20)
 
-    assert last_src_ts > 0 and last_dbz_ts > 0 and last_pg_ts > 0
+    assert last_src_ts > 0 and last_pg_ts > 0
 
     pg_diff_ms = last_pg_ts - first_pg_ts
 

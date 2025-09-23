@@ -47,6 +47,7 @@ static char * strtoupper(const char *input);
 static OlrType getOlrTypeFromString(const char * typestring);
 static void strip_after_column_def(StringInfoData *sql);
 static bool is_whitelist_sql(StringInfoData * sql);
+static bool is_whitelist_table(const char * table);
 static HTAB * build_olr_schema_jsonpos_hash(Jsonb * jb);
 static void destroyOLRDDL(OLR_DDL * ddlinfo);
 static void destroyOLRDML(OLR_DML * dmlinfo);
@@ -103,6 +104,17 @@ getOlrTypeFromString(const char * typestring)
 	elog(DEBUG1, "unexpected dbz type %s - default to numeric type "
 			"representation", typestring);
 	return OLRTYPE_UNDEF;
+}
+
+static bool
+is_whitelist_table(const char * table)
+{
+	/* special checking to exclude LOG_MINING_FLUSH table created by Debezium. */
+	if (!strcasecmp(table, DBZ_LOG_MINING_FLUSH_TABLE))
+	{
+		return false;
+	}
+	return true;
 }
 
 void
@@ -444,6 +456,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 		goto end;
 	}
 	table = pnstrdup(v->val.string.val, v->val.string.len);
+
+	if (!is_whitelist_table(table))
+	{
+		elog(DEBUG1, "table %s is not white-listed...", table);
+		goto end;
+	}
 
 	/* fetch sql - required */
 	initStringInfo(&sql);
@@ -1226,14 +1244,14 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	}
 	table = pnstrdup(v->val.string.val, v->val.string.len);
 
-	/* special checking to exclude LOG_MINING_FLUSH table created by Debezium. */
-	if (!strcasecmp(table, DBZ_LOG_MINING_FLUSH_TABLE))
+	if (!is_whitelist_table(table))
 	{
-		elog(WARNING, "debezium log mining flush table %s ignored...", DBZ_LOG_MINING_FLUSH_TABLE);
+		elog(DEBUG1, "table %s is not white-listed", table);
 		destroyOLRDML(olrdml);
 		olrdml = NULL;
 		goto end;
 	}
+
 	appendStringInfo(&objid, "%s", table);
 
 	/* table name transformation and normalized objectid to lower case */
@@ -1956,9 +1974,9 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 	{
 		FlushErrorState();
 #if SYNCHDB_PG_MAJOR_VERSION >= 1700
-		elog(WARNING, "bad json message: %s", text_to_cstring(event));
+		elog(DEBUG1, "bad json message: %s", text_to_cstring(event));
 #else
-		elog(WARNING, "bad json message: %s", (char *) event);
+		elog(DEBUG1, "bad json message: %s", (char *) event);
 #endif
 		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 		MemoryContextSwitchTo(oldContext);

@@ -109,8 +109,10 @@ int synchdb_max_connector_workers = 30;
 int synchdb_error_strategy = STRAT_EXIT_ON_ERROR;
 int dbz_log_level = LOG_LEVEL_WARN;
 bool synchdb_log_event_on_error = true;
-int olr_read_buffer_size = 64;	/* in MB */
+int olr_read_buffer_size = 128;	/* in MB */
 int dbz_logminer_stream_mode = LOGMINER_MODE_UNCOMMITTED;
+int olr_connect_timeout_ms = 5000;
+int olr_read_timeout_ms = 5000;
 
 static const struct config_enum_entry error_strategies[] =
 {
@@ -3352,10 +3354,10 @@ _PG_init(void)
 							 NULL, NULL, NULL);
 
 	DefineCustomIntVariable("synchdb.olr_read_buffer_size",
-							"size of buffer in kilobytes for network IO reads",
+							"size of buffer in megabytes for network IO reads",
 							NULL,
 							&olr_read_buffer_size,
-							64,
+							128,
 							8,
 							512,
 							PGC_SIGHUP,
@@ -3384,6 +3386,28 @@ _PG_init(void)
 							 NULL,
 							 NULL,
 							 NULL);
+
+	DefineCustomIntVariable("synchdb.olr_connect_timeout_ms",
+							"connect timeout in ms to establish connection to openlog replicator",
+							NULL,
+							&olr_connect_timeout_ms,
+							5000,
+							3000,
+							3600000,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.olr_read_timeout_ms",
+							"netio read timeout from openlog replicator",
+							NULL,
+							&olr_read_timeout_ms,
+							5000,
+							3000,
+							3600000,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
 
 	if (process_shared_preload_libraries_in_progress)
 	{
