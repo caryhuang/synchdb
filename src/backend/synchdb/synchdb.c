@@ -2874,6 +2874,9 @@ increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics 
 		case STATS_DELETE:
 			myStats->stats_delete += incby;
 			break;
+		case STATS_TX:
+			myStats->stats_tx += incby;
+			break;
 		case STATS_BAD_CHANGE_EVENT:
 			myStats->stats_bad_change_event += incby;
 			break;
@@ -3118,6 +3121,23 @@ get_shm_connector_name_by_id(int connectorId)
 
 	return (sdb_state->connectors[connectorId].conninfo.name[0] != '\0') ?
 			sdb_state->connectors[connectorId].conninfo.name : "no name";
+}
+
+/*
+ * get_shm_conn_user_by_id - Get the username associated with connector id
+ *
+ * This method gets the username value of the given connector from shared memory
+ *
+ * @param connectorId: Connector ID of interest
+ */
+const char *
+get_shm_connector_user_by_id(int connectorId)
+{
+	if (!sdb_state)
+		return "n/a";
+
+	return (sdb_state->connectors[connectorId].conninfo.user[0] != '\0') ?
+			sdb_state->connectors[connectorId].conninfo.user : "no user";
 }
 
 /*

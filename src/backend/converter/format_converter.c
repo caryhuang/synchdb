@@ -574,8 +574,19 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 		return;
 	}
 
-	jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonin));
-	jb = DatumGetJsonbP(jsonb_datum);
+	/* Convert event string to JSONB */
+	PG_TRY();
+	{
+		jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonin));
+		jb = DatumGetJsonbP(jsonb_datum);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		elog(WARNING, "bad primary key json message: %s", jsonin);
+		return;
+	}
+	PG_END_TRY();
 
 	it = JsonbIteratorInit(&jb->root);
 	while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
@@ -1473,8 +1484,19 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 			if (colval->timerep == DATA_VARIABLE_SCALE)
 			{
 				initStringInfo(&strinfo);
-				jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
-				jb = DatumGetJsonbP(jsonb_datum);
+
+				PG_TRY();
+				{
+					jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
+					jb = DatumGetJsonbP(jsonb_datum);
+				}
+				PG_CATCH();
+				{
+					FlushErrorState();
+					elog(WARNING, "bad json struct to expand: %s", in);
+					return;
+				}
+				PG_END_TRY();
 
 				getPathElementString(jb, "scale", &strinfo, true);
 				if (!strcasecmp(strinfo.data, "null"))
@@ -1524,7 +1546,11 @@ handle_base64_to_numeric_with_scale(const char * in, int scale)
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
 	char * out = NULL;
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+#endif
 	value = derive_value_from_byte(tmpout, tmpoutlen);
 	snprintf(buffer, sizeof(buffer), "%lld", value);
 	if (scale > 0)
@@ -1589,7 +1615,11 @@ handle_base64_to_bit(const char * in, bool addquote, int typemod)
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
 	char * out = NULL;
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
+#endif
 	if (addquote)
 	{
 		/* 8 bits per byte + 2 single quotes + b + terminating null */
@@ -1713,7 +1743,11 @@ handle_base64_to_date(const char * in, bool addquote, int timerep)
 	int tmpoutlen = pg_b64_dec_len(strlen(in));
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+#endif
 	input = derive_value_from_byte(tmpout, tmpoutlen);
 	return construct_datestr(input, addquote, timerep);
 }
@@ -1819,7 +1853,11 @@ handle_base64_to_timestamp(const char * in, bool addquote, int timerep, int type
 	int tmpoutlen = pg_b64_dec_len(strlen(in));
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+#endif
 	input = derive_value_from_byte(tmpout, tmpoutlen);
 	return construct_timestampstr(input, addquote, timerep, typemod);
 }
@@ -1994,7 +2032,11 @@ handle_base64_to_time(const char * in, bool addquote, int timerep, int typemod)
 	int tmpoutlen = pg_b64_dec_len(strlen(in));
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+#endif
 	input = derive_value_from_byte(tmpout, tmpoutlen);
 	return construct_timetr(input, addquote, timerep, typemod);
 }
@@ -2024,7 +2066,11 @@ handle_base64_to_byte(const char * in, bool addquote)
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
 	char * out = NULL;
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
+#endif
 	if (addquote)
 	{
 		/* hexstring + 2 single quotes + '\x' + terminating null */
@@ -2193,7 +2239,11 @@ handle_base64_to_interval(const char * in, bool addquote, int timerep, int typem
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
 	long long input = 0;
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+#endif
 	input = derive_value_from_byte(tmpout, tmpoutlen);
 	return construct_intervalstr(input, addquote, timerep, typemod);
 }
@@ -2748,8 +2798,20 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		 */
 		if (out[0] == '{' && out[strlen(out) - 1] == '}' && strstr(out, "\"wkb\""))
 		{
-			jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(out));
-			jb = DatumGetJsonbP(jsonb_datum);
+
+			PG_TRY();
+			{
+				jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(out));
+				jb = DatumGetJsonbP(jsonb_datum);
+			}
+			PG_CATCH();
+			{
+				FlushErrorState();
+				elog(WARNING, "bad geometric expression out: %s", out);
+				/* skip transform on out */
+				return out;
+			}
+			PG_END_TRY();
 
 			getPathElementString(jb, "wkb", &strinfo, true);
 			if (!strcasecmp(strinfo.data, "null"))

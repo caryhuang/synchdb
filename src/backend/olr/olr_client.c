@@ -15,6 +15,7 @@
 #include "utils/datetime.h"
 #include "access/xact.h"
 #include "utils/snapmgr.h"
+#include "utils/builtins.h"
 
 /* extern globals */
 extern int myConnectorId;
@@ -129,8 +130,8 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 {
 	ssize_t nbytes = 0;
 	int ret = -1, curr = 0;
-	int batchsize = 0;
-	int tmp_offset = g_offset;
+	int next_offset = 0;
+	bool isfirst = false, islast = false;
 
 	if (!g_netioCtx.is_connected)
 	{
@@ -143,31 +144,17 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 	{
 		elog(DEBUG1, "%ld bytes read", nbytes);
 
-		/*
-		 * pre-scan - count how many complete json payloads in one read.
-		 * This is needed to clearly identify first and last change events
-		 * for the purpose of recording batch statistics.
-		 */
-		while (tmp_offset + 4 <= g_strinfo.len)
-		{
-			int json_len = 0;
-			memcpy(&json_len, g_strinfo.data + tmp_offset, 4);
-
-			if (tmp_offset + 4 + json_len > g_strinfo.len)
-				break;
-
-			batchsize++;
-			tmp_offset += 4 + json_len;
-		}
-		elog(DEBUG1, "there are %d records in this batch", batchsize);
-
 		StartTransactionCommand();
 		PushActiveSnapshot(GetTransactionSnapshot());
 
-		while (g_offset + 4 <= g_strinfo.len && curr < batchsize)
+		while (g_offset + 4 <= g_strinfo.len)
 		{
 			int json_len = 0;
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+			text  * json_payload;
+#else
 			char * json_payload;
+#endif
 			memcpy(&json_len, g_strinfo.data + g_offset, 4);
 
 			elog(DEBUG1, "json len %d", json_len);
@@ -183,19 +170,32 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 						g_strinfo.len);
 				break;
 			}
+
+			/* determine if this is the first or the last event in the batch */
+			next_offset = g_offset + 4 + json_len;
+			isfirst = (curr == 0);
+			islast = (next_offset == g_strinfo.len) || (next_offset + 4 > g_strinfo.len);
+
 			/*
-			 * XXX: payload is not null-terminated so we make a copy of it first - kind of
-			 * inefficient here.
+			 * payload is not null-terminated so we try to turn it to a text * if supported.
+			 * Otherwise, we make a copy of it as a null-terminated string
 			 */
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+			json_payload = cstring_to_text_with_len(g_strinfo.data + g_offset + 4, json_len);
+#else
 			json_payload = pnstrdup(g_strinfo.data + g_offset + 4, json_len);
+#endif
 
 			if (synchdb_log_event_on_error)
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+				g_eventStr = text_to_cstring(json_payload);
+#else
 				g_eventStr = json_payload;
-
+#endif
 			/* process it */
 			ret = fc_processOLRChangeEvent(json_payload, myBatchStats,
 					get_shm_connector_name_by_id(myConnectorId), sendconfirm,
-					(curr == 0), (curr == batchsize - 1));
+					isfirst, islast);
 
 			pfree(json_payload);
 
@@ -208,6 +208,8 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 
 		PopActiveSnapshot();
 		CommitTransactionCommand();
+
+		elog(DEBUG1, "there are %d records processed in this batch", curr);
 
 		/* compact or reuse the buffer if available */
 		if (g_offset >= g_strinfo.len)
@@ -224,7 +226,7 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 			g_offset = 0;
 			elog(DEBUG1, "reset and moved g_strinfo buffer content");
 		}
-		increment_connector_statistics(myBatchStats, STATS_TOTAL_CHANGE_EVENT, batchsize);
+		increment_connector_statistics(myBatchStats, STATS_TOTAL_CHANGE_EVENT, curr);
 
 		/* this ret could be -1 for general failure or 0 for success */
 		return ret;
