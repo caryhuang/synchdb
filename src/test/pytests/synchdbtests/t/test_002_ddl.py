@@ -396,7 +396,10 @@ def test_DropTableWithSpace(pg_cursor, dbvendor):
             type = '{dbvendor}'
             AND pg_tbname = '{dbname}.drop with space'
         """)
-    assert len(rows) == 0
+    
+    ### sqlserver treats drop table as alter table drop all columns
+    if dbvendor != "sqlserver":
+        assert len(rows) == 0
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
