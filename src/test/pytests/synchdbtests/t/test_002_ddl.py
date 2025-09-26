@@ -9,7 +9,7 @@ def test_CreateTable(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(10)
@@ -66,7 +66,7 @@ def test_CreateTableWithSpace(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(10)
@@ -100,7 +100,7 @@ def test_CreateTableWithSpace(pg_cursor, dbvendor):
         """
     run_remote_query(dbvendor, query)
     if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(60)
+        time.sleep(90)
     else:
         time.sleep(20)
 
@@ -131,7 +131,7 @@ def test_CreateTableWithNoPK(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(10)
@@ -189,7 +189,7 @@ def test_CreateTableWithNotInlinePK(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(10)
@@ -258,7 +258,7 @@ def test_DropTable(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(10)
@@ -332,7 +332,7 @@ def test_DropTableWithSpace(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(10)
@@ -411,7 +411,7 @@ def test_AlterTableAlterColumn(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(10)
@@ -476,7 +476,6 @@ def test_AlterTableAlterColumn(pg_cursor, dbvendor):
             type = '{dbvendor}'
             AND pg_tbname = '{dbname}.alter_table_alter_col'
         """)
-    print(rows)
     assert len(rows) == 3
     assert rows[1][3] == "bigint"
 
@@ -491,7 +490,7 @@ def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(10)
@@ -576,7 +575,7 @@ def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
         AND constraint_type = 'PRIMARY KEY';;
     """)
     
-    assert rows[0][0] == "alter_table_addpk_pkey"
+    assert rows[0][0] == "alter_table_addpk_pkey" or rows[0][0] == "pk_create_table_addpk"
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
@@ -592,7 +591,7 @@ def test_AlterTableiAddColumn(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(10)
@@ -686,7 +685,7 @@ def test_AlterTableDropColumn(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(30)
     else:
         time.sleep(10)

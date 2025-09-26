@@ -31,6 +31,8 @@ def pg_instance(request):
         f.write("\nsynchdb.dbz_queue_size= 32768\n")
         f.write("\nsynchdb.jvm_max_heap_size= 2048\n")
         f.write("\nsynchdb.olr_read_buffer_size = 128\n")
+        f.write("\nlog_min_messages = debug1\n")
+
 
     # Start Postgres
     #print("[setup] setting up postgresql for test...")
@@ -119,7 +121,7 @@ def setup_remote_instance(dbvendor, request):
     
     yield
 
-    teardown_remote_instance(dbvendor)
+    #teardown_remote_instance(dbvendor)
 
 @pytest.fixture(scope="session")
 def hammerdb(dbvendor):

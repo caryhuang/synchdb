@@ -473,7 +473,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	}
 
 	appendBinaryStringInfo(&sql, v->val.string.val, v->val.string.len);
-	remove_double_quotes(&sql);
+	//remove_double_quotes(&sql);
 
 	if (!is_whitelist_sql(&sql))
 	{
