@@ -31,6 +31,8 @@ def pg_instance(request):
         f.write("\nsynchdb.dbz_queue_size= 32768\n")
         f.write("\nsynchdb.jvm_max_heap_size= 2048\n")
         f.write("\nsynchdb.olr_read_buffer_size = 128\n")
+        f.write("\nlog_min_messages = debug1\n")
+
 
     # Start Postgres
     #print("[setup] setting up postgresql for test...")
@@ -109,17 +111,23 @@ def tpccmode(pytestconfig):
 @pytest.fixture(scope="session", autouse=True)
 def setup_remote_instance(dbvendor, request):
     env = os.environ.copy()
+    if dbvendor == "oracle":
+        dbvendor = "ora19c"
     env["DBTYPE"] = dbvendor
     env["WHICH"] = "n/a"
     env["OLRVER"] = OLRVER
-    env["INTERNAL"] = "0"
+
+    if dbvendor == "ora19c":
+        env["INTERNAL"] = "1"
+    else:
+        env["INTERNAL"] = "0"
 
     #print(f"[setup] setting up heterogeneous database {dbvendor}...")
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
     
     yield
 
-    teardown_remote_instance(dbvendor)
+    #teardown_remote_instance(dbvendor)
 
 @pytest.fixture(scope="session")
 def hammerdb(dbvendor):
