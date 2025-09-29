@@ -465,6 +465,11 @@ function setup_oradata()
 		mkdir ./testenv/olr/olrswap
 		sudo chown 54321:54321 -R ./testenv/olr/olrswap
 	fi
+	
+	if [ ! -d ./testenv/olr/fast-recovery-area ]; then
+		mkdir ./testenv/olr/fast-recovery-area
+		sudo chown 54321:54321 -R ./testenv/olr/fast-recovery-area
+	fi
 }
 
 function setup_olr()
