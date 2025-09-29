@@ -266,6 +266,16 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None):
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{SQLSERVER_HOST}', {SQLSERVER_PORT}, '{SQLSERVER_USER}', '{SQLSERVER_PASS}', '{db}', 'postgres', 'null', 'null', 'sqlserver');")
 
     elif vendor == "oracle":
+        global ORACLE_HOST
+        max_tries = 20
+        tries = 0
+
+        while ORACLE_HOST is None and tries < max_tries:
+            ORACLE_HOST = get_container_ip(name="ora19c")
+            tries += 1
+            time.sleep(1)
+
+        assert ORACLE_HOST != None
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', 'postgres', 'null', 'null', 'oracle');")
     else:
         global ORA19C_HOST
