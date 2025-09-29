@@ -20,15 +20,10 @@ def get_container_ip(name: str, network: str = "synchdbnet") -> str | None:
         raise RuntimeError("docker inspect timed out")
 
     if proc.returncode != 0:
-        # e.g. "Error: No such object: <name>"
-        err = (proc.stderr or "").strip()
-        if "No such object" in err:
-            # print(f"[ERROR] cannot get container IP for {name}")
-            return None
-        raise RuntimeError(f"docker inspect failed: {err}")
+        return "127.0.0.1"
 
     ip = proc.stdout.strip()
-    return ip or None  # None if not attached to that network
+    return ip or "127.0.0.1"  # None if not attached to that network
 
 MYSQL_HOST="127.0.0.1"
 MYSQL_PORT=3306
@@ -42,9 +37,9 @@ SQLSERVER_USER="sa"
 SQLSERVER_PASS="Password!"
 SQLSERVER_DB="testDB"
 
-ORACLE_HOST="127.0.0.1"
+ORACLE_HOST=get_container_ip(name="ora19c")
 ORACLE_PORT=1521
-ORACLE_USER="c##dbzuser"
+ORACLE_USER="DBZUSER"
 ORACLE_PASS="dbz"
 ORACLE_DB="FREE"
 
@@ -223,7 +218,7 @@ def run_remote_query(where, query, srcdb=None):
             exit
             """
             if where == "oracle":
-                result = subprocess.check_output(["docker", "exec", "-i", "oracle", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
+                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
             else:
                 global ORA19C_HOST
                 max_tries = 20

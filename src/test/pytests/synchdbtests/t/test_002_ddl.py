@@ -3,7 +3,7 @@ import time
 from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema
 
 def test_CreateTable(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_create"
+    name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
@@ -60,7 +60,7 @@ def test_CreateTable(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "DROP TABLE create_table_test")
 
 def test_CreateTableWithSpace(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_create_with_space"
+    name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
@@ -125,7 +125,7 @@ def test_CreateTableWithSpace(pg_cursor, dbvendor):
 
 def test_CreateTableWithNoPK(pg_cursor, dbvendor):
 
-    name = getConnectorName(dbvendor) + "_create_nopk"
+    name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
@@ -183,7 +183,7 @@ def test_CreateTableWithNoPK(pg_cursor, dbvendor):
 
 def test_CreateTableWithNotInlinePK(pg_cursor, dbvendor):
 
-    name = getConnectorName(dbvendor) + "_create_noinlinepk"
+    name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
@@ -252,7 +252,7 @@ def test_CreateTableWithNotInlinePK(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "DROP TABLE create_table_noinlinepk")
 
 def test_DropTable(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_drop"
+    name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
@@ -326,7 +326,7 @@ def test_DropTable(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
 
 def test_DropTableWithSpace(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_drop_with_space"
+    name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
@@ -405,7 +405,7 @@ def test_DropTableWithSpace(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     
 def test_AlterTableAlterColumn(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_alter_alter_col"
+    name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
@@ -484,7 +484,7 @@ def test_AlterTableAlterColumn(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "DROP TABLE alter_table_alter_col")
 
 def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_alter_addpk"
+    name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
@@ -585,7 +585,7 @@ def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
     assert True
 
 def test_AlterTableiAddColumn(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_alter_add_col"
+    name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
@@ -679,7 +679,7 @@ def test_AlterTableiAddColumn(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "DROP TABLE alter_table_add_col")
 
 def test_AlterTableDropColumn(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_alter_drop_col"
+    name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")

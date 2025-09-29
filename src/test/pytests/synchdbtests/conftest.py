@@ -111,10 +111,16 @@ def tpccmode(pytestconfig):
 @pytest.fixture(scope="session", autouse=True)
 def setup_remote_instance(dbvendor, request):
     env = os.environ.copy()
+    if dbvendor == "oracle":
+        dbvendor = "ora19c"
     env["DBTYPE"] = dbvendor
     env["WHICH"] = "n/a"
     env["OLRVER"] = OLRVER
-    env["INTERNAL"] = "0"
+
+    if dbvendor == "ora19c":
+        env["INTERNAL"] = "1"
+    else:
+        env["INTERNAL"] = "0"
 
     #print(f"[setup] setting up heterogeneous database {dbvendor}...")
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
