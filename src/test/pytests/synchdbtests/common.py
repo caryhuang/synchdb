@@ -82,9 +82,9 @@ def getSchema(dbvendor):
     elif dbvendor == "sqlserver":
         return "dbo"
     elif dbvendor == "oracle":
-        return "c##dbzuser"
+        return ORACLE_USER
     else:
-        return "DBZUSER"
+        return ORA19C_USER
 
 def run_pg_query(cursor, query):
     cursor.execute(query)
