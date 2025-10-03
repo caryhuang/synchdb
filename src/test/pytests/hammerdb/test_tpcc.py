@@ -150,12 +150,19 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
 
         #subprocess.run(["docker", "exec", "hammerdb", "./hammerdbcli", "auto", "/runtpcc.tcl"], check=True)
         if dbvendor == "mysql":
-            nopm, tpm = map(int, re.search(r"achieved (\d+) NOPM from (\d+)",
-                subprocess.run(
+            #nopm, tpm = map(int, re.search(r"achieved (\d+) NOPM from (\d+)",
+            #    subprocess.run(
+            #        ["docker", "exec", "hammerdb", "./hammerdbcli", "auto", "/runtpcc.tcl"],
+            #        check=True, capture_output=True, text=True
+            #    ).stdout
+            #).groups())
+            result = subprocess.run(
                     ["docker", "exec", "hammerdb", "./hammerdbcli", "auto", "/runtpcc.tcl"],
-                    check=True, capture_output=True, text=True
-                ).stdout
-            ).groups())
+                    check=True, capture_output=True  # no text=True -> returns bytes
+                    )
+            out = result.stdout.decode("utf-8", errors="replace").replace("\r", "")
+            m = re.search(r"achieved\s+(\d+)\s+NOPM\s+from\s+(\d+)", out, re.I)
+            nopm, tpm = map(int, m.groups())
         else:
             result = subprocess.run(
                 ["docker", "exec", "-e", "LD_LIBRARY_PATH=/usr/local/unixODBC/lib:/home/instantclient_21_18/", "-e", "TMP=/tmp", "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/mssql-tools18/bin:/opt/mssql-tools18/bin:/usr/local/unixODBC/bin", "hammerdb", "./hammerdbcli", "auto", "/runtpcc.tcl"],

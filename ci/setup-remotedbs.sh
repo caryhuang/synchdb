@@ -141,7 +141,7 @@ EOF
 	sleep 1
 	docker exec -i oracle sqlplus /nolog <<EOF
 CONNECT sys/oracle as sysdba;
-alter system set db_recovery_file_dest_size = 30G;
+alter system set db_recovery_file_dest_size = 40G;
 alter system set db_recovery_file_dest = '/opt/oracle/oradata/recovery_area' scope=spfile;
 shutdown immediate;
 startup mount;
@@ -301,7 +301,7 @@ function setup_ora19c()
 	sleep 1
 	docker exec -i ora19c sqlplus /nolog <<EOF
 CONNECT sys/oracle as sysdba;
-alter system set db_recovery_file_dest_size = 30G;
+alter system set db_recovery_file_dest_size = 40G;
 alter system set db_recovery_file_dest = '/opt/oracle/oradata/recovery_area' scope=spfile;
 shutdown immediate;
 startup mount;
@@ -464,6 +464,11 @@ function setup_oradata()
 	if [ ! -d ./testenv/olr/olrswap ]; then
 		mkdir ./testenv/olr/olrswap
 		sudo chown 54321:54321 -R ./testenv/olr/olrswap
+	fi
+	
+	if [ ! -d ./testenv/olr/fast-recovery-area ]; then
+		mkdir ./testenv/olr/fast-recovery-area
+		sudo chown 54321:54321 -R ./testenv/olr/fast-recovery-area
 	fi
 }
 

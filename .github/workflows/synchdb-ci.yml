@@ -57,6 +57,7 @@ jobs:
   test-synchdb:
     name: PG${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }} Tests
     strategy:
+      fail-fast: false
       matrix:
         pg_version:
           - ${{ needs.params.outputs.pg16_version }}
@@ -71,6 +72,13 @@ jobs:
     - params
     - build
     steps:
+    - name: Free disk space (runner)
+      run: |
+        echo "Before cleanup:" && df -h
+        docker system prune -af || true
+        docker builder prune -af || true
+        docker volume prune -af || true
+        echo "After cleanup:" && df -h
     - uses: actions/checkout@v2
     - uses: actions/download-artifact@v4
       with:

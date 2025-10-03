@@ -3321,12 +3321,14 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 					"ext_atttypename = null WHERE "
 					"lower(ext_attname) = lower('%s') AND "
 					"lower(name) = lower('%s') AND "
-					"lower(type) = lower('%s');",
+					"lower(type) = lower('%s') AND "
+					"lower(ext_tbname) = lower('%s');",
 					SYNCHDB_ATTRIBUTE_TABLE,
 					pgcol->position,
 					pgcol->attname,
 					name,
-					connectorTypeToString(conntype));
+					connectorTypeToString(conntype),
+					dbzddl->id);
 		}
 	}
 	else
@@ -4103,10 +4105,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			}
 
 			/* database mapped to schema */
-			appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; ", db);
+			appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS \"%s\"; ", db);
 
 			/* table stays as table, schema ignored */
-			appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s.%s (", db, table);
+			appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS \"%s\".\"%s\" (", db, table);
 			pgddl->schema = pstrdup(db);
 			pgddl->tbname = pstrdup(table);
 
@@ -4209,7 +4211,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (schema && table)
 			{
 				/* table stays as table under the schema */
-				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s.%s;", schema, table);
+				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS \"%s\".\"%s\";", schema, table);
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4217,7 +4219,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				/* table stays as table but no schema */
 				schema = pstrdup("public");
-				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s;", table);
+				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS \"%s\";", table);
 				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4241,7 +4243,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			}
 			/* make schema points to db */
 			schema = db;
-			appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s.%s;", schema, table);
+			appendStringInfo(&strinfo, "DROP TABLE IF EXISTS \"%s\".\"%s\";", schema, table);
 			pgddl->schema = pstrdup(schema);
 			pgddl->tbname = pstrdup(table);
 		}
@@ -4294,7 +4296,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (schema && table)
 			{
 				/* table stays as table under the schema */
-				appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", schema, table);
+				appendStringInfo(&strinfo, "ALTER TABLE \"%s\".\"%s\" ", schema, table);
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4302,7 +4304,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				/* table stays as table but no schema */
 				schema = pstrdup("public");
-				appendStringInfo(&strinfo, "ALTER TABLE %s ", table);
+				appendStringInfo(&strinfo, "ALTER TABLE \"%s\" ", table);
 				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4334,7 +4336,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 			/* make schema points to db */
 			schema = db;
-			appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", schema, table);
+			appendStringInfo(&strinfo, "ALTER TABLE \"%s\".\"%s\" ", schema, table);
 			pgddl->schema = pstrdup(schema);
 			pgddl->tbname = pstrdup(table);
 		}
@@ -4372,7 +4374,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			elog(ERROR, "%s", msg);
 		}
 
-		elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", schema, table, tableoid);
+		elog(DEBUG1, "namespace \"%s\".\"%s\" has PostgreSQL OID %d", schema, table, tableoid);
 
 		rel = table_open(tableoid, AccessShareLock);
 		tupdesc = RelationGetDescr(rel);
@@ -5029,7 +5031,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (schema && table)
 			{
 				/* table stays as table under the schema */
-				appendStringInfo(&strinfo, "TRUNCATE TABLE %s.%s;", schema, table);
+				appendStringInfo(&strinfo, "TRUNCATE TABLE \"%s\".\"%s\";", schema, table);
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
@@ -5037,7 +5039,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				/* table stays as table but no schema */
 				schema = pstrdup("public");
-				appendStringInfo(&strinfo, "TRUNCATE TABLE %s;", table);
+				appendStringInfo(&strinfo, "TRUNCATE TABLE \"%s\";", table);
 				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
@@ -5061,7 +5063,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			}
 			/* make schema points to db */
 			schema = db;
-			appendStringInfo(&strinfo, "TRUNCATE TABLE %s.%s;", schema, table);
+			appendStringInfo(&strinfo, "TRUNCATE TABLE \"%s\".\"%s\";", schema, table);
 			pgddl->schema = pstrdup(schema);
 			pgddl->tbname = pstrdup(table);
 		}

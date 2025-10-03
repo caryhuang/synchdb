@@ -203,6 +203,7 @@ def test_ConnectorRestart(pg_cursor, dbvendor):
     assert row[5] == "no error"
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
 
 def test_ConnectorStop(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
@@ -227,6 +228,7 @@ def test_ConnectorStop(pg_cursor, dbvendor):
     assert row[4] == "stopped"
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
 
 def test_ConnectorRestartAlwaysMode(pg_cursor, dbvendor):
     assert True
@@ -247,3 +249,4 @@ def test_ConnectorDelete(pg_cursor, dbvendor):
     assert result == None
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
