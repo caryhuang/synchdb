@@ -39,6 +39,7 @@
 #include "common/base64.h"
 #include "port/pg_bswap.h"
 #include "utils/datetime.h"
+#include "utils/memutils.h"
 
 /* synchdb includes */
 #include "converter/format_converter.h"
@@ -53,14 +54,14 @@ extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
 
 /* data transformation related hash tables */
-HTAB * dataCacheHash;
-static HTAB * objectMappingHash;
-static HTAB * transformExpressionHash;
+HTAB * dataCacheHash = NULL;
+static HTAB * objectMappingHash = NULL;
+static HTAB * transformExpressionHash = NULL;
 
 /* data type mapping related hash tables */
-static HTAB * mysqlDatatypeHash;
-static HTAB * oracleDatatypeHash;
-static HTAB * sqlserverDatatypeHash;
+static HTAB * mysqlDatatypeHash = NULL;
+static HTAB * oracleDatatypeHash = NULL;
+static HTAB * sqlserverDatatypeHash = NULL;
 
 DatatypeHashEntry mysql_defaultTypeMappings[] =
 {
@@ -720,7 +721,7 @@ init_mysql(void)
 
 	info.keysize = sizeof(DatatypeHashKey);
 	info.entrysize = sizeof(DatatypeHashEntry);
-	info.hcxt = CurrentMemoryContext;
+	info.hcxt = TopMemoryContext;
 
 	mysqlDatatypeHash = hash_create("mysql datatype hash",
 							 256,
@@ -768,7 +769,7 @@ init_oracle(void)
 
 	info.keysize = sizeof(DatatypeHashKey);
 	info.entrysize = sizeof(DatatypeHashEntry);
-	info.hcxt = CurrentMemoryContext;
+	info.hcxt = TopMemoryContext;
 
 	oracleDatatypeHash = hash_create("oracle datatype hash",
 							 256,
@@ -816,7 +817,7 @@ init_sqlserver(void)
 
 	info.keysize = sizeof(DatatypeHashKey);
 	info.entrysize = sizeof(DatatypeHashEntry);
-	info.hcxt = CurrentMemoryContext;
+	info.hcxt = TopMemoryContext;
 
 	sqlserverDatatypeHash = hash_create("sqlserver datatype hash",
 							 256,
@@ -5084,4 +5085,68 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 	elog(DEBUG1, "pgsql: %s ", pgddl->ddlquery);
 	return pgddl;
+}
+
+bool
+fc_translate_datatype(ConnectorType connectorType,
+		const char * ext_datatype, int ext_length, int ext_scale,
+		char ** pg_datatype, int * pg_datatype_len)
+{
+	DatatypeHashEntry * entry;
+	DatatypeHashKey key = {0};
+	bool found = 0;
+	HTAB * thehash = NULL;
+
+	switch (connectorType)
+	{
+		case TYPE_MYSQL:
+			thehash = mysqlDatatypeHash;
+			break;
+		case TYPE_ORACLE:
+		case TYPE_OLR:
+			thehash = oracleDatatypeHash;
+			break;
+		case TYPE_SQLSERVER:
+			thehash = sqlserverDatatypeHash;
+			break;
+		default:
+		{
+			elog(WARNING, "unsupported connector type");
+			return false;
+		}
+	}
+	if (!thehash)
+	{
+		elog(WARNING, "data type hash not initialized.");
+		return false;
+	}
+
+	key.autoIncremented = false;
+
+	/* handle per-connector special cases */
+	if ((connectorType == TYPE_MYSQL || connectorType == TYPE_SQLSERVER) &&
+			ext_length == 1 && !strcasecmp(ext_datatype, "bit"))
+	{
+		/* special case: bit with length 1 -> include length in lookup key */
+		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
+				ext_datatype, ext_length);
+	}
+	else if (connectorType == TYPE_ORACLE && ext_scale == 0 &&
+			!strcasecmp(ext_datatype, "number"))
+	{
+		/* special case: NUMBER with scale 0 -> include both length and scale in lookup key */
+		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d,%d)",
+				ext_datatype, ext_length, ext_scale);
+	}
+	else
+		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s", ext_datatype);
+
+	entry = (DatatypeHashEntry *) hash_search(thehash, &key, HASH_FIND, &found);
+	if (found)
+	{
+		*pg_datatype = pstrdup(entry->pgsqlTypeName);
+		*pg_datatype_len = entry->pgsqlTypeLength;
+		return true;
+	}
+	return false;
 }

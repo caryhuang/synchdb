@@ -416,5 +416,6 @@ void set_shm_connector_stage(int connectorId, ConnectorStage stage);
 ConnectorType get_shm_connector_type_enum(int connectorId);
 ConnectorStage get_shm_connector_stage_enum(int connectorId);
 void increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics which, int incby);
+ConnectorType stringToConnectorType(const char * type);
 
 #endif /* SYNCHDB_SYNCHDB_H_ */

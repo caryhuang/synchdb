@@ -81,6 +81,7 @@ PG_FUNCTION_INFO_V1(synchdb_add_olr_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_olr_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_add_infinispan);
 PG_FUNCTION_INFO_V1(synchdb_del_infinispan);
+PG_FUNCTION_INFO_V1(synchdb_translate_datatype);
 
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
@@ -2513,6 +2514,30 @@ connectorTypeToString(ConnectorType type)
 }
 
 /*
+ * stringToConnectorType
+ *
+ * This function converts string to connector type
+ *
+ * @param type: connector type in string
+ *
+ * @return connector type enum
+ */
+ConnectorType
+stringToConnectorType(const char * type)
+{
+	if (!strcasecmp(type, "mysql"))
+		return TYPE_MYSQL;
+	else if(!strcasecmp(type, "sqlserver"))
+		return TYPE_SQLSERVER;
+	else if(!strcasecmp(type, "oracle"))
+		return TYPE_ORACLE;
+	else if(!strcasecmp(type, "olr"))
+		return TYPE_OLR;
+	else
+		return TYPE_UNDEF;
+}
+
+/*
  * get_shm_connector_name
  *
  * This function converts connector type from enum to string in lowercase
@@ -3408,6 +3433,11 @@ _PG_init(void)
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
+
+	/* initialize data type mapping engine for all connectors */
+	fc_initFormatConverter(TYPE_MYSQL);
+	fc_initFormatConverter(TYPE_SQLSERVER);
+	fc_initFormatConverter(TYPE_ORACLE);
 
 	if (process_shared_preload_libraries_in_progress)
 	{
@@ -5387,4 +5417,59 @@ synchdb_del_infinispan(PG_FUNCTION_ARGS)
 			SYNCHDB_CONNINFO_TABLE,
 			NameStr(*name));
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+Datum
+synchdb_translate_datatype(PG_FUNCTION_ARGS)
+{
+	Name type = PG_GETARG_NAME(0);
+	Name ext_datatype = PG_GETARG_NAME(1);
+	int ext_datatype_len = PG_GETARG_INT32(2);
+	int ext_datatype_scale = PG_GETARG_INT32(3);
+	int ext_datatype_precision = PG_GETARG_INT32(4);
+
+	char * pg_datatype = NULL;
+	int pg_datatype_len = 0;
+	StringInfoData strinfo;
+	ConnectorType connectorType = TYPE_UNDEF;
+
+	(void)ext_datatype_precision;
+	initStringInfo(&strinfo);
+
+	connectorType = stringToConnectorType(NameStr(*type));
+	if (connectorType == TYPE_UNDEF)
+	{
+		elog(WARNING, "unsupported connector type %s", NameStr(*type));
+		PG_RETURN_TEXT_P(cstring_to_text("text"));
+	}
+
+	if (fc_translate_datatype(connectorType, NameStr(*ext_datatype),
+			ext_datatype_len, ext_datatype_scale,
+			&pg_datatype, &pg_datatype_len))
+	{
+		appendStringInfo(&strinfo, "%s", pg_datatype);
+
+		/* pg_datatype_len == -1 means to use original length */
+		if (pg_datatype_len == -1)
+			pg_datatype_len = ext_datatype_len;
+
+		if (pg_datatype_len > 0 && ext_datatype_scale > 0)
+		{
+			appendStringInfo(&strinfo, "(%d, %d)",
+					pg_datatype_len, ext_datatype_scale);
+			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
+		}
+
+		if (pg_datatype_len > 0 && ext_datatype_scale == 0)
+		{
+			appendStringInfo(&strinfo, "(%d)",
+					pg_datatype_len);
+			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
+		}
+
+		PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
+	}
+
+	/* no mapping available, default to text */
+	PG_RETURN_TEXT_P(cstring_to_text("text"));
 }

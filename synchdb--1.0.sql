@@ -148,3 +148,7 @@ LANGUAGE C IMMUTABLE STRICT;
 CREATE OR REPLACE FUNCTION synchdb_del_infinispan(name) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_translate_datatype(name, name, int, int, int) RETURNS text
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
