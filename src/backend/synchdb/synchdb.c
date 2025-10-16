@@ -3569,7 +3569,7 @@ synchdb_engine_main(Datum main_arg)
 	fc_load_objmap(connInfo.name, connectorType);
 
 	/* xxx oracle_fdw snap test xxx */
-	connInfo.snapengine = ENGINE_FDW;
+	connInfo.snapengine = ENGINE_DEBEZIUM;
 
 	if (connectorType != TYPE_OLR)
 	{
