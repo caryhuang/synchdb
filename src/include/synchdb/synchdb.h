@@ -85,7 +85,7 @@ typedef unsigned long long orascn;
 /* Possible connector flags */
 #define CONNFLAG_SCHEMA_SYNC_MODE 			1 << 0		/* 0001 */
 #define CONNFLAG_NO_CDC_MODE 				1 << 1		/* 0010 */
-#define CONNFLAG_EXIT_ON_SNAPSHOT_DONE 		1 << 2		/* 0100 */
+#define CONNFLAG_INITIAL_SNAPSHOT_MODE 		1 << 2		/* 0100 */
 
 /* Enumerations */
 
@@ -208,7 +208,7 @@ typedef enum _AlterSubType
 } AlterSubType;
 
 /*
- *
+ * enum that represents logminer stream mode
  */
 typedef enum _OralogminerStreamMode
 {
@@ -216,6 +216,15 @@ typedef enum _OralogminerStreamMode
 	LOGMINER_MODE_UNCOMMITTED,
 	LOGMINER_MODE_COMMITTED
 } OraLogminerStreamMode;
+
+/*
+ * enum that represents initial snapshot engines
+ */
+typedef enum _SnapshotEngine
+{
+	ENGINE_DEBEZIUM,
+	ENGINE_FDW
+} SnapshotEngine;
 
 /**
  * BatchInfo - Structure containing the metadata of a batch change request
@@ -312,6 +321,7 @@ typedef struct _ConnectionInfo
     JMXConnectionInfo jmx;
     OLRConnectionInfo olr;
     IspnInfo ispn;
+    SnapshotEngine snapengine;
 } ConnectionInfo;
 
 /**

@@ -1713,7 +1713,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
 		/* (6) clean up */
     	set_shm_connector_state(myConnectorId, (islastsnapshot &&
-    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_EXIT_ON_SNAPSHOT_DONE)) ?
+    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)) ?
     			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
     	destroyDBZDDL(dbzddl);
     	destroyPGDDL(pgddl);
@@ -1785,7 +1785,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
        	/* (5) clean up */
     	set_shm_connector_state(myConnectorId, (islastsnapshot &&
-    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_EXIT_ON_SNAPSHOT_DONE)) ?
+    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)) ?
     			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);

@@ -177,10 +177,10 @@ BEGIN
     -- 0) Determine the master key WITHOUT hardcoding
     --    Priority: explicit param > GUC synchdb.master_key
     ----------------------------------------------------------------------
-    v_key := COALESCE(p_master_key, current_setting('synchdb.master_key', true));
+	v_key := p_master_key;
 
     IF v_key IS NULL OR v_key = '' THEN
-        RAISE EXCEPTION 'Master key not provided. Pass p_master_key or set synchdb.master_key for the session.';
+        RAISE EXCEPTION 'Master key not provided.';
     END IF;
 
     ----------------------------------------------------------------------
@@ -196,23 +196,13 @@ BEGIN
         END;
     END IF;
 
-    IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto') THEN
-        RAISE NOTICE 'pgcrypto not found; attempting CREATE EXTENSION';
-        BEGIN
-            EXECUTE 'CREATE EXTENSION pgcrypto';
-        EXCEPTION WHEN OTHERS THEN
-            RAISE EXCEPTION 'Failed to install pgcrypto: % [%]', SQLERRM, SQLSTATE
-                USING HINT = 'Install pgcrypto as a superuser, then retry.';
-        END;
-    END IF;
-
     ----------------------------------------------------------------------
     -- 2) Fetch connector info and DECRYPT password
     ----------------------------------------------------------------------
     SELECT
         data->>'hostname',
         NULLIF(data->>'port','')::int,
-        data->>'srcdb',          -- service/SID
+        lower(data->>'srcdb'),          -- service/SID
         data->>'user',
         pgp_sym_decrypt((data->>'pwd')::bytea, v_key)
     INTO v_hostname, v_port, v_service, v_user, v_pwd
@@ -1139,23 +1129,30 @@ COMMENT ON FUNCTION synchdb_create_current_scn_ft(name, name) IS
    'create Oracle foreign tables for current scn';
 
 CREATE OR REPLACE FUNCTION synchdb_create_ora_stage_fts(
-    p_stage_schema   name DEFAULT 'ora_stage'::name,      -- target schema in Postgres
-    p_server_name    name DEFAULT 'oracle'::name,         -- oracle_fdw server name
-    p_lower_names    boolean DEFAULT true,                -- lower-case PG table/column names
-    p_on_exists      text DEFAULT 'replace',              -- 'replace' | 'drop' | 'skip'
-    p_scn            numeric DEFAULT 0,                   -- >0 => use AS OF SCN subquery
-    p_source_schema  name DEFAULT 'ora_obj'::name         -- metadata source schema (…columns)
+    p_connector_name name,                               -- connector name for attribute rows
+    p_stage_schema   name DEFAULT 'ora_stage'::name,     -- target schema in Postgres
+    p_server_name    name DEFAULT 'oracle'::name,        -- oracle_fdw server name
+    p_lower_names    boolean DEFAULT true,               -- lower-case PG table/column names
+    p_on_exists      text DEFAULT 'replace',             -- 'replace' | 'drop' | 'skip'
+    p_scn            numeric DEFAULT 0,                  -- >0 => use AS OF SCN subquery
+    p_source_schema  name DEFAULT 'ora_obj'::name        -- metadata source schema (…columns)
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
   has_oracle_fdw boolean;
-  r record;
-  v_tbl_pg     text;
-  v_cols_sql   text;   -- PG column defs (mapped types)
-  v_sel_list   text;   -- Oracle SELECT column list (for subquery)
-  v_exists     boolean;
-  v_subquery   text;
+  r              RECORD;
+  v_tbl_pg       text;
+  v_cols_sql     text;      -- PG column defs (mapped types)
+  v_sel_list     text;      -- Oracle SELECT column list (for subquery)
+  v_exists       boolean;
+  v_subquery     text;
+
+  v_conn_type    name;      -- from synchdb_conninfo.data->>'connector'
+  v_srcdb        text;      -- lower(data->>'srcdb')
+  v_owner        text;      -- lower(data->>'user')
+  v_ext_tbname   text;      -- "<db>.<schema>.<table>" all lower
+  v_relid        oid;       -- OID of the created foreign table in p_stage_schema
 BEGIN
   -- sanity: oracle_fdw installed?
   SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='oracle_fdw')
@@ -1163,6 +1160,24 @@ BEGIN
     INTO has_oracle_fdw;
   IF NOT has_oracle_fdw THEN
     RAISE EXCEPTION 'oracle_fdw is not installed. Run: CREATE EXTENSION oracle_fdw;';
+  END IF;
+
+  -- Get connector info: type, srcdb (database/service), user (owner/schema)
+  SELECT (data->>'connector')::name,
+         lower(data->>'srcdb'),
+         lower(data->>'user')
+    INTO v_conn_type, v_srcdb, v_owner
+  FROM synchdb_conninfo
+  WHERE name = p_connector_name;
+
+  IF v_conn_type IS NULL OR v_conn_type = ''::name THEN
+    RAISE EXCEPTION 'synchdb_conninfo[%]: data->>connector is missing/empty', p_connector_name;
+  END IF;
+  IF v_srcdb IS NULL OR v_srcdb = '' THEN
+    RAISE EXCEPTION 'synchdb_conninfo[%]: data->>srcdb is missing/empty', p_connector_name;
+  END IF;
+  IF v_owner IS NULL OR v_owner = '' THEN
+    RAISE EXCEPTION 'synchdb_conninfo[%]: data->>user is missing/empty', p_connector_name;
   END IF;
 
   -- ensure stage schema
@@ -1202,11 +1217,14 @@ BEGIN
       END IF;
     END IF;
 
-    -- Build PG column list using YOUR translator (lower(type_name), arg1='oracle')
+    -- Build PG column list using your translator
     EXECUTE format(
       'SELECT string_agg(
                 quote_ident(%s) || '' '' ||
-                synchdb_translate_datatype(''oracle'', lower(c.type_name), COALESCE(c.length, -1), COALESCE(c.scale, -1), COALESCE(c.precision, -1)) ||
+                synchdb_translate_datatype(''oracle'', lower(c.type_name),
+                                           COALESCE(c.length, -1),
+                                           COALESCE(c.scale, -1),
+                                           COALESCE(c.precision, -1)) ||
                 CASE WHEN c.nullable IS FALSE THEN '' NOT NULL'' ELSE '''' END,
                 '', '' ORDER BY c.position)
          FROM %I.columns c
@@ -1222,8 +1240,9 @@ BEGIN
       CONTINUE;
     END IF;
 
+    -- Create the staging FT (snapshot or not)
     IF p_scn IS NOT NULL AND p_scn > 0 THEN
-      -- Explicit Oracle SELECT column list for deterministic order (safer than *)
+      -- Explicit Oracle SELECT column list
       EXECUTE format(
         'SELECT string_agg(quote_ident(c.column_name), '', '' ORDER BY c.position)
            FROM %I.columns c
@@ -1254,24 +1273,81 @@ BEGIN
       RAISE NOTICE 'Created FT %.% -> %.% on %',
                    p_stage_schema, v_tbl_pg, r.ora_owner, r.table_name, p_server_name;
     END IF;
+
+    -- Look up the OID of the just-created foreign table (relkind = 'f')
+    EXECUTE format(
+      'SELECT c.oid
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %L
+          AND c.relname = %L
+          AND c.relkind = ''f''
+        LIMIT 1',
+      p_stage_schema, v_tbl_pg
+    )
+    INTO v_relid;
+
+    IF v_relid IS NULL THEN
+      RAISE EXCEPTION 'Could not resolve OID for foreign table %.%', p_stage_schema, v_tbl_pg;
+    END IF;
+
+    -- Build fully-qualified external table name: db.schema.table (all lower)
+    v_ext_tbname := format('%s.%s.%s', v_srcdb, v_owner, lower(r.table_name));
+
+    -- Clean any previous rows for this (connector,type,table) using fully-qualified name
+    DELETE FROM public.synchdb_attribute
+     WHERE name       = p_connector_name
+       AND type       = v_conn_type
+       AND ext_tbname = v_ext_tbname::name;
+
+    -- Insert one row per column from <p_source_schema>.columns
+    EXECUTE format($ins$
+      INSERT INTO public.synchdb_attribute
+          (name, type, attrelid, attnum, ext_tbname,    ext_attname,           ext_atttypename)
+      SELECT
+          %L::name,                    -- connector name
+          %L::name,                    -- connector type (e.g., 'oracle')
+          %s::oid,                     -- attrelid = OID of created FT
+          c.position::smallint,        -- ordinal
+          %L::name,                    -- ext_tbname = db.schema.table (lowercase)
+          lower(c.column_name)::name,  -- ext_attname (lowercase)
+          lower(c.type_name)::name     -- ext_atttypename (lowercase)
+      FROM %I.columns c
+      WHERE c."schema"   = %L
+        AND c.table_name = %L
+      ORDER BY c.position
+    $ins$, p_connector_name, v_conn_type, v_relid::text,
+          v_ext_tbname,
+          p_source_schema, r.ora_owner, r.table_name);
+
+    RAISE NOTICE 'Recorded % Oracle columns for %.% into synchdb_attribute (attrelid=%) as %',
+                 (SELECT count(*)
+                    FROM public.synchdb_attribute
+                   WHERE name = p_connector_name
+                     AND type = v_conn_type
+                     AND ext_tbname = v_ext_tbname::name),
+                 r.ora_owner, r.table_name, v_relid::text, v_ext_tbname;
+
   END LOOP;
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, boolean, text, numeric, name) IS
+COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, boolean, text, numeric, name) IS
    'create a staging schema, migrate table schemas with translated data types';
-
 
 CREATE OR REPLACE FUNCTION synchdb_materialize_schema(
     p_src_schema name,                -- e.g. 'ora_stage'
     p_dst_schema name,                -- e.g. 'psql_stage'
-    p_on_exists  text DEFAULT 'skip'  -- 'skip' | 'recreate'
+    p_on_exists  text DEFAULT 'skip'  -- 'skip' | 'replace'
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  r record;
-  v_exists boolean;
+  r           record;
+  v_exists    boolean;
+  v_ft_oid    oid;    -- OID of the foreign table in p_src_schema
+  v_dst_oid   oid;    -- OID of the newly-created regular table in p_dst_schema
+  v_upd_count bigint; -- number of rows updated in synchdb_attribute
 BEGIN
   -- ensure destination schema exists
   EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', p_dst_schema);
@@ -1298,10 +1374,10 @@ BEGIN
       IF p_on_exists = 'skip' THEN
         RAISE NOTICE 'Skipping %.% (already exists)', p_dst_schema, r.tbl;
         CONTINUE;
-      ELSIF p_on_exists = 'recreate' THEN
+      ELSIF p_on_exists = 'replace' THEN
         EXECUTE format('DROP TABLE %I.%I CASCADE', p_dst_schema, r.tbl);
       ELSE
-        RAISE EXCEPTION 'Unknown p_on_exists value: %, use "skip" or "recreate"', p_on_exists;
+        RAISE EXCEPTION 'Unknown p_on_exists value: %, use "skip" or "replace"', p_on_exists;
       END IF;
     END IF;
 
@@ -1312,6 +1388,51 @@ BEGIN
     );
 
     RAISE NOTICE 'Created %I.%I from %I.%I', r.tbl, p_dst_schema, r.tbl, p_src_schema;
+
+    ----------------------------------------------------------------
+    -- Look up OIDs: source foreign table and new destination table
+    ----------------------------------------------------------------
+    SELECT c.oid
+      INTO v_ft_oid
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = p_src_schema
+      AND c.relname = r.tbl
+      AND c.relkind = 'f'
+    LIMIT 1;
+
+    IF v_ft_oid IS NULL THEN
+      RAISE NOTICE 'Could not find foreign table OID for %.% (skipping attrelid update)',
+                   p_src_schema, r.tbl;
+      CONTINUE;
+    END IF;
+
+    SELECT c.oid
+      INTO v_dst_oid
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = p_dst_schema
+      AND c.relname = r.tbl
+      AND c.relkind = 'r'
+    LIMIT 1;
+
+    IF v_dst_oid IS NULL THEN
+      RAISE NOTICE 'Could not find destination table OID for %.% (skipping attrelid update)',
+                   p_dst_schema, r.tbl;
+      CONTINUE;
+    END IF;
+
+    ----------------------------------------------------------------
+    -- Update synchdb_attribute: move attrelid from FT OID -> new table OID
+    ----------------------------------------------------------------
+    UPDATE public.synchdb_attribute
+       SET attrelid = v_dst_oid
+     WHERE attrelid = v_ft_oid;
+
+    GET DIAGNOSTICS v_upd_count = ROW_COUNT;
+
+    RAISE NOTICE 'Updated synchdb_attribute: % rows (attrelid % -> % for table %)',
+                 v_upd_count, v_ft_oid::text, v_dst_oid::text, r.tbl;
   END LOOP;
 END;
 $$;
@@ -1393,6 +1514,7 @@ CREATE OR REPLACE FUNCTION synchdb_apply_column_mappings(
 LANGUAGE plpgsql
 AS $$
 DECLARE
+  -- RENAME pass vars
   r          RECORD;
   parts      text[];
   s_db       text;
@@ -1402,7 +1524,25 @@ DECLARE
 
   dst_parts  text[];
   d_col      text;
+
+  -- DATATYPE pass vars
+  rdt        RECORD;
+  dt_parts   text[];
+  dt_db      text;
+  dt_schema  text;
+  dt_table   text;
+  dt_col     text;
+  target_col text;   -- column name to ALTER TYPE (post-rename if applicable)
+
+  dt_spec    text;   -- raw 'dstobj' from datatype row, e.g. 'varchar|128'
+  dt_name    text;   -- left side of '|'
+  dt_len_txt text;   -- right side of '|'
+  dt_len     int;
+  dtype_sql  text;   -- rendered SQL type, e.g. 'varchar(128)' or 'text'
 BEGIN
+  ---------------------------------------------------------------------------
+  -- Pass 1: COLUMN RENAME mappings (unchanged)
+  ---------------------------------------------------------------------------
   FOR r IN
     SELECT m.srcobj, m.dstobj
     FROM synchdb_objmap AS m
@@ -1411,36 +1551,30 @@ BEGIN
       AND m.name = p_connector_name
       AND m.dstobj IS NOT NULL AND btrim(m.dstobj) <> ''
   LOOP
-    -- Parse srcobj => db(.schema).table.column
     parts := regexp_split_to_array(lower(r.srcobj), '\.');
     s_db := NULL; s_schema := NULL; s_table := NULL; s_col := NULL;
 
     IF array_length(parts,1) = 4 THEN
       s_db := parts[1]; s_schema := parts[2]; s_table := parts[3]; s_col := parts[4];
     ELSIF array_length(parts,1) = 3 THEN
-      -- form: db.table.column (no schema segment)
       s_db := parts[1]; s_table := parts[2]; s_col := parts[3];
     ELSE
-      CONTINUE;  -- unsupported shape
+      CONTINUE;
     END IF;
 
-    -- Require matching database
     IF p_desired_db IS NOT NULL AND s_db IS DISTINCT FROM lower(p_desired_db) THEN
       CONTINUE;
     END IF;
 
-    -- Enforce desired schema only if a schema segment exists in srcobj
     IF p_desired_schema IS NOT NULL
        AND s_schema IS NOT NULL
        AND s_schema <> lower(p_desired_schema) THEN
       CONTINUE;
     END IF;
 
-    -- Destination column = last token of dstobj
     dst_parts := regexp_split_to_array(lower(r.dstobj), '\.');
     d_col := dst_parts[array_length(dst_parts,1)];
 
-    -- Ensure source table/column exists
     IF NOT EXISTS (
       SELECT 1
       FROM information_schema.columns
@@ -1452,7 +1586,6 @@ BEGIN
       CONTINUE;
     END IF;
 
-    -- Skip if destination column already exists
     IF EXISTS (
       SELECT 1
       FROM information_schema.columns
@@ -1464,11 +1597,112 @@ BEGIN
       CONTINUE;
     END IF;
 
-    -- Perform the rename
     EXECUTE format('ALTER TABLE %I.%I RENAME COLUMN %I TO %I',
                    p_src_schema, s_table, s_col, d_col);
 
     RAISE NOTICE 'Renamed %.%: % -> %', p_src_schema, s_table, s_col, d_col;
+  END LOOP;
+
+  ---------------------------------------------------------------------------
+  -- Pass 2: DATATYPE mappings with 'type|length' grammar in dstobj
+  -- - Find target column name (renamed if a COLUMN mapping exists for same srcobj)
+  -- - Render type as: length=0 -> "type", else "type(length)"
+  ---------------------------------------------------------------------------
+  FOR rdt IN
+    SELECT m.srcobj, m.dstobj
+    FROM synchdb_objmap AS m
+    WHERE m.objtype = 'datatype'
+      AND m.enabled
+      AND m.name = p_connector_name
+      AND m.dstobj IS NOT NULL AND btrim(m.dstobj) <> ''
+  LOOP
+    -- Parse srcobj => db(.schema).table.column
+    dt_parts := regexp_split_to_array(lower(rdt.srcobj), '\.');
+    dt_db := NULL; dt_schema := NULL; dt_table := NULL; dt_col := NULL;
+
+    IF array_length(dt_parts,1) = 4 THEN
+      dt_db := dt_parts[1]; dt_schema := dt_parts[2]; dt_table := dt_parts[3]; dt_col := dt_parts[4];
+    ELSIF array_length(dt_parts,1) = 3 THEN
+      dt_db := dt_parts[1]; dt_table := dt_parts[2]; dt_col := dt_parts[3];
+    ELSE
+      CONTINUE;
+    END IF;
+
+    IF p_desired_db IS NOT NULL AND dt_db IS DISTINCT FROM lower(p_desired_db) THEN
+      CONTINUE;
+    END IF;
+
+    IF p_desired_schema IS NOT NULL
+       AND dt_schema IS NOT NULL
+       AND dt_schema <> lower(p_desired_schema) THEN
+      CONTINUE;
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = p_src_schema
+        AND table_name   = dt_table
+    ) THEN
+      RAISE NOTICE 'Skipping %.%: table not found for datatype mapping', p_src_schema, dt_table;
+      CONTINUE;
+    END IF;
+
+    -- If a COLUMN mapping exists for same srcobj, use its dst column name
+    SELECT (regexp_split_to_array(lower(m2.dstobj), '\.'))[
+             array_length(regexp_split_to_array(lower(m2.dstobj), '\.'), 1)
+           ]
+    INTO target_col
+    FROM synchdb_objmap m2
+    WHERE m2.objtype = 'column'
+      AND m2.enabled
+      AND m2.name = p_connector_name
+      AND lower(m2.srcobj) = lower(rdt.srcobj)
+    LIMIT 1;
+
+    IF target_col IS NULL OR btrim(target_col) = '' THEN
+      target_col := dt_col;  -- no rename mapping; use original name
+    END IF;
+
+    -- Ensure target column exists
+    IF NOT EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = p_src_schema
+        AND table_name   = dt_table
+        AND column_name  = target_col
+    ) THEN
+      RAISE NOTICE 'Skipping %.%: target column % not found for datatype mapping', p_src_schema, dt_table, target_col;
+      CONTINUE;
+    END IF;
+
+    -- Parse datatype spec 'type|len'
+    dt_spec    := rdt.dstobj;
+    dt_name    := btrim(split_part(lower(dt_spec), '|', 1));
+    dt_len_txt := btrim(split_part(dt_spec, '|', 2));
+    dt_len     := COALESCE(NULLIF(dt_len_txt, '')::int, 0);
+
+    IF dt_name IS NULL OR dt_name = '' THEN
+      RAISE NOTICE 'Skipping %.%: invalid datatype spec (empty type) for column %', p_src_schema, dt_table, target_col;
+      CONTINUE;
+    END IF;
+
+    IF dt_len > 0 THEN
+      dtype_sql := format('%s(%s)', dt_name, dt_len);
+    ELSE
+      dtype_sql := dt_name;
+    END IF;
+
+    BEGIN
+      EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I TYPE %s',
+                     p_src_schema, dt_table, target_col, dtype_sql);
+      RAISE NOTICE 'Altered datatype %.%: % TYPE %', p_src_schema, dt_table, target_col, dtype_sql;
+    EXCEPTION
+      WHEN others THEN
+        -- If the cast is not binary-coercible, a USING clause may be needed.
+        RAISE NOTICE 'Failed to alter datatype for %.% column % to %: %',
+                     p_src_schema, dt_table, target_col, dtype_sql, SQLERRM;
+    END;
   END LOOP;
 END;
 $$;
@@ -1883,6 +2117,7 @@ BEGIN
 
     RAISE NOTICE 'Step 4: Creating staging foreign tables in schema "%"', p_stage_schema;
     PERFORM synchdb_create_ora_stage_fts(
+		p_connector_name,
         p_stage_schema,
         v_server_name,
         p_lower_names,
@@ -1926,3 +2161,101 @@ $$;
 
 COMMENT ON FUNCTION synchdb_do_initial_snapshot(name, text, name, name, name, text, name, boolean, text, numeric) IS
    'perform initial snapshot procedure + data transforms using a oracle_fdw server';
+
+CREATE OR REPLACE FUNCTION synchdb_do_schema_sync(
+    p_connector_name  name,               -- e.g. 'oracleconn'
+    p_secret          text,               -- master key for decrypting connector password
+    p_source_schema   name,               -- e.g. 'ora_obj'   (FDW objects + current_scn FT)
+    p_stage_schema    name,               -- e.g. 'ora_stage' (staging foreign tables)
+    p_dest_schema     name,               -- e.g. 'dst_stage' (materialized tables)
+    p_lookup_db       text,               -- e.g. 'free'
+    p_lookup_schema   name,               -- e.g. 'dbzuser'
+    p_lower_names     boolean DEFAULT true,
+    p_on_exists       text    DEFAULT 'replace',  -- 'replace' | 'drop' | 'skip'
+    p_scn             numeric DEFAULT 0           -- >0 to force a specific SCN; else auto-read
+)
+RETURNS numeric
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_scn           numeric;
+    v_case_json     jsonb;
+    v_effective_scn numeric;
+    v_server_name   text;   -- will be set by synchdb_prepare_initial_snapshot()
+BEGIN
+    ----------------------------------------------------------------------
+    -- Step 0: Prepare FDW server & user mapping from connector metadata
+    --         (returns the created server name, e.g. '<connector>_oracle')
+    ----------------------------------------------------------------------
+    v_server_name := synchdb_prepare_initial_snapshot(p_connector_name, p_secret);
+    RAISE NOTICE 'Using FDW server "%" for connector "%"', v_server_name, p_connector_name;
+
+    -- Build the case option JSON for synchdb_create_oraviews
+    v_case_json := jsonb_build_object(
+        'case', CASE WHEN p_lower_names THEN 'lower' ELSE 'original' END
+    );
+
+    RAISE NOTICE 'Step 1: Creating Oracle FDW views for schema "%" using server "%"',
+                 p_source_schema, v_server_name;
+    PERFORM synchdb_create_oraviews(v_server_name, p_source_schema, v_case_json);
+
+    RAISE NOTICE 'Step 2: Creating/ensuring current_scn foreign table exists in schema "%" using server "%"',
+                 p_source_schema, v_server_name;
+    PERFORM synchdb_create_current_scn_ft(p_source_schema, v_server_name);
+
+    RAISE NOTICE 'Step 3: Reading current SCN value from %.current_scn', p_source_schema;
+    EXECUTE format('SELECT current_scn FROM %I.current_scn', p_source_schema)
+       INTO v_scn;
+
+    IF (p_scn IS NULL OR p_scn <= 0) THEN
+        IF v_scn IS NULL THEN
+            RAISE EXCEPTION 'Unable to read current SCN from %.current_scn', p_source_schema;
+        END IF;
+        v_effective_scn := v_scn;
+    ELSE
+        v_effective_scn := p_scn;
+    END IF;
+
+    RAISE NOTICE 'Using SCN value % for snapshot', v_effective_scn;
+
+    RAISE NOTICE 'Step 4: Creating staging foreign tables in schema "%"', p_stage_schema;
+    PERFORM synchdb_create_ora_stage_fts(
+		p_connector_name,
+        p_stage_schema,
+        v_server_name,
+        p_lower_names,
+        p_on_exists,
+        v_effective_scn,
+        p_source_schema
+    );
+
+    RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
+    PERFORM synchdb_materialize_schema(p_stage_schema, p_dest_schema, p_on_exists);
+
+    RAISE NOTICE 'Step 6: Migrating primary keys from metadata schema "%" to "%"', p_source_schema, p_dest_schema;
+    PERFORM synchdb_migrate_primary_keys(p_source_schema, p_dest_schema);
+
+    RAISE NOTICE 'Step 7: Applying column mappings to schema "%" using objmap %.% for connector %',
+                 p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
+    PERFORM synchdb_apply_column_mappings(p_dest_schema, p_connector_name, p_lookup_db, p_lookup_schema);
+
+    RAISE NOTICE 'Step 8: Applying table mappings on destination schema "%" (lookup: %.% for connector %)',
+                 p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
+    PERFORM synchdb_apply_table_mappings(p_dest_schema, p_connector_name, p_lookup_db, p_lookup_schema);
+
+    RAISE NOTICE 'schema sync completed successfully at SCN %', v_effective_scn;
+
+    PERFORM synchdb_finalize_initial_snapshot(p_source_schema, p_stage_schema, p_connector_name);
+
+    RETURN v_effective_scn;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'synchdb_do_schema_sync() failed: % [%]', SQLERRM, SQLSTATE
+            USING HINT = 'Check NOTICE logs above to identify which step failed.';
+END;
+$$;
+
+COMMENT ON FUNCTION synchdb_do_schema_sync(name, text, name, name, name, text, name, boolean, text, numeric) IS
+   'perform schema only sync procedure + transforms using a oracle_fdw server - no data migration';
+
