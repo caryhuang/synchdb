@@ -371,6 +371,15 @@ typedef struct _SynchdbStatistics
 	unsigned long long stats_last_pg_ts;	/* timestamp(ms) of last batch's last event processed by postgresql */
 } SynchdbStatistics;
 
+
+typedef struct _SnapshotStatistics
+{
+	unsigned long long snapstats_tables;			/* number of tables created */
+	unsigned long long snapstats_rows;				/* total number of rows created */
+	unsigned long long snapstats_begintime_ts;		/* timestamp(ms) when snapshot process begins */
+	unsigned long long snapstats_endtime_ts;		/* timestamp(ms) when snapshot process ends */
+} SnapshotStatistics;
+
 /**
  *  Structure holding state information for connectors
  */
@@ -386,6 +395,7 @@ typedef struct _ActiveConnectors
 	char snapshotMode[SYNCHDB_SNAPSHOT_MODE_SIZE];
 	ConnectionInfo conninfo;
 	SynchdbStatistics stats;
+	SnapshotStatistics snapstats;
 } ActiveConnectors;
 
 /**

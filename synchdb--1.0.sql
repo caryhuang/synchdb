@@ -47,11 +47,17 @@ CREATE OR REPLACE FUNCTION synchdb_get_stats() RETURNS SETOF record
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
+CREATE OR REPLACE FUNCTION synchdb_get_snapstats() RETURNS SETOF record
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
 CREATE OR REPLACE FUNCTION synchdb_reset_stats(name) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
 CREATE VIEW synchdb_stats_view AS SELECT * FROM synchdb_get_stats() AS (name text, ddls bigint, dmls bigint, reads bigint, creates bigint, updates bigint, deletes bigint, bad_events bigint, total_events bigint, batches_done bigint, avg_batch_size bigint, first_src_ts bigint, first_dbz_ts bigint, first_pg_ts bigint, last_src_ts bigint, last_dbz_ts bigint, last_pg_ts bigint);
+
+CREATE VIEW synchdb_snapstats_view AS SELECT * FROM synchdb_get_snapstats() AS (name text, tables bigint, rows bigint, begin_ts bigint, end_ts bigint);
 
 CREATE TABLE IF NOT EXISTS synchdb_conninfo(name TEXT PRIMARY KEY, isactive BOOL, data JSONB);
 
@@ -150,6 +156,10 @@ AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION synchdb_translate_datatype(name, name, int, int, int) RETURNS text
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_set_snapstats(name, bigint, bigint, bigint, bigint) RETURNS void
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
@@ -1336,23 +1346,23 @@ COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, boolean, text
    'create a staging schema, migrate table schemas with translated data types';
 
 CREATE OR REPLACE FUNCTION synchdb_materialize_schema(
-    p_src_schema name,                -- e.g. 'ora_stage'
-    p_dst_schema name,                -- e.g. 'psql_stage'
-    p_on_exists  text DEFAULT 'skip'  -- 'skip' | 'replace'
+    p_connector_name name,            -- connector name for stats
+    p_src_schema     name,            -- e.g. 'ora_stage'
+    p_dst_schema     name,            -- e.g. 'psql_stage'
+    p_on_exists      text DEFAULT 'skip'  -- 'skip' | 'replace'
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
   r           record;
   v_exists    boolean;
-  v_ft_oid    oid;    -- OID of the foreign table in p_src_schema
-  v_dst_oid   oid;    -- OID of the newly-created regular table in p_dst_schema
-  v_upd_count bigint; -- number of rows updated in synchdb_attribute
+  v_ft_oid    oid;
+  v_dst_oid   oid;
+  v_upd_count bigint;
 BEGIN
   -- ensure destination schema exists
   EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', p_dst_schema);
 
-  -- loop over all foreign tables in the source schema
   FOR r IN
     SELECT c.relname AS tbl
     FROM   pg_foreign_table ft
@@ -1360,7 +1370,6 @@ BEGIN
     JOIN   pg_namespace    n ON n.oid = c.relnamespace
     WHERE  n.nspname = p_src_schema
   LOOP
-    -- does destination table already exist?
     SELECT EXISTS (
       SELECT 1
       FROM pg_class c2
@@ -1389,8 +1398,11 @@ BEGIN
 
     RAISE NOTICE 'Created %I.%I from %I.%I', r.tbl, p_dst_schema, r.tbl, p_src_schema;
 
+    -- record stats after successful materialization
+    PERFORM synchdb_set_snapstats(p_connector_name, 1::bigint, 0::bigint, 0::bigint, 0::bigint);
+
     ----------------------------------------------------------------
-    -- Look up OIDs: source foreign table and new destination table
+    -- Lookup source/destination OIDs
     ----------------------------------------------------------------
     SELECT c.oid
       INTO v_ft_oid
@@ -1423,7 +1435,7 @@ BEGIN
     END IF;
 
     ----------------------------------------------------------------
-    -- Update synchdb_attribute: move attrelid from FT OID -> new table OID
+    -- Update synchdb_attribute
     ----------------------------------------------------------------
     UPDATE public.synchdb_attribute
        SET attrelid = v_dst_oid
@@ -1437,7 +1449,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_materialize_schema(name, name, text) IS
+COMMENT ON FUNCTION synchdb_materialize_schema(name, name, name, text) IS
    'materialize table schema from staging to destination schema';
 
 CREATE OR REPLACE FUNCTION synchdb_migrate_primary_keys(
@@ -1712,18 +1724,25 @@ COMMENT ON FUNCTION synchdb_apply_column_mappings(name, name, name, name) IS
 
 CREATE OR REPLACE FUNCTION synchdb_migrate_data_with_transforms(
     p_src_schema      name,                 -- e.g. 'ora_stage'
-    p_connector_name  name,                 -- filter synchdb_objmap by this connector
+    p_connector_name  name,                 -- connector for stats + objmap filter
     p_dst_schema      name,                 -- e.g. 'psql_stage'
-    p_desired_db      name,                 -- e.g. 'free' (db token to match in srcobj)
-    p_desired_schema  name DEFAULT NULL,    -- e.g. 'dbzuser' (optional; only enforced if present in srcobj)
-    p_do_truncate     boolean DEFAULT false -- TRUNCATE destination tables before INSERT
+    p_desired_db      name,                 -- e.g. 'free'
+    p_desired_schema  name DEFAULT NULL,    -- e.g. 'dbzuser'
+    p_do_truncate     boolean DEFAULT false,
+    p_rows_per_tick   integer DEFAULT 0     -- 0/NULL = no batching; >0 = call stats every N rows
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  r        record;
-  dst_list text;
-  src_list text;
+  r           record;
+  dst_list    text;
+  src_list    text;
+  v_rows      bigint;
+  v_total     bigint;
+  v_off       bigint;
+  -- helpers for batching
+  base_select text;
+  ins_sql     text;
 BEGIN
   -- Iterate all source FTs that have a same-named real table in the destination schema
   FOR r IN
@@ -1748,7 +1767,6 @@ BEGIN
       WHERE c.table_schema = p_dst_schema
         AND c.table_name   = r.tbl
     ),
-    -- Column rename mappings: either p_src_schema.table.column, or db[.schema].table.column filtered by desired db/schema
     colmap AS (
       -- A) schema-qualified rules: p_src_schema.table.column -> <dst column>
       SELECT
@@ -1767,7 +1785,7 @@ BEGIN
 
       -- B) db-prefixed rules: db.schema.table.column OR db.table.column -> <dst column>
       SELECT
-        CASE WHEN array_length(arr,1)=4 THEN arr[3]     -- db.schema.table.column
+        CASE WHEN array_length(arr,1)=4 THEN arr[3]
              WHEN array_length(arr,1)=3 THEN arr[2] END AS tbl,
         arr[array_length(arr,1)]                        AS src_col,
         (regexp_split_to_array(lower(m2.dstobj), '\.'))[
@@ -1783,11 +1801,10 @@ BEGIN
       WHERE arr[1] = lower(p_desired_db)
         AND (
           p_desired_schema IS NULL OR p_desired_schema = ''
-          OR array_length(arr,1)=3            -- db.table.column (no schema to check)
-          OR arr[2] = lower(p_desired_schema) -- db.schema.table.column with matching schema
+          OR array_length(arr,1)=3
+          OR arr[2] = lower(p_desired_schema)
         )
     ),
-    -- Decide source column for each destination column (rename wins; else same name)
     col_map AS (
       SELECT d.ordinal_position,
              d.dst_col,
@@ -1797,13 +1814,11 @@ BEGIN
              ) AS src_col
       FROM dst_cols d
     ),
-    -- Check that source column exists in p_src_schema
     src_presence AS (
       SELECT lower(table_name) AS tbl, lower(column_name) AS src_col
       FROM information_schema.columns
       WHERE table_schema = p_src_schema
     ),
-    -- Transform mappings: schema-qualified (always) + db-prefixed (filtered)
     tmap AS (
       -- A) schema-qualified
       SELECT
@@ -1816,7 +1831,6 @@ BEGIN
         AND lower(split_part(mt.srcobj,'.',1)) = lower(p_src_schema)
 
       UNION ALL
-
       -- B) db-prefixed
       SELECT
         CASE WHEN array_length(arr,1)=4 THEN arr[3]
@@ -1837,7 +1851,6 @@ BEGIN
           OR arr[2] = lower(p_desired_schema)
         )
     ),
-    -- Build the SELECT expressions, applying transform if present
     exprs AS (
       SELECT
         m.ordinal_position,
@@ -1857,7 +1870,6 @@ BEGIN
         END AS src_expr
       FROM col_map m
     )
-    -- Aggregate into comma-separated lists for INSERT
     SELECT
       string_agg(quote_ident(dst_col), ', ' ORDER BY ordinal_position),
       string_agg(src_expr,              ', ' ORDER BY ordinal_position)
@@ -1873,17 +1885,68 @@ BEGIN
       EXECUTE format('TRUNCATE %I.%I', p_dst_schema, r.tbl);
     END IF;
 
-    EXECUTE format(
-      'INSERT INTO %I.%I (%s) SELECT %s FROM %I.%I',
-      p_dst_schema, r.tbl, dst_list, src_list, p_src_schema, r.tbl
-    );
+    -- === No batching: one-shot insert, then report actual row count ===
+    IF COALESCE(p_rows_per_tick, 0) <= 0 THEN
+      EXECUTE format(
+        'INSERT INTO %I.%I (%s) SELECT %s FROM %I.%I',
+        p_dst_schema, r.tbl, dst_list, src_list, p_src_schema, r.tbl
+      );
+      GET DIAGNOSTICS v_rows = ROW_COUNT;
+      -- increment rows counter once for this table
+      PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, v_rows::bigint, 0::bigint, 0::bigint);
+      RAISE NOTICE 'Loaded %.% from %.% (rows=%)', p_dst_schema, r.tbl, p_src_schema, r.tbl, v_rows;
 
-    RAISE NOTICE 'Loaded %.% from %.%', p_dst_schema, r.tbl, p_src_schema, r.tbl;
+    ELSE
+      -- === Batching mode: insert in chunks; call stats after each chunk ===
+      -- 1) Count total rows to process using the same SELECT list
+      EXECUTE format(
+        'SELECT count(*) FROM (SELECT %s FROM %I.%I) q',
+        src_list, p_src_schema, r.tbl
+      )
+      INTO v_total;
+
+      v_off := 0;
+      WHILE v_off < v_total LOOP
+        ins_sql := format(
+          $sql$
+          INSERT INTO %I.%I (%s)
+          SELECT %s
+          FROM (
+            SELECT %s, row_number() OVER () AS rn
+            FROM %I.%I
+          ) t
+          WHERE t.rn > %s AND t.rn <= %s
+          $sql$,
+          p_dst_schema, r.tbl,
+          dst_list,
+          src_list,
+          src_list,
+          p_src_schema, r.tbl,
+          v_off, v_off + p_rows_per_tick
+        );
+
+        EXECUTE ins_sql;
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+
+        IF v_rows > 0 THEN
+          PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, v_rows::bigint, 0::bigint, 0::bigint);
+          RAISE NOTICE 'Loaded batch: %.% (+% rows, offset % / %)',
+                       p_dst_schema, r.tbl, v_rows, v_off, v_total;
+        END IF;
+
+        v_off := v_off + p_rows_per_tick;
+        -- Optional: exit early if no rows inserted (safety)
+        IF v_rows = 0 THEN
+          EXIT;
+        END IF;
+      END LOOP;
+    END IF;
+
   END LOOP;
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_migrate_data_with_transforms(name, name, name, name, name, boolean) IS
+COMMENT ON FUNCTION synchdb_migrate_data_with_transforms(name, name, name, name, name, boolean, int) IS
    'migrate data while applying transform expressions if available';
 
 CREATE OR REPLACE FUNCTION synchdb_apply_table_mappings(
@@ -2084,6 +2147,10 @@ BEGIN
     -- Step 0: Prepare FDW server & user mapping from connector metadata
     --         (returns the created server name, e.g. '<connector>_oracle')
     ----------------------------------------------------------------------
+
+	PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, 0::bigint,
+                                 (extract(epoch from clock_timestamp()) * 1000)::bigint, 0::bigint);
+
     v_server_name := synchdb_prepare_initial_snapshot(p_connector_name, p_secret);
     RAISE NOTICE 'Using FDW server "%" for connector "%"', v_server_name, p_connector_name;
 
@@ -2127,7 +2194,7 @@ BEGIN
     );
 
     RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
-    PERFORM synchdb_materialize_schema(p_stage_schema, p_dest_schema, p_on_exists);
+    PERFORM synchdb_materialize_schema(p_connector_name, p_stage_schema, p_dest_schema, p_on_exists);
 
     RAISE NOTICE 'Step 6: Migrating primary keys from metadata schema "%" to "%"', p_source_schema, p_dest_schema;
     PERFORM synchdb_migrate_primary_keys(p_source_schema, p_dest_schema);
@@ -2139,7 +2206,7 @@ BEGIN
     RAISE NOTICE 'Step 8: Migrating data with transforms from "%" to "%" (lookup: %.% for connector %)',
                  p_stage_schema, p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
     PERFORM synchdb_migrate_data_with_transforms(
-        p_stage_schema, p_connector_name, p_dest_schema, p_lookup_db, p_lookup_schema, false
+        p_stage_schema, p_connector_name, p_dest_schema, p_lookup_db, p_lookup_schema, false, 0
     );
 
     RAISE NOTICE 'Step 9: Applying table mappings on destination schema "%" (lookup: %.% for connector %)',
@@ -2150,6 +2217,8 @@ BEGIN
 
     PERFORM synchdb_finalize_initial_snapshot(p_source_schema, p_stage_schema, p_connector_name);
 
+    PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, 0::bigint, 0::bigint,
+                                  (extract(epoch from clock_timestamp()) * 1000)::bigint);
     RETURN v_effective_scn;
 
 EXCEPTION
@@ -2187,6 +2256,9 @@ BEGIN
     -- Step 0: Prepare FDW server & user mapping from connector metadata
     --         (returns the created server name, e.g. '<connector>_oracle')
     ----------------------------------------------------------------------
+	PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, 0::bigint,
+                                 (extract(epoch from clock_timestamp()) * 1000)::bigint, 0::bigint);
+    
     v_server_name := synchdb_prepare_initial_snapshot(p_connector_name, p_secret);
     RAISE NOTICE 'Using FDW server "%" for connector "%"', v_server_name, p_connector_name;
 
@@ -2230,7 +2302,7 @@ BEGIN
     );
 
     RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
-    PERFORM synchdb_materialize_schema(p_stage_schema, p_dest_schema, p_on_exists);
+    PERFORM synchdb_materialize_schema(p_connector_name, p_stage_schema, p_dest_schema, p_on_exists);
 
     RAISE NOTICE 'Step 6: Migrating primary keys from metadata schema "%" to "%"', p_source_schema, p_dest_schema;
     PERFORM synchdb_migrate_primary_keys(p_source_schema, p_dest_schema);
@@ -2247,6 +2319,8 @@ BEGIN
 
     PERFORM synchdb_finalize_initial_snapshot(p_source_schema, p_stage_schema, p_connector_name);
 
+    PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, 0::bigint, 0::bigint,
+                                  (extract(epoch from clock_timestamp()) * 1000)::bigint);
     RETURN v_effective_scn;
 
 EXCEPTION
