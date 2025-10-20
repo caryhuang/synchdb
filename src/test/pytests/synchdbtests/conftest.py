@@ -127,7 +127,7 @@ def setup_remote_instance(dbvendor, request):
     
     yield
 
-    #teardown_remote_instance(dbvendor)
+    teardown_remote_instance(dbvendor)
 
 @pytest.fixture(scope="session")
 def hammerdb(dbvendor):

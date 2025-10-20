@@ -2,7 +2,7 @@
 
 SynchDB is a PostgreSQL extension designed for fast and reliable data replication from multiple heterogeneous databases into PostgreSQL. It eliminates the need for middleware or third-party software, enabling direct synchronization without additional orchestration.
 
-SynchDB is a dual-language module, combining Java (for utilizing Debezium Embedded connectors) and C (for interacting with PostgreSQL core) components, and requires the Java Virtual Machine (JVM) and Java Native Interface (JNI) to operate together.
+SynchDB is a dual-language module, combining Java (for utilizing Debezium Embedded connectors) and C (for interacting with PostgreSQL core) components, and requires the Java Virtual Machine (JVM) and Java Native Interface (JNI) to operate together. It also has support for Java-free, native Openlog Replicator connector.
 
 ### Supported PostgreSQL Versions
 * PostgreSQL: 16, 17
@@ -12,7 +12,7 @@ SynchDB is a dual-language module, combining Java (for utilizing Debezium Embedd
 * MySQL: 8.0.x, 8.2
 * SQL Server: 2017, 2019, 2022
 * Oracle: 12c, 19c, 21c, 23ai
-* Openlog Replicator: 1.3.0
+* Openlog Replicator: 1.3.0 ~ 1.8.5
 
 Visit SynchDB documentation site [here](https://docs.synchdb.com/) for more design details.
 
@@ -34,111 +34,69 @@ The following software is required to build and run SynchDB. The versions listed
 * Docker compose 2.28.1 (for testing). Refer to [here](https://docs.docker.com/compose/install/linux/)
 * Unix based operating system like Ubuntu 22.04 or MacOS
 
-**Additional Requirement for Openlog Replicator Connector Support (if enabled in build)**
+**The following is required if Openlog Replicator Connector Support is enabled in build**
 
 * libprotobuf-c v1.5.2. Refer to [here](https://github.com/protobuf-c/protobuf-c.git) to build from source.
+* oracle_fdw v2.8.0. Refer to [here](https://github.com/laurenz/oracle_fdw) to build from source
 
 ## Build Procedure
 ### Prepare Source (Using 16.3 as example)
 
-Clone the PostgreSQL source and switch to 16.3 release tag
 ``` BASH
+# Clone the PostgreSQL source and switch to 16.3 release tag
 git clone https://github.com/postgres/postgres.git --branch REL_16_3
 cd postgres
-```
 
-Clone the SynchDB source from within the extension folder
-``` BASH
+# Clone the SynchDB source from within the extension folder
 cd contrib/
 git clone https://github.com/Hornetlabs/synchdb.git
 ```
 
-### Prepare Tools & Dependencies
-#### --> Maven
-``` BASH
-## on Ubuntu
-sudo apt install maven
-
-## on MacOS
-brew install maven
-```
-
-#### --> Java (OpenJDK)
-If you are working on Ubuntu 22.04.4 LTS, install the OpenJDK  as below:
-``` BASH
-## on Ubuntu
-sudo apt install openjdk-21-jdk
-
-## on MacOS
-brew install openjdk@22
-```
-
-#### --> libprotobuf-c (optional)
-This library is needed if SynchDB is to be built with openlog replicator support.
-
-``` BASH
-cd /home/$USER/
-git clone https://github.com/protobuf-c/protobuf-c.git
-cd /home/$USER/protobuf-c
-./configure
-make
-sudo make install
-```
-
 ### Build and Install PostgreSQL from Source
-This can be done by following the standard build and install procedure as described [here](https://www.postgresql.org/docs/current/install-make.html). Generally, it consists of:
+This can be done by following the standard build and install procedure as described [here](https://www.postgresql.org/docs/current/install-make.html). SynchDB requires PostgreSQL to be built with OpenSSL support.
 
 ``` BASH
 cd /home/$USER/postgres
-./configure
+./configure --with-ssl=openssl 
 make
 sudo make install
+
 ```
 
-You should build and install the default extensions as well:
+You should build and install the default extensions as well. SynchDB requires pgcrypto to be installed as it uses its cipher utilties
+
 ``` BASH
 cd /home/$USER/postgres/contrib
 make
 sudo make install
 ```
 
-### Build SynchDB Main Components
-
-#### --> Build Debezium Runner Engine
-The commands below build and install the Debezium Runner Engine jar file to your PostgreSQL's lib folder.
+### Build SynchDB
 
 ``` BASH
+# build and install debezium runner
 cd /home/$USER/postgres/contrib/synchdb
 make build_dbz
 sudo make install_dbz
-```
 
-#### --> Build Oracle Parser (optional)
-This Oracle parser (a shared library) is a modified and isoalted version of IvorySQL's Oracle parser required by openlog replicator to process incoming Oracle DDL statements. The commands below install Oracle Parser to your PostgreSQL's lib folder.
-
-Required if SynchDB is built with openlog replicator support.
-
-```BASH
-cd /home/$USER/postgres/contrib/synchdb
-make clean_oracle_parser
-make oracle_parser
-sudo make install_oracle_parser
-```
-
-#### --> Build SynchDB
-The commands below build and install SynchDB extension to your PostgreSQL's lib and share folder.
-
-``` BASH
-cd /home/$USER/postgres/contrib/synchdb
+# build and install synchdb
 make
 sudo make install
 ```
 
-SynchDB can be built with additional Openlog Replicator Connector support
+### Build SynchDB with Openlog Replicator Connector Support
 
-```BASH
+``` BASH
+# build and install debezium runner
 cd /home/$USER/postgres/contrib/synchdb
-make WITH_OLR=1 clean
+make build_dbz
+sudo make install_dbz
+
+# build and install oracle parser
+make oracle_parser
+sudo make install_oracle_parser
+
+# build and install synchdb
 make WITH_OLR=1
 sudo make WITH_OLR=1 install
 ```
@@ -192,11 +150,14 @@ ldd synchdb.so
         /lib64/ld-linux-x86-64.so.2 (0x00007f3c8f69e000)
 ```
 
-## Run SynchDB Test
-Refer to `testenv/README.md` or visit our documentation page [here](https://docs.synchdb.com/user-guide/prepare_tests_env/) to prepare a sample MySQL, SQL Server or Oracle database instances for testing.
+## Quick Start
+The fastest way to get started with SynchDB is via the `ezdeploy.sh` utility script that can deploy pre-compiled synchdb plus all of the supported heterogeneous databases.
 
-SynchDB extension requires pgcrypto to encrypt certain sensitive credential data. Please make sure it is installed prior to installing SynchDB. Alternatively, you can include `CASCADE` clause in `CREATE EXTENSION` to automatically install dependencies:
+Refer to the quick start guide [here](https://docs.synchdb.com/getting-started/quick_start/)
 
+## Basic Usages
+
+Install SynchDB extension.
 ``` SQL
 CREATE EXTENSION synchdb CASCADE;
 ```
