@@ -83,7 +83,6 @@ PG_FUNCTION_INFO_V1(synchdb_add_infinispan);
 PG_FUNCTION_INFO_V1(synchdb_del_infinispan);
 PG_FUNCTION_INFO_V1(synchdb_translate_datatype);
 PG_FUNCTION_INFO_V1(synchdb_set_snapstats);
-PG_FUNCTION_INFO_V1(synchdb_get_snapstats);
 
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
@@ -176,7 +175,6 @@ static char *dbz_engine_get_offset(int connectorId);
 static int dbz_mark_batch_complete(int batchid);
 static TupleDesc synchdb_state_tupdesc(void);
 static TupleDesc synchdb_stats_tupdesc(void);
-static TupleDesc synchdb_snapstats_tupdesc(void);
 static void synchdb_detach_shmem(int code, Datum arg);
 static void prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid, const char * snapshotMode);
 static const char *connectorStateAsString(ConnectorState state);
@@ -1210,57 +1208,38 @@ static TupleDesc
 synchdb_stats_tupdesc(void)
 {
 	TupleDesc tupdesc;
-	AttrNumber attrnum = 17;
+	AttrNumber attrnum = 20;
 	AttrNumber a = 0;
 
 	tupdesc = CreateTemplateTupleDesc(attrnum);
 
 	/* add more columns here per connector if needed */
 	TupleDescInitEntry(tupdesc, ++a, "name", TEXTOID, -1, 0);
+
+	/* cdc stats */
 	TupleDescInitEntry(tupdesc, ++a, "ddls", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "dmls", INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "reads", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "creates", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "updates", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "deletes", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "txs", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "truncates", INT8OID, -1, 0);
+
+	/* general stats */
 	TupleDescInitEntry(tupdesc, ++a, "bad_events", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "total_events", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "batches_done", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "average_batch_size", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "first_src_ts", INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "first_dbz_ts", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "first_pg_ts", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "last_src_ts", INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "last_dbz_ts", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "last_pg_ts", INT8OID, -1, 0);
 
-	return BlessTupleDesc(tupdesc);
-}
-
-/*
- * synchdb_snapstats_tupdesc - Create a TupleDesc for SynchDB snapshot statistics
- *
- * This function constructs a TupleDesc that describes the structure of
- * the tuple returned by snapshot statistic queries. It defines the columns
- * that will be present in the result set.
- *
- * @return: A blessed TupleDesc, or NULL on failure
- */
-static TupleDesc
-synchdb_snapstats_tupdesc(void)
-{
-	TupleDesc tupdesc;
-	AttrNumber attrnum = 5;
-	AttrNumber a = 0;
-
-	tupdesc = CreateTemplateTupleDesc(attrnum);
-
-	/* add more columns here per connector if needed */
-	TupleDescInitEntry(tupdesc, ++a, "name", TEXTOID, -1, 0);
+	/* snapshot stats */
 	TupleDescInitEntry(tupdesc, ++a, "tables", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "rows", INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "begin_ts", INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "end_ts", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "snapshot_begin_ts", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "snapshot_end_ts", INT8OID, -1, 0);
 
 	return BlessTupleDesc(tupdesc);
 }
@@ -2795,39 +2774,52 @@ static void
 set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats)
 {
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	sdb_state->connectors[connectorId].stats.stats_create +=
-			stats->stats_create;
-	sdb_state->connectors[connectorId].stats.stats_ddl +=
-			stats->stats_ddl;
-	sdb_state->connectors[connectorId].stats.stats_delete +=
-			stats->stats_delete;
-	sdb_state->connectors[connectorId].stats.stats_dml +=
-			stats->stats_dml;
-	sdb_state->connectors[connectorId].stats.stats_read +=
-			stats->stats_read;
-	sdb_state->connectors[connectorId].stats.stats_update +=
-			stats->stats_update;
-	sdb_state->connectors[connectorId].stats.stats_bad_change_event +=
-			stats->stats_bad_change_event;
-	sdb_state->connectors[connectorId].stats.stats_total_change_event +=
-			stats->stats_total_change_event;
-	sdb_state->connectors[connectorId].stats.stats_batch_completion +=
-			stats->stats_batch_completion;
+	/* CDC stats */
+	sdb_state->connectors[connectorId].stats.cdcstats.stats_ddl +=
+			stats->cdcstats.stats_ddl;
+	sdb_state->connectors[connectorId].stats.cdcstats.stats_dml +=
+			stats->cdcstats.stats_dml;
+	sdb_state->connectors[connectorId].stats.cdcstats.stats_create +=
+			stats->cdcstats.stats_create;
+	sdb_state->connectors[connectorId].stats.cdcstats.stats_update +=
+			stats->cdcstats.stats_update;
+	sdb_state->connectors[connectorId].stats.cdcstats.stats_delete +=
+			stats->cdcstats.stats_delete;
+	sdb_state->connectors[connectorId].stats.cdcstats.stats_tx +=
+			stats->cdcstats.stats_tx;
+	sdb_state->connectors[connectorId].stats.cdcstats.stats_truncate +=
+			stats->cdcstats.stats_truncate;
+
+	/* General stats */
+	sdb_state->connectors[connectorId].stats.genstats.stats_bad_change_event +=
+			stats->genstats.stats_bad_change_event;
+	sdb_state->connectors[connectorId].stats.genstats.stats_total_change_event +=
+			stats->genstats.stats_total_change_event;
+	sdb_state->connectors[connectorId].stats.genstats.stats_batch_completion +=
+			stats->genstats.stats_batch_completion;
+	/* the following should be overwritten \n */
+	sdb_state->connectors[connectorId].stats.genstats.stats_first_src_ts =
+			stats->genstats.stats_first_src_ts;
+	sdb_state->connectors[connectorId].stats.genstats.stats_first_pg_ts =
+			stats->genstats.stats_first_pg_ts;
+	sdb_state->connectors[connectorId].stats.genstats.stats_last_src_ts =
+			stats->genstats.stats_last_src_ts;
+	sdb_state->connectors[connectorId].stats.genstats.stats_last_pg_ts =
+			stats->genstats.stats_last_pg_ts;
+
+	/* Snapshot stats */
+	sdb_state->connectors[connectorId].stats.snapstats.snapstats_tables +=
+			stats->snapstats.snapstats_tables;
+	sdb_state->connectors[connectorId].stats.snapstats.snapstats_rows +=
+			stats->snapstats.snapstats_rows;
 
 	/* the following should be overwritten \n */
-	sdb_state->connectors[connectorId].stats.stats_first_src_ts =
-			stats->stats_first_src_ts;
-	sdb_state->connectors[connectorId].stats.stats_first_dbz_ts =
-			stats->stats_first_dbz_ts;
-	sdb_state->connectors[connectorId].stats.stats_first_pg_ts =
-			stats->stats_first_pg_ts;
-	sdb_state->connectors[connectorId].stats.stats_last_src_ts =
-			stats->stats_last_src_ts;
-	sdb_state->connectors[connectorId].stats.stats_last_dbz_ts =
-			stats->stats_last_dbz_ts;
-	sdb_state->connectors[connectorId].stats.stats_last_pg_ts =
-			stats->stats_last_pg_ts;
-
+	if (stats->snapstats.snapstats_begintime_ts > 0)
+		sdb_state->connectors[connectorId].stats.snapstats.snapstats_begintime_ts =
+				stats->snapstats.snapstats_begintime_ts;
+	if (stats->snapstats.snapstats_endtime_ts > 0)
+		sdb_state->connectors[connectorId].stats.snapstats.snapstats_endtime_ts =
+				stats->snapstats.snapstats_endtime_ts;
 	LWLockRelease(&sdb_state->lock);
 }
 
@@ -2835,15 +2827,15 @@ static void
 set_shm_connector_snapshot_statistics(int connectorId, SnapshotStatistics * snapstats)
 {
 	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	sdb_state->connectors[connectorId].snapstats.snapstats_tables +=
+	sdb_state->connectors[connectorId].stats.snapstats.snapstats_tables +=
 				snapstats->snapstats_tables;
-	sdb_state->connectors[connectorId].snapstats.snapstats_rows +=
+	sdb_state->connectors[connectorId].stats.snapstats.snapstats_rows +=
 				snapstats->snapstats_rows;
 	if (snapstats->snapstats_begintime_ts > 0)
-		sdb_state->connectors[connectorId].snapstats.snapstats_begintime_ts =
+		sdb_state->connectors[connectorId].stats.snapstats.snapstats_begintime_ts =
 				snapstats->snapstats_begintime_ts;
 	if (snapstats->snapstats_endtime_ts > 0)
-		sdb_state->connectors[connectorId].snapstats.snapstats_endtime_ts =
+		sdb_state->connectors[connectorId].stats.snapstats.snapstats_endtime_ts =
 				snapstats->snapstats_endtime_ts;
 	LWLockRelease(&sdb_state->lock);
 }
@@ -2990,35 +2982,46 @@ increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics 
 
 	switch(which)
 	{
+		/* CDC stats */
 		case STATS_DDL:
-			myStats->stats_ddl += incby;
+			myStats->cdcstats.stats_ddl += incby;
 			break;
 		case STATS_DML:
-			myStats->stats_dml += incby;
-			break;
-		case STATS_READ:
-			myStats->stats_read += incby;
+			myStats->cdcstats.stats_dml += incby;
 			break;
 		case STATS_CREATE:
-			myStats->stats_create += incby;
+			myStats->cdcstats.stats_create += incby;
 			break;
 		case STATS_UPDATE:
-			myStats->stats_update += incby;
+			myStats->cdcstats.stats_update += incby;
 			break;
 		case STATS_DELETE:
-			myStats->stats_delete += incby;
+			myStats->cdcstats.stats_delete += incby;
+			break;
+		case STATS_TRUNCATE:
+			myStats->cdcstats.stats_truncate += incby;
 			break;
 		case STATS_TX:
-			myStats->stats_tx += incby;
+			myStats->cdcstats.stats_tx += incby;
 			break;
+
+		/* snapshot stats */
+		case STATS_TABLES:
+			myStats->snapstats.snapstats_tables += incby;
+			break;
+		case STATS_ROWS:
+			myStats->snapstats.snapstats_rows += incby;
+			break;
+
+		/* general stats */
 		case STATS_BAD_CHANGE_EVENT:
-			myStats->stats_bad_change_event += incby;
+			myStats->genstats.stats_bad_change_event += incby;
 			break;
 		case STATS_TOTAL_CHANGE_EVENT:
-			myStats->stats_total_change_event += incby;
+			myStats->genstats.stats_total_change_event += incby;
 			break;
 		case STATS_BATCH_COMPLETION:
-			myStats->stats_batch_completion += incby;
+			myStats->genstats.stats_batch_completion += incby;
 			break;
 		default:
 			break;
@@ -4167,8 +4170,8 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 
 	while (*idx < count_active_connectors())
 	{
-		Datum values[17];
-		bool nulls[17] = {0};
+		Datum values[20];
+		bool nulls[20] = {0};
 		HeapTuple tuple;
 
 		/* we only want to show the connectors created in current database */
@@ -4181,90 +4184,33 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
 		values[0] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
-		values[1] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_ddl);
-		values[2] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_dml);
-		values[3] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_read);
-		values[4] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_create);
-		values[5] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_update);
-		values[6] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_delete);
-		values[7] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_bad_change_event);
-		values[8] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_total_change_event);
-		values[9] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_batch_completion);
-		values[10] = sdb_state->connectors[*idx].stats.stats_batch_completion > 0?
-					Int64GetDatum(sdb_state->connectors[*idx].stats.stats_total_change_event /
-							sdb_state->connectors[*idx].stats.stats_batch_completion) :
+		/* cdc stats */
+		values[1] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_ddl);
+		values[2] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_dml);
+		values[3] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_create);
+		values[4] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_update);
+		values[5] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_delete);
+		values[6] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_tx);
+		values[7] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_truncate);
+
+		/* general stats */
+		values[8] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_bad_change_event);
+		values[9] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_total_change_event);
+		values[10] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_batch_completion);
+		values[11] = sdb_state->connectors[*idx].stats.genstats.stats_batch_completion > 0?
+					Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_total_change_event /
+							sdb_state->connectors[*idx].stats.genstats.stats_batch_completion) :
 					Int64GetDatum(0);
-		values[11] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_first_src_ts);
-		values[12] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_first_dbz_ts);
-		values[13] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_first_pg_ts);
-		values[14] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_last_src_ts);
-		values[15] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_last_dbz_ts);
-		values[16] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_last_pg_ts);
-		LWLockRelease(&sdb_state->lock);
+		values[12] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_first_src_ts);
+		values[13] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_first_pg_ts);
+		values[14] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_last_src_ts);
+		values[15] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_last_pg_ts);
 
-		*idx += 1;
-
-		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
-		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
-	}
-	SRF_RETURN_DONE(funcctx);
-}
-
-/*
- * synchdb_get_stats
- *
- * This function dumps the statistics of all connectors
- */
-Datum
-synchdb_get_snapstats(PG_FUNCTION_ARGS)
-{
-	FuncCallContext *funcctx;
-	int *idx = NULL;
-
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	if (SRF_IS_FIRSTCALL())
-	{
-		MemoryContext oldcontext;
-
-		funcctx = SRF_FIRSTCALL_INIT();
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-		funcctx->tuple_desc = synchdb_snapstats_tupdesc();
-		funcctx->user_fctx = palloc0(sizeof(int));
-		MemoryContextSwitchTo(oldcontext);
-	}
-
-	funcctx = SRF_PERCALL_SETUP();
-	idx = (int *)funcctx->user_fctx;
-
-	while (*idx < count_active_connectors())
-	{
-		Datum values[5];
-		bool nulls[5] = {0};
-		HeapTuple tuple;
-
-		/* we only want to show the connectors created in current database */
-		if (strcasecmp(sdb_state->connectors[*idx].conninfo.dstdb,
-				get_database_name(MyDatabaseId)))
-		{
-	        (*idx)++;
-	        continue;
-		}
-
-		LWLockAcquire(&sdb_state->lock, LW_SHARED);
-		values[0] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
-		values[1] = Int64GetDatum(sdb_state->connectors[*idx].snapstats.snapstats_tables);
-		values[2] = Int64GetDatum(sdb_state->connectors[*idx].snapstats.snapstats_rows);
-		values[3] = Int64GetDatum(sdb_state->connectors[*idx].snapstats.snapstats_begintime_ts);
-		values[4] = Int64GetDatum(sdb_state->connectors[*idx].snapstats.snapstats_endtime_ts);
+		/* snapshot stats */
+		values[16] = Int64GetDatum(sdb_state->connectors[*idx].stats.snapstats.snapstats_tables);
+		values[17] = Int64GetDatum(sdb_state->connectors[*idx].stats.snapstats.snapstats_rows);
+		values[18] = Int64GetDatum(sdb_state->connectors[*idx].stats.snapstats.snapstats_begintime_ts);
+		values[19] = Int64GetDatum(sdb_state->connectors[*idx].stats.snapstats.snapstats_endtime_ts);
 		LWLockRelease(&sdb_state->lock);
 
 		*idx += 1;
@@ -5707,18 +5653,7 @@ synchdb_set_snapstats(PG_FUNCTION_ARGS)
 	mysnapstats.snapstats_begintime_ts = (unsigned long long) begintime;
 	mysnapstats.snapstats_endtime_ts = (unsigned long long) endtime;
 
-	elog(WARNING, "----> set snapstats: +%llu +%llu %llu %llu",
-			mysnapstats.snapstats_tables,
-			mysnapstats.snapstats_rows,
-			mysnapstats.snapstats_begintime_ts,
-			mysnapstats.snapstats_endtime_ts);
 	set_shm_connector_snapshot_statistics(connectorId, &mysnapstats);
-
-	elog(WARNING, "----> current snapstats: %llu %llu %llu %llu",
-			sdb_state->connectors[connectorId].snapstats.snapstats_tables,
-			sdb_state->connectors[connectorId].snapstats.snapstats_rows,
-			sdb_state->connectors[connectorId].snapstats.snapstats_begintime_ts,
-			sdb_state->connectors[connectorId].snapstats.snapstats_endtime_ts);
 
 	PG_RETURN_VOID();
 }

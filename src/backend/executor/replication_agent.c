@@ -831,7 +831,8 @@ ra_executePGDDL(PG_DDL * pgddl, ConnectorType type)
  * or calls a custom handler function.
  */
 int
-ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats)
+ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats,
+		bool isInSnapshot)
 {
 	int ret = -1;
 	if (!pgdml)
@@ -849,7 +850,7 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			else
 				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type, pgdml->natts);
 
-			increment_connector_statistics(myBatchStats, STATS_READ, 1);
+			increment_connector_statistics(myBatchStats, STATS_ROWS, 1);
 			break;
 		}
 		case 'c':  // Create operation
@@ -859,7 +860,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			else
 				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type, pgdml->natts);
 
-			increment_connector_statistics(myBatchStats, STATS_CREATE, 1);
+			if (!isInSnapshot)
+				increment_connector_statistics(myBatchStats, STATS_CREATE, 1);
 			break;
 		}
 		case 'u':  // Update operation
@@ -871,7 +873,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 											 pgdml->columnValuesAfter,
 											 pgdml->tableoid,
 											 type, pgdml->natts);
-			increment_connector_statistics(myBatchStats, STATS_UPDATE, 1);
+			if (!isInSnapshot)
+				increment_connector_statistics(myBatchStats, STATS_UPDATE, 1);
 			break;
 		}
 		case 'd':  // Delete operation
@@ -881,7 +884,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			else
 				ret = synchdb_handle_delete(pgdml->columnValuesBefore, pgdml->tableoid, type, pgdml->natts);
 
-			increment_connector_statistics(myBatchStats, STATS_DELETE, 1);
+			if (!isInSnapshot)
+				increment_connector_statistics(myBatchStats, STATS_DELETE, 1);
 			break;
 		}
 		default:

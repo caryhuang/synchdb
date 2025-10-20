@@ -47,17 +47,106 @@ CREATE OR REPLACE FUNCTION synchdb_get_stats() RETURNS SETOF record
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
-CREATE OR REPLACE FUNCTION synchdb_get_snapstats() RETURNS SETOF record
-AS '$libdir/synchdb'
-LANGUAGE C IMMUTABLE STRICT;
-
 CREATE OR REPLACE FUNCTION synchdb_reset_stats(name) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
-CREATE VIEW synchdb_stats_view AS SELECT * FROM synchdb_get_stats() AS (name text, ddls bigint, dmls bigint, reads bigint, creates bigint, updates bigint, deletes bigint, bad_events bigint, total_events bigint, batches_done bigint, avg_batch_size bigint, first_src_ts bigint, first_dbz_ts bigint, first_pg_ts bigint, last_src_ts bigint, last_dbz_ts bigint, last_pg_ts bigint);
+CREATE OR REPLACE VIEW synchdb_genstats AS
+SELECT
+  name,
+  bad_events,
+  total_events,
+  batches_done,
+  average_batch_size,
+  first_src_ts,
+  first_pg_ts,
+  last_src_ts,
+  last_pg_ts
+FROM synchdb_get_stats() AS (
+  name               text,
+  ddls               bigint,
+  dmls               bigint,
+  creates            bigint,
+  updates            bigint,
+  deletes            bigint,
+  txs                bigint,
+  truncates          bigint,
+  bad_events         bigint,
+  total_events       bigint,
+  batches_done       bigint,
+  average_batch_size bigint,
+  first_src_ts       bigint,
+  first_pg_ts        bigint,
+  last_src_ts        bigint,
+  last_pg_ts         bigint,
+  tables             bigint,
+  rows               bigint,
+  snapshot_begin_ts  bigint,
+  snapshot_end_ts    bigint
+);
 
-CREATE VIEW synchdb_snapstats_view AS SELECT * FROM synchdb_get_snapstats() AS (name text, tables bigint, rows bigint, begin_ts bigint, end_ts bigint);
+CREATE OR REPLACE VIEW synchdb_snapstats AS
+SELECT
+  name,
+  tables,
+  rows,
+  snapshot_begin_ts,
+  snapshot_end_ts
+FROM synchdb_get_stats() AS (
+  name               text,
+  ddls               bigint,
+  dmls               bigint,
+  creates            bigint,
+  updates            bigint,
+  deletes            bigint,
+  txs                bigint,
+  truncates          bigint,
+  bad_events         bigint,
+  total_events       bigint,
+  batches_done       bigint,
+  average_batch_size bigint,
+  first_src_ts       bigint,
+  first_pg_ts        bigint,
+  last_src_ts        bigint,
+  last_pg_ts         bigint,
+  tables             bigint,
+  rows               bigint,
+  snapshot_begin_ts  bigint,
+  snapshot_end_ts    bigint
+);
+
+CREATE OR REPLACE VIEW synchdb_cdcstats AS
+SELECT
+  name,
+  ddls,
+  dmls,
+  creates,
+  updates,
+  deletes,
+  txs,
+  truncates
+FROM synchdb_get_stats() AS (
+  name               text,
+  ddls               bigint,
+  dmls               bigint,
+  creates            bigint,
+  updates            bigint,
+  deletes            bigint,
+  txs                bigint,
+  truncates          bigint,
+  bad_events         bigint,
+  total_events       bigint,
+  batches_done       bigint,
+  average_batch_size bigint,
+  first_src_ts       bigint,
+  first_pg_ts        bigint,
+  last_src_ts        bigint,
+  last_pg_ts         bigint,
+  tables             bigint,
+  rows               bigint,
+  snapshot_begin_ts  bigint,
+  snapshot_end_ts    bigint
+);
 
 CREATE TABLE IF NOT EXISTS synchdb_conninfo(name TEXT PRIMARY KEY, isactive BOOL, data JSONB);
 
