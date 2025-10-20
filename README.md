@@ -2,7 +2,7 @@
 
 SynchDB is a PostgreSQL extension designed for fast and reliable data replication from multiple heterogeneous databases into PostgreSQL. It eliminates the need for middleware or third-party software, enabling direct synchronization without additional orchestration.
 
-SynchDB is a dual-language module, combining Java (for utilizing Debezium Embedded connectors) and C (for interacting with PostgreSQL core) components, and requires the Java Virtual Machine (JVM) and Java Native Interface (JNI) to operate together. It also has support for Java-free, native Openlog Replicator connector.
+SynchDB is a dual-language module, combining Java (for utilizing Debezium Embedded connectors) and C (for interacting with PostgreSQL core) components, and requires the Java Virtual Machine (JVM) and Java Native Interface (JNI) to operate together.
 
 ### Supported PostgreSQL Versions
 * PostgreSQL: 16, 17
