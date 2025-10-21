@@ -1538,8 +1538,6 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	    		/* last snapshot event: log the snapshot begin timestamp */
 				gettimeofday(&tv, NULL);
 				myBatchStats->snapstats.snapstats_endtime_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-
-				/* todo: mark first cdc timestamp somewhere */
 	    	}
 	    }
 	    else
