@@ -72,6 +72,7 @@ sudo make install
 ```
 
 ### Build SynchDB
+This is the default build procedure, supporting MySQL, SQLServer and Oracle connectors.
 
 ``` BASH
 # build and install debezium runner
@@ -85,6 +86,7 @@ sudo make install
 ```
 
 ### Build SynchDB with Openlog Replicator Connector Support
+This is the optional build procesure, which adds additional Openlog Replicator (for Oracle) connector support.
 
 ``` BASH
 # build and install debezium runner
@@ -101,7 +103,7 @@ make WITH_OLR=1
 sudo make WITH_OLR=1 install
 ```
 
-### Configure your Linker to find Java (Ubuntu)
+### Configure your Linker (Ubuntu)
 Lastly, we also need to tell your system's linker where the newly added Java library (libjvm.so) is located in your system.
 
 ``` BASH

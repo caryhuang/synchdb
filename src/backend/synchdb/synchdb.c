@@ -2832,8 +2832,15 @@ set_shm_connector_snapshot_statistics(int connectorId, SnapshotStatistics * snap
 	sdb_state->connectors[connectorId].stats.snapstats.snapstats_rows +=
 				snapstats->snapstats_rows;
 	if (snapstats->snapstats_begintime_ts > 0)
+	{
 		sdb_state->connectors[connectorId].stats.snapstats.snapstats_begintime_ts =
 				snapstats->snapstats_begintime_ts;
+		/*
+		 * when begintime_ts is set, we assume it is the beginning of a snapshot, so
+		 * we set endtime_ts to 0 to indicate a fresh start.
+		 */
+		sdb_state->connectors[connectorId].stats.snapstats.snapstats_endtime_ts = 0;
+	}
 	if (snapstats->snapstats_endtime_ts > 0)
 		sdb_state->connectors[connectorId].stats.snapstats.snapstats_endtime_ts =
 				snapstats->snapstats_endtime_ts;

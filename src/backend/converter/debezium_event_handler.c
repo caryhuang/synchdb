@@ -1524,6 +1524,12 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 				/* first snapshot event: log the snapshot begin timestamp */
 				gettimeofday(&tv, NULL);
 				myBatchStats->snapstats.snapstats_begintime_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+
+				/*
+				 * when begintime_ts is set, we assume it is the beginning of a snapshot, so
+				 * we set endtime_ts to 0 to indicate a fresh start.
+				 */
+				myBatchStats->snapstats.snapstats_endtime_ts = 0;
 			}
 
 	    	if (!strcmp(tmp, "last"))
