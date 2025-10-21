@@ -5612,7 +5612,7 @@ synchdb_translate_datatype(PG_FUNCTION_ARGS)
 			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 		}
 
-		if (pg_datatype_len > 0 && ext_datatype_scale == 0)
+		if (pg_datatype_len > 0 && (ext_datatype_scale == 0 || ext_datatype_scale == -1))
 		{
 			appendStringInfo(&strinfo, "(%d)",
 					pg_datatype_len);
