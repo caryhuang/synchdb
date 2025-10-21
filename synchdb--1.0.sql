@@ -1229,6 +1229,8 @@ COMMENT ON FUNCTION synchdb_create_current_scn_ft(name, name) IS
 
 CREATE OR REPLACE FUNCTION synchdb_create_ora_stage_fts(
     p_connector_name name,                               -- connector name for attribute rows
+    p_desired_db     name,                               -- db token to match entries in snapshottable
+    p_desired_schema name,                               -- schema to match when entry includes schema
     p_stage_schema   name DEFAULT 'ora_stage'::name,     -- target schema in Postgres
     p_server_name    name DEFAULT 'oracle'::name,        -- oracle_fdw server name
     p_lower_names    boolean DEFAULT true,               -- lower-case PG table/column names
@@ -1252,8 +1254,14 @@ DECLARE
   v_owner        text;      -- lower(data->>'user')
   v_ext_tbname   text;      -- "<db>.<schema>.<table>" all lower
   v_relid        oid;       -- OID of the created foreign table in p_stage_schema
+
+  v_snapcfg      jsonb;     -- raw data->'snapshottable'
+  v_snaptext     text;      -- comma-separated list when scalar
+  v_use_filter   boolean := false;
+
+  base_sql       text;
 BEGIN
-  -- sanity: oracle_fdw installed?
+  -- Ensure oracle_fdw is available
   SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='oracle_fdw')
       OR EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname='oracle_fdw')
     INTO has_oracle_fdw;
@@ -1261,11 +1269,12 @@ BEGIN
     RAISE EXCEPTION 'oracle_fdw is not installed. Run: CREATE EXTENSION oracle_fdw;';
   END IF;
 
-  -- Get connector info: type, srcdb (database/service), user (owner/schema)
+  -- Pull connector info and snapshot filter source
   SELECT (data->>'connector')::name,
          lower(data->>'srcdb'),
-         lower(data->>'user')
-    INTO v_conn_type, v_srcdb, v_owner
+         lower(data->>'user'),
+         data->'snapshottable'
+    INTO v_conn_type, v_srcdb, v_owner, v_snapcfg
   FROM synchdb_conninfo
   WHERE name = p_connector_name;
 
@@ -1279,18 +1288,86 @@ BEGIN
     RAISE EXCEPTION 'synchdb_conninfo[%]: data->>user is missing/empty', p_connector_name;
   END IF;
 
+  ----------------------------------------------------------------------
+  -- Normalize snapshottable into a temp filter list (db, schem, tbl)
+  -- Supported per item:
+  --   db.schema.table  -> exact schema+table in db
+  --   db.table         -> table name in any schema in db (schema optional)
+  -- We then REQUIRE:
+  --   db must equal lower(p_desired_db)
+  --   IF the item includes schema, it must equal lower(p_desired_schema)
+  --   table must match
+  -- If snapshottable is NULL => migrate ALL tables (no filter).
+  ----------------------------------------------------------------------
+  CREATE TEMP TABLE IF NOT EXISTS tmp_snap_list (
+    db    text NOT NULL,
+    schem text,     -- NULL => item didn’t specify schema
+    tbl   text NOT NULL
+  ) ON COMMIT DROP;
+  TRUNCATE tmp_snap_list;
+
+  IF v_snapcfg IS NULL OR v_snapcfg::text = 'null' THEN
+    v_use_filter := false;  -- migrate all
+  ELSE
+    -- Treat the value as a comma-separated string
+    v_snaptext := trim(both '"' from v_snapcfg::text);
+
+    INSERT INTO tmp_snap_list(db, schem, tbl)
+    SELECT
+      lower((regexp_split_to_array(x, '\.'))[1]) AS db,
+      CASE
+        WHEN array_length(regexp_split_to_array(x, '\.'),1) = 3
+          THEN lower((regexp_split_to_array(x, '\.'))[2])
+        ELSE NULL
+      END AS schem,
+      CASE
+        WHEN array_length(regexp_split_to_array(x, '\.'),1) = 3
+          THEN lower((regexp_split_to_array(x, '\.'))[3])
+        WHEN array_length(regexp_split_to_array(x, '\.'),1) = 2
+          THEN lower((regexp_split_to_array(x, '\.'))[2])
+        ELSE NULL
+      END AS tbl
+    FROM regexp_split_to_table(v_snaptext, '\s*,\s*') AS t(x)
+    WHERE trim(x) <> '';
+
+    -- We will only consider items that match the desired DB (required)
+    DELETE FROM tmp_snap_list WHERE db <> lower(p_desired_db);
+
+    -- At least one usable filter row?
+    v_use_filter := EXISTS (SELECT 1 FROM tmp_snap_list);
+  END IF;
+
   -- ensure stage schema
   EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', p_stage_schema);
 
-  -- loop over distinct Oracle owner/table pairs present in <p_source_schema>.columns
-  FOR r IN
-    EXECUTE format(
-      'SELECT "schema" AS ora_owner, table_name
-         FROM %I.columns
-        GROUP BY "schema", table_name
-        ORDER BY "schema", table_name',
-      p_source_schema
-    )
+  ----------------------------------------------------------------------
+  -- Base table list from metadata; optionally restrict by tmp_snap_list
+  ----------------------------------------------------------------------
+  base_sql := format(
+    'SELECT "schema" AS ora_owner, table_name
+       FROM %I.columns
+      GROUP BY "schema", table_name',
+    p_source_schema
+  );
+
+  IF v_use_filter THEN
+    -- Require: db == p_desired_db; table match; and IF filter item had a schema, it must equal p_desired_schema.
+    -- If the filter item had NO schema, schema match is optional (not enforced).
+    base_sql := base_sql || format(
+      ' HAVING EXISTS (
+           SELECT 1
+             FROM tmp_snap_list f
+            WHERE f.db  = %L
+              AND lower(table_name) = f.tbl
+              AND (f.schem IS NULL OR f.schem = %L)
+        )',
+      lower(p_desired_db),
+      lower(p_desired_schema)
+    );
+  END IF;
+
+  -- Iterate rows from the (possibly filtered) list
+  FOR r IN EXECUTE base_sql || ' ORDER BY ora_owner, table_name'
   LOOP
     -- decide PG table name
     v_tbl_pg := CASE WHEN p_lower_names THEN lower(r.table_name) ELSE r.table_name END;
@@ -1341,7 +1418,7 @@ BEGIN
 
     -- Create the staging FT (snapshot or not)
     IF p_scn IS NOT NULL AND p_scn > 0 THEN
-      -- Explicit Oracle SELECT column list
+      -- Explicit column list (stable order)
       EXECUTE format(
         'SELECT string_agg(quote_ident(c.column_name), '', '' ORDER BY c.position)
            FROM %I.columns c
@@ -1390,27 +1467,26 @@ BEGIN
       RAISE EXCEPTION 'Could not resolve OID for foreign table %.%', p_stage_schema, v_tbl_pg;
     END IF;
 
-    -- Build fully-qualified external table name: db.schema.table (all lower)
+    -- Build fully-qualified external table name: db.schema.table (lower)
     v_ext_tbname := format('%s.%s.%s', v_srcdb, v_owner, lower(r.table_name));
 
-    -- Clean any previous rows for this (connector,type,table) using fully-qualified name
+    -- Refresh synchdb_attribute rows for this table
     DELETE FROM public.synchdb_attribute
      WHERE name       = p_connector_name
        AND type       = v_conn_type
        AND ext_tbname = v_ext_tbname::name;
 
-    -- Insert one row per column from <p_source_schema>.columns
     EXECUTE format($ins$
       INSERT INTO public.synchdb_attribute
           (name, type, attrelid, attnum, ext_tbname,    ext_attname,           ext_atttypename)
       SELECT
-          %L::name,                    -- connector name
-          %L::name,                    -- connector type (e.g., 'oracle')
-          %s::oid,                     -- attrelid = OID of created FT
-          c.position::smallint,        -- ordinal
-          %L::name,                    -- ext_tbname = db.schema.table (lowercase)
-          lower(c.column_name)::name,  -- ext_attname (lowercase)
-          lower(c.type_name)::name     -- ext_atttypename (lowercase)
+          %L::name,
+          %L::name,
+          %s::oid,
+          c.position::smallint,
+          %L::name,
+          lower(c.column_name)::name,
+          lower(c.type_name)::name
       FROM %I.columns c
       WHERE c."schema"   = %L
         AND c.table_name = %L
@@ -1431,7 +1507,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, boolean, text, numeric, name) IS
+COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, name, name, boolean, text, numeric, name) IS
    'create a staging schema, migrate table schemas with translated data types';
 
 CREATE OR REPLACE FUNCTION synchdb_materialize_schema(
@@ -2274,6 +2350,8 @@ BEGIN
     RAISE NOTICE 'Step 4: Creating staging foreign tables in schema "%"', p_stage_schema;
     PERFORM synchdb_create_ora_stage_fts(
 		p_connector_name,
+		p_lookup_db,
+		p_lookup_schema,
         p_stage_schema,
         v_server_name,
         p_lower_names,
@@ -2382,6 +2460,8 @@ BEGIN
     RAISE NOTICE 'Step 4: Creating staging foreign tables in schema "%"', p_stage_schema;
     PERFORM synchdb_create_ora_stage_fts(
 		p_connector_name,
+		p_lookup_db,
+		p_lookup_schema,
         p_stage_schema,
         v_server_name,
         p_lower_names,
