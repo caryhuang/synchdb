@@ -252,6 +252,38 @@ CREATE OR REPLACE FUNCTION synchdb_set_snapstats(name, bigint, bigint, bigint, b
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
+CREATE OR REPLACE FUNCTION read_snapshot_table_list(file_uri text)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    file_path text;
+    file_content text;
+    json_data jsonb;
+    table_list text;
+BEGIN
+    -- strip the leading "file:" prefix
+    IF position('file:' IN file_uri) = 1 THEN
+        file_path := substr(file_uri, 6);
+    ELSE
+        RAISE EXCEPTION 'Invalid file URI format: % (must start with file:)', file_uri;
+    END IF;
+
+    -- read the file content
+    file_content := pg_read_file(file_path);
+
+    -- parse it as JSONB
+    json_data := file_content::jsonb;
+
+    -- concatenate the array elements into a comma-separated list
+    SELECT string_agg(value::text, ',')
+    INTO table_list
+    FROM jsonb_array_elements_text(json_data->'snapshot_table_list');
+
+    RETURN table_list;
+END;
+$$;
+
 /* added for oracle_fdw based initial snapshot */
 
 CREATE OR REPLACE FUNCTION synchdb_prepare_initial_snapshot(
@@ -1256,8 +1288,9 @@ DECLARE
   v_relid        oid;       -- OID of the created foreign table in p_stage_schema
 
   v_snapcfg      jsonb;     -- raw data->'snapshottable'
-  v_snaptext     text;      -- comma-separated list when scalar
+  v_snaptext     text;      -- comma-separated list (normalized)
   v_use_filter   boolean := false;
+  v_type         text;      -- jsonb_typeof(v_snapcfg)
 
   base_sql       text;
 BEGIN
@@ -1290,13 +1323,10 @@ BEGIN
 
   ----------------------------------------------------------------------
   -- Normalize snapshottable into a temp filter list (db, schem, tbl)
-  -- Supported per item:
-  --   db.schema.table  -> exact schema+table in db
-  --   db.table         -> table name in any schema in db (schema optional)
-  -- We then REQUIRE:
-  --   db must equal lower(p_desired_db)
-  --   IF the item includes schema, it must equal lower(p_desired_schema)
-  --   table must match
+  -- Accepts:
+  --   - JSON string with CSV: "db.schema.tbl, db.tbl, ..."
+  --   - JSON string "file:/path/to/file.json"  (will read + expand)
+  --   - JSON array: ["db.schema.tbl","db.tbl", ...]
   -- If snapshottable is NULL => migrate ALL tables (no filter).
   ----------------------------------------------------------------------
   CREATE TEMP TABLE IF NOT EXISTS tmp_snap_list (
@@ -1309,28 +1339,50 @@ BEGIN
   IF v_snapcfg IS NULL OR v_snapcfg::text = 'null' THEN
     v_use_filter := false;  -- migrate all
   ELSE
-    -- Treat the value as a comma-separated string
-    v_snaptext := trim(both '"' from v_snapcfg::text);
+    v_type := jsonb_typeof(v_snapcfg);
 
+    -- Build v_snaptext as a single comma-separated list, regardless of input shape
+    IF v_type = 'string' THEN
+      -- Strip JSON quotes
+      v_snaptext := trim(both '"' from v_snapcfg::text);
+
+      -- If it's a file: URI, read & expand to CSV using the helper
+      IF position('file:' IN v_snaptext) = 1 THEN
+        v_snaptext := read_snapshot_table_list(v_snaptext);
+      END IF;
+
+    ELSIF v_type = 'array' THEN
+      -- Turn array into CSV
+      SELECT string_agg(x, ',')
+        INTO v_snaptext
+      FROM jsonb_array_elements_text(v_snapcfg) AS t(x);
+
+    ELSE
+      RAISE EXCEPTION 'synchdb_conninfo[%.data->snapshottable] must be string or array, got %',
+                      p_connector_name, v_type;
+    END IF;
+
+    -- Parse the CSV list we now have in v_snaptext
     INSERT INTO tmp_snap_list(db, schem, tbl)
     SELECT
-      lower((regexp_split_to_array(x, '\.'))[1]) AS db,
+      lower((parts)[1]) AS db,
       CASE
-        WHEN array_length(regexp_split_to_array(x, '\.'),1) = 3
-          THEN lower((regexp_split_to_array(x, '\.'))[2])
+        WHEN array_length(parts,1) = 3 THEN lower((parts)[2])
         ELSE NULL
       END AS schem,
       CASE
-        WHEN array_length(regexp_split_to_array(x, '\.'),1) = 3
-          THEN lower((regexp_split_to_array(x, '\.'))[3])
-        WHEN array_length(regexp_split_to_array(x, '\.'),1) = 2
-          THEN lower((regexp_split_to_array(x, '\.'))[2])
+        WHEN array_length(parts,1) = 3 THEN lower((parts)[3])
+        WHEN array_length(parts,1) = 2 THEN lower((parts)[2])
         ELSE NULL
       END AS tbl
-    FROM regexp_split_to_table(v_snaptext, '\s*,\s*') AS t(x)
-    WHERE trim(x) <> '';
+    FROM (
+      SELECT regexp_split_to_array(trim(x), '\.') AS parts
+      FROM regexp_split_to_table(v_snaptext, '\s*,\s*') AS t(x)
+      WHERE trim(x) <> ''
+    ) s
+    WHERE array_length(parts,1) IN (2,3);  -- enforce "db.tbl" or "db.schema.tbl"
 
-    -- We will only consider items that match the desired DB (required)
+    -- Only keep items that match desired DB
     DELETE FROM tmp_snap_list WHERE db <> lower(p_desired_db);
 
     -- At least one usable filter row?
