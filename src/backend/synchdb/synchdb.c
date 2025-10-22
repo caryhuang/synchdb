@@ -116,6 +116,7 @@ int dbz_logminer_stream_mode = LOGMINER_MODE_UNCOMMITTED;
 int olr_connect_timeout_ms = 5000;
 int olr_read_timeout_ms = 5000;
 int olr_snapshot_engine = ENGINE_DEBEZIUM;
+int cdc_start_delay_ms = 0;
 
 static const struct config_enum_entry error_strategies[] =
 {
@@ -2221,6 +2222,13 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						pfree(snapshotMode);
 						snapshotMode = pstrdup("initial");
 					}
+
+					/*
+					 * if cdc_start_delay_ms is set > 0, we need to delay here before the
+					 * next iteration, which will begin the CDC process
+					 */
+					if (cdc_start_delay_ms > 0)
+						usleep(cdc_start_delay_ms * 1000);
 				}
 				else
 #endif
@@ -3562,6 +3570,17 @@ _PG_init(void)
 							 NULL,
 							 NULL,
 							 NULL);
+
+	DefineCustomIntVariable("synchdb.cdc_start_delay_ms",
+							"a delay after initial snapshot completes and before cdc begins",
+							NULL,
+							&cdc_start_delay_ms,
+							0,
+							0,
+							65536,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
 
 	/* initialize data type mapping engine for all connectors */
 	fc_initFormatConverter(TYPE_MYSQL);
