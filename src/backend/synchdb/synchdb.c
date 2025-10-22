@@ -233,7 +233,7 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
 	jmethodID setOffsetFlushIntervalMs, setCaptureOnlySelectedTableDDL;
 	jmethodID setSslmode, setSslKeystore, setSslKeystorePass, setSslTruststore, setSslTruststorePass;
-	jmethodID setLogLevel, setOlr, setIspn, setLogminerStreamMode;
+	jmethodID setLogLevel, setOlr, setIspn, setLogminerStreamMode, setCdcDelay;
 	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
 	jstring jdbz_sslmode, jdbz_sslkeystore, jdbz_sslkeystorepass, jdbz_ssltruststore, jdbz_ssltruststorepass;
 	jstring jolrHost, jolrSource;
@@ -629,6 +629,18 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 			(*env)->DeleteLocalRef(env, jlogminerStreamMode);
 	}
 
+	setCdcDelay = (*env)->GetMethodID(env, myParametersClass, "setCdcDelay",
+			"(I)Lcom/example/DebeziumRunner$MyParameters;");
+	if (setCdcDelay)
+	{
+		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setCdcDelay, cdc_start_delay_ms);
+		if (!myParametersObj)
+		{
+			elog(WARNING, "failed to call setCdcDelay method");
+		}
+	}
+	else
+		elog(WARNING, "failed to find setCdcDelay method");
 	/*
 	 * additional parameters that we want to pass to Debezium on the java side
 	 * will be added here, Make sure to add the matching methods in the MyParameters
