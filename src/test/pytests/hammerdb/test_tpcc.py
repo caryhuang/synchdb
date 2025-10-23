@@ -77,7 +77,8 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
         run_remote_query(dbvendor, "ALTER TABLE orders ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
         run_remote_query(dbvendor, "ALTER TABLE stock ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
         run_remote_query(dbvendor, "ALTER TABLE warehouse ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
-
+        # give oracle some time to archive redo logs
+        time.sleep(30)
         result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial", srcdb="FREE")
         assert result == 0
     
