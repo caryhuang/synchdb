@@ -210,8 +210,8 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 	{{"bigint", false}, "bigint", 0},
 	{{"smallint", false}, "smallint", 0},
 	{{"tinyint", false}, "smallint", 0},
-	{{"numeric", false}, "numeric", 0},
-	{{"decimal", false}, "numeric", 0},
+	{{"numeric", false}, "numeric", -1},
+	{{"decimal", false}, "numeric", -1},
 	{{"bit(1)", false}, "bool", 0},
 	{{"bit", false}, "bit", 0},
 	{{"money", false}, "money", 0},
@@ -247,6 +247,7 @@ static int count_active_columns(TupleDesc tupdesc);
 static void bytearray_to_escaped_string(const unsigned char *byte_array,
 		size_t length, char *output_string);
 static long long derive_value_from_byte(const unsigned char * bytes, int len);
+static char * derive_decimal_string_from_byte(const unsigned char *bytes, int len);
 static void reverse_byte_array(unsigned char * array, int length);
 static void trim_leading_zeros(char *str);
 static void prepend_zeros(char *str, int num_zeros);
@@ -372,7 +373,7 @@ bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char
 /*
  * derive_value_from_byte
  *
- * computes the int value from given byte
+ * computes the int value from given byte. Safe for len < 7.
  */
 static long long
 derive_value_from_byte(const unsigned char * bytes, int len)
@@ -396,6 +397,104 @@ derive_value_from_byte(const unsigned char * bytes, int len)
 	}
 	return value;
 }
+
+/*
+ * derive_decimal_string_from_byte
+ *
+ * Converts a big-endian two's-complement byte array to a decimal string.
+ * No integer overflow, works for any byte length.
+ */
+static char *
+derive_decimal_string_from_byte(const unsigned char *bytes, int len)
+{
+	bool neg;
+	unsigned char *mag;
+	int offset;
+	int maglen;
+	char digits[128];     /* enough for DECIMAL(38) and more */
+	int nd;
+	int i;                /* declare once and reuse */
+	int outlen;
+	char *out;
+	char *p;
+
+	neg = (bytes[0] & 0x80) != 0;
+	mag = (unsigned char *) palloc(len);
+	memcpy(mag, bytes, len);
+
+	/* If negative, convert to magnitude via two's complement */
+	if (neg)
+	{
+		for (i = 0; i < len; i++)
+			mag[i] = (unsigned char) ~mag[i];
+
+		for (i = len - 1; i >= 0; i--)
+		{
+			unsigned int v = (unsigned int) mag[i] + 1;
+			mag[i] = (unsigned char) (v & 0xFF);
+			if ((v & 0x100) == 0)
+				break;
+		}
+	}
+
+	/* strip leading zero bytes */
+	offset = 0;
+	while (offset < len && mag[offset] == 0)
+		offset++;
+	maglen = len - offset;
+	mag += offset;
+
+	/* if value is zero, just return "0" */
+	if (maglen == 0)
+	{
+		out = pstrdup("0");
+		return out;
+	}
+
+	nd = 0;
+
+	/* working copy */
+	{
+		unsigned char *work = (unsigned char *) palloc(maglen);
+		memcpy(work, mag, maglen);
+
+		while (1)
+		{
+			unsigned remainder = 0;
+			i = 0;
+			while (i < maglen && work[i] == 0)
+				i++;
+			if (i == maglen)
+				break;
+
+			for (i = 0; i < maglen; i++)
+			{
+				unsigned acc = (remainder << 8) | work[i];
+				work[i] = (unsigned char) (acc / 10);
+				remainder = acc % 10;
+			}
+			digits[nd++] = (char) ('0' + remainder);
+		}
+
+		pfree(work);
+	}
+
+	/* allocate final string with sign if needed */
+	outlen = nd + (neg ? 1 : 0);
+	out = (char *) palloc(outlen + 1);
+	p = out;
+
+	if (neg)
+		*p++ = '-';
+
+	for (i = nd - 1; i >= 0; i--)
+		*p++ = digits[i];
+
+	*p = '\0';  /* fixed misleading indentation */
+
+	return out;
+}
+
 
 /*
  * reverse_byte_array
@@ -1541,60 +1640,88 @@ static char *
 handle_base64_to_numeric_with_scale(const char * in, int scale)
 {
 	int newlen = 0, decimalpos = 0;
-	long long value = 0;
-	char buffer[32] = {0};
+	char * value = 0;
+	char buffer[128] = {0};
 	int tmpoutlen = pg_b64_dec_len(strlen(in));
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
 	char * out = NULL;
+	bool isneg = false;
 
 #if SYNCHDB_PG_MAJOR_VERSION >= 1800
 	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
 #else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
 #endif
-	value = derive_value_from_byte(tmpout, tmpoutlen);
-	snprintf(buffer, sizeof(buffer), "%lld", value);
+	value = derive_decimal_string_from_byte(tmpout, tmpoutlen);
+	/* if value is negative, we set isneg = true */
+	if (value[0] == '-')
+	{
+		isneg = true;
+		/* skip minus sign for processing below */
+		snprintf(buffer, sizeof(buffer), "%s", value + 1);
+	}
+	else
+		snprintf(buffer, sizeof(buffer), "%s", value);
 	if (scale > 0)
 	{
 		if (strlen(buffer) > scale)
 		{
 			/* ex: 123 -> 1.23*/
-			newlen = strlen(buffer) + 1;	/* plus 1 decimal */
+			newlen = strlen(buffer) + 1 + (isneg ? 1 : 0);	/* plus 1 decimal and minus sign is needed */
 			out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+
 			decimalpos = strlen(buffer) - scale;
-			strncpy(out, buffer, decimalpos);
-			out[decimalpos] = '.';
-			strcpy(out + decimalpos + 1, buffer + decimalpos);
+			strncpy(out + (isneg ? 1 : 0), buffer, decimalpos);
+			out[decimalpos + (isneg ? 1 : 0)] = '.';
+			strcpy(out + decimalpos + 1 + (isneg ? 1 : 0), buffer + decimalpos);
+			if (isneg)
+				out[0] = '-';
 		}
 		else if (strlen(buffer) == scale)
 		{
 			/* ex: 123 -> 0.123 */
-			newlen = strlen(buffer) + 2;	/* plus 1 decimal and 1 zero */
+			newlen = strlen(buffer) + 2 + (isneg ? 1 : 0);	/* plus 1 decimal, 1 zero and minus sign is needed*/
 			out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-			snprintf(out, newlen + 1, "0.%s", buffer);
+			if (isneg)
+				snprintf(out, newlen + 1, "-0.%s", buffer);
+			else
+				snprintf(out, newlen + 1, "0.%s", buffer);
 		}
 		else
 		{
-			/* ex: 1 -> 0.001*/
-			int scale_factor = 1, i = 0;
-			double res = 0.0;
+			/* ex: 1 -> 0.001 when scale = 3 */
+			int i = 0;
+			int val_len = strlen(buffer);
+			int zero_count = scale - val_len;
+			char *p;
 
-			/* plus 1 decimal and 1 zero and the zeros as a result of left shift */
-			newlen = strlen(buffer) + (scale - strlen(buffer)) + 2;
-			out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+			/* plus 1 decimal, 1 zero, minus sign if needed and leading zeros */
+			newlen = val_len + zero_count + 2 + (isneg ? 1 : 0);
+			out = (char *) palloc0(newlen + 1);  /* plus terminating null */
 
-			for (i = 0; i< scale; i++)
-				scale_factor *= 10;
+			p = out;
+			if (isneg)
+				*p++ = '-';
 
-			res = (double)value / (double)scale_factor;
-			snprintf(out, newlen + 1, "%g", res);
+			*p++ = '0';
+			*p++ = '.';
+
+			/* insert leading zeros */
+			for (i = 0; i < zero_count; i++)
+				*p++ = '0';
+
+			/* copy the digits from buffer */
+			strcpy(p, buffer);
 		}
 	}
 	else
 	{
-		newlen = strlen(buffer);	/* no decimal */
+		newlen = strlen(buffer) + (isneg ? 1 : 0);	/* no decimal + minus sign if needed */
 		out = (char *) palloc0(newlen + 1);
-		strlcpy(out, buffer, newlen + 1);
+		if (isneg)
+			snprintf(out, newlen + 1, "-%s", buffer);
+		else
+			strlcpy(out, buffer, newlen + 1);
 	}
 	return out;
 }
