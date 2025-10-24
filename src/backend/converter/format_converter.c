@@ -234,7 +234,9 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 	{{"varbinary", false}, "bytea", 0},
 	{{"image", false}, "bytea", 0},
 	{{"uniqueidentifier", false}, "uuid", 0},
-	{{"xml", false}, "text", 0},
+	{{"xml", false}, "xml", 0},
+	{{"json", false}, "jsonb", -1},
+	{{"hierarchyid", false}, "text", 0},	/* or ltree if available*/
 	/* spatial types - map to text by default */
 	{{"geometry", false}, "text", 0},
 	{{"geography", false}, "text", 0},
