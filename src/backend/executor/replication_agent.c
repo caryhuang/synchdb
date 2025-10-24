@@ -831,7 +831,8 @@ ra_executePGDDL(PG_DDL * pgddl, ConnectorType type)
  * or calls a custom handler function.
  */
 int
-ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats)
+ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats,
+		bool isInSnapshot)
 {
 	int ret = -1;
 	if (!pgdml)
@@ -849,7 +850,7 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			else
 				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type, pgdml->natts);
 
-			increment_connector_statistics(myBatchStats, STATS_READ, 1);
+			increment_connector_statistics(myBatchStats, STATS_ROWS, 1);
 			break;
 		}
 		case 'c':  // Create operation
@@ -859,7 +860,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			else
 				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type, pgdml->natts);
 
-			increment_connector_statistics(myBatchStats, STATS_CREATE, 1);
+			if (!isInSnapshot)
+				increment_connector_statistics(myBatchStats, STATS_CREATE, 1);
 			break;
 		}
 		case 'u':  // Update operation
@@ -871,7 +873,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 											 pgdml->columnValuesAfter,
 											 pgdml->tableoid,
 											 type, pgdml->natts);
-			increment_connector_statistics(myBatchStats, STATS_UPDATE, 1);
+			if (!isInSnapshot)
+				increment_connector_statistics(myBatchStats, STATS_UPDATE, 1);
 			break;
 		}
 		case 'd':  // Delete operation
@@ -881,7 +884,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			else
 				ret = synchdb_handle_delete(pgdml->columnValuesBefore, pgdml->tableoid, type, pgdml->natts);
 
-			increment_connector_statistics(myBatchStats, STATS_DELETE, 1);
+			if (!isInSnapshot)
+				increment_connector_statistics(myBatchStats, STATS_DELETE, 1);
 			break;
 		}
 		default:
@@ -1378,3 +1382,119 @@ destroyPGDML(PG_DML * dmlinfo)
 		pfree(dmlinfo);
 	}
 }
+
+orascn
+ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag)
+{
+	int ret = -1, i = 0;
+	bool isnull = false;
+	Datum d;
+	char *s = NULL;
+	orascn scn = 0;
+	bool skiptx = false;
+	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE] = {0};
+
+	const char *sql = (flag & CONNFLAG_SCHEMA_SYNC_MODE) ?
+			"SELECT synchdb_do_schema_sync("
+			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
+			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric)" :
+			"SELECT synchdb_do_initial_snapshot("
+			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
+			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric)";
+	Oid   argtypes[10] = {
+		NAMEOID, TEXTOID, NAMEOID, NAMEOID, NAMEOID,
+		TEXTOID, NAMEOID, BOOLOID, TEXTOID, NUMERICOID
+	};
+	Datum values[10];
+	char  nulls[10] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+
+	/*
+	 * if we are already in transaction or transaction block, we can skip
+	 * the transaction and snapshot acquisition code below
+	 */
+	if (IsTransactionOrTransactionBlock())
+		skiptx = true;
+
+	/* we only work with lower case objects */
+	for (i = 0; i < strlen(conninfo->srcdb); i++)
+		dstdb[i] = (char) pg_tolower((unsigned char) conninfo->srcdb[i]);
+
+	PG_TRY();
+	{
+		if (!skiptx)
+		{
+			/* Start a transaction and set up a snapshot */
+			StartTransactionCommand();
+			PushActiveSnapshot(GetTransactionSnapshot());
+		}
+
+		/* Build Datum values for name/text/bool/numeric */
+		values[0]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->name));
+		values[1]  = CStringGetTextDatum(SYNCHDB_SECRET);
+		values[2]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_obj"));
+		values[3]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_stage"));
+		values[4]  = DirectFunctionCall1(namein,   CStringGetDatum(dstdb));
+		values[5]  = CStringGetTextDatum(conninfo->srcdb);
+		values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->user));
+		values[7]  = BoolGetDatum(true);
+		values[8]  = CStringGetTextDatum("replace");
+		values[9]  = DirectFunctionCall3(numeric_in,
+										 CStringGetDatum("0"),
+										 ObjectIdGetDatum(InvalidOid),
+										 Int32GetDatum(-1));
+
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "SPI_connect failed");
+
+		ret = SPI_execute_with_args(sql, 10, argtypes, values, nulls, false, 1);
+		if (ret != SPI_OK_SELECT || SPI_processed != 1 || SPI_tuptable == NULL)
+		{
+			SPI_finish();
+			elog(ERROR, "snapshot call failed with ret = %d", ret);
+		}
+
+		d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+		if (isnull)
+		{
+			SPI_finish();
+			elog(ERROR, "snapshot function returned NULL");
+		}
+
+		s = DatumGetCString(DirectFunctionCall1(numeric_out, d));
+		errno = 0;
+		scn = strtoull(s, NULL, 10);
+		if (errno != 0)
+		{
+			SPI_finish();
+			elog(ERROR, "failed to parse SCN '%s' as unsigned long long", s);
+		}
+
+		SPI_finish();
+
+		if (!skiptx)
+		{
+			/* Commit the transaction */
+			PopActiveSnapshot();
+			CommitTransactionCommand();
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		ErrorData  *errdata = CopyErrorData();
+
+		if (errdata)
+			set_shm_connector_errmsg(myConnectorId, errdata->message);
+
+		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
+		SPI_finish();
+		scn = 0;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	elog(WARNING, "scn to resume cdc %llu", scn);
+	return scn;
+}
+

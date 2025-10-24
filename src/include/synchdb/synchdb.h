@@ -85,7 +85,7 @@ typedef unsigned long long orascn;
 /* Possible connector flags */
 #define CONNFLAG_SCHEMA_SYNC_MODE 			1 << 0		/* 0001 */
 #define CONNFLAG_NO_CDC_MODE 				1 << 1		/* 0010 */
-#define CONNFLAG_EXIT_ON_SNAPSHOT_DONE 		1 << 2		/* 0100 */
+#define CONNFLAG_INITIAL_SNAPSHOT_MODE 		1 << 2		/* 0100 */
 
 /* Enumerations */
 
@@ -140,7 +140,6 @@ typedef enum _connectorStatistics
 	STATS_UNDEF = 0,
 	STATS_DDL,
 	STATS_DML,
-	STATS_READ,
 	STATS_CREATE,
 	STATS_UPDATE,
 	STATS_DELETE,
@@ -148,7 +147,10 @@ typedef enum _connectorStatistics
 	STATS_BAD_CHANGE_EVENT,
 	STATS_TOTAL_CHANGE_EVENT,
 	STATS_BATCH_COMPLETION,
-	STATS_AVERAGE_BATCH_SIZE
+	STATS_AVERAGE_BATCH_SIZE,
+	STATS_TRUNCATE,
+	STATS_TABLES,
+	STATS_ROWS
 } ConnectorStatistics;
 
 /**
@@ -208,7 +210,7 @@ typedef enum _AlterSubType
 } AlterSubType;
 
 /*
- *
+ * enum that represents logminer stream mode
  */
 typedef enum _OralogminerStreamMode
 {
@@ -216,6 +218,15 @@ typedef enum _OralogminerStreamMode
 	LOGMINER_MODE_UNCOMMITTED,
 	LOGMINER_MODE_COMMITTED
 } OraLogminerStreamMode;
+
+/*
+ * enum that represents initial snapshot engines
+ */
+typedef enum _SnapshotEngine
+{
+	ENGINE_DEBEZIUM,
+	ENGINE_FDW
+} SnapshotEngine;
 
 /**
  * BatchInfo - Structure containing the metadata of a batch change request
@@ -312,6 +323,7 @@ typedef struct _ConnectionInfo
     JMXConnectionInfo jmx;
     OLRConnectionInfo olr;
     IspnInfo ispn;
+    SnapshotEngine snapengine;
 } ConnectionInfo;
 
 /**
@@ -333,6 +345,38 @@ typedef struct _SynchdbRequest
 	ConnectionInfo reqconninfo;
 } SynchdbRequest;
 
+
+typedef struct _SnapshotStatistics
+{
+	unsigned long long snapstats_tables;			/* number of tables created */
+	unsigned long long snapstats_rows;				/* total number of rows created */
+	unsigned long long snapstats_begintime_ts;		/* timestamp(ms) when snapshot process begins */
+	unsigned long long snapstats_endtime_ts;		/* timestamp(ms) when snapshot process ends */
+} SnapshotStatistics;
+
+typedef struct _CDCStatistics
+{
+	unsigned long long stats_ddl;				/* number of DDL operations performed */
+	unsigned long long stats_dml;				/* number of DML operations performed */
+	unsigned long long stats_create;			/* INSERT events generated during CDC */
+	unsigned long long stats_update;			/* UPDATE events generated during CDC */
+	unsigned long long stats_delete;			/* DELETE events generated during CDC */
+	unsigned long long stats_tx;				/* transaction boundary events like BEGIN and COMMIT */
+	unsigned long long stats_truncate;			/* TRUNCATE events generated during CDC */
+} CDCStatistics;
+
+typedef struct _GeneralStatistics
+{
+	unsigned long long stats_bad_change_event;	/* number of bad change events */
+	unsigned long long stats_total_change_event;/* number of total change events */
+	unsigned long long stats_batch_completion;	/* number of batches completed */
+	unsigned long long stats_average_batch_size;/* calculated average batch size: */
+	unsigned long long stats_first_src_ts;	/* timestamp(ms) of last batch's first event generation in source db */
+	unsigned long long stats_first_pg_ts;	/* timestamp(ms) of last batch's first event processed by postgresql */
+	unsigned long long stats_last_src_ts;	/* timestamp(ms) of last batch's last event generation in source db */
+	unsigned long long stats_last_pg_ts;	/* timestamp(ms) of last batch's last event processed by postgresql */
+} GeneralStatistics;
+
 /**
  * SynchdbRequest - Structure representing a statistic info per connector.
  * If you add new stats values here, make sure to add the same to ConnectorStatistics
@@ -342,23 +386,9 @@ typedef struct _SynchdbRequest
  */
 typedef struct _SynchdbStatistics
 {
-	unsigned long long stats_ddl;				/* number of DDL operations performed */
-	unsigned long long stats_dml;				/* number of DML operations performed */
-	unsigned long long stats_read;				/* READ events generated during initial snapshot */
-	unsigned long long stats_create;			/* INSERT events generated during CDC */
-	unsigned long long stats_update;			/* UPDATE events generated during CDC */
-	unsigned long long stats_delete;			/* DELETE events generated during CDC */
-	unsigned long long stats_tx;				/* transaction boundary events like BEGIN and COMMIT */
-	unsigned long long stats_bad_change_event;	/* number of bad change events */
-	unsigned long long stats_total_change_event;/* number of total change events */
-	unsigned long long stats_batch_completion;	/* number of batches completed */
-	unsigned long long stats_average_batch_size;/* calculated average batch size: */
-	unsigned long long stats_first_src_ts;	/* timestamp(ms) of last batch's first event generation in source db */
-	unsigned long long stats_first_dbz_ts;	/* timestamp(ms) of last batch's first event processed by dbz */
-	unsigned long long stats_first_pg_ts;	/* timestamp(ms) of last batch's first event processed by postgresql */
-	unsigned long long stats_last_src_ts;	/* timestamp(ms) of last batch's last event generation in source db */
-	unsigned long long stats_last_dbz_ts;	/* timestamp(ms) of last batch's last event processed by dbz */
-	unsigned long long stats_last_pg_ts;	/* timestamp(ms) of last batch's last event processed by postgresql */
+	GeneralStatistics genstats;
+	SnapshotStatistics snapstats;
+	CDCStatistics cdcstats;
 } SynchdbStatistics;
 
 /**
@@ -416,5 +446,6 @@ void set_shm_connector_stage(int connectorId, ConnectorStage stage);
 ConnectorType get_shm_connector_type_enum(int connectorId);
 ConnectorStage get_shm_connector_stage_enum(int connectorId);
 void increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics which, int incby);
+ConnectorType stringToConnectorType(const char * type);
 
 #endif /* SYNCHDB_SYNCHDB_H_ */

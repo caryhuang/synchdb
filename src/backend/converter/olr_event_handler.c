@@ -2079,11 +2079,11 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 			v = getKeyJsonValueFromContainer(&jb->root, "tm", strlen("tm"), &vbuf);
 			if (v)
 			{
-				myBatchStats->stats_last_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+				myBatchStats->genstats.stats_last_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
 						NumericGetDatum(v->val.numeric))) / 1000 / 1000;
 			}
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
     	if (isfirst)
@@ -2091,11 +2091,11 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 			v = getKeyJsonValueFromContainer(&jb->root, "tm", strlen("tm"), &vbuf);
 			if (v)
 			{
-				myBatchStats->stats_first_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+				myBatchStats->genstats.stats_first_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
 						NumericGetDatum(v->val.numeric))) / 1000 / 1000;
 			}
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
     	olr_client_set_scns(scn, c_scn, c_idx);
@@ -2146,7 +2146,7 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 
     	/* (3) execute */
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	ret = ra_executePGDML(pgdml, TYPE_OLR, myBatchStats);
+    	ret = ra_executePGDML(pgdml, TYPE_OLR, myBatchStats, false);
     	if(ret)
     	{
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -2164,18 +2164,16 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 
     	if (islast)
     	{
-			myBatchStats->stats_last_src_ts = olrdml->src_ts_ms;
-			myBatchStats->stats_last_dbz_ts = olrdml->dbz_ts_ms;
+			myBatchStats->genstats.stats_last_src_ts = olrdml->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
     	if (isfirst)
     	{
-			myBatchStats->stats_first_src_ts = olrdml->src_ts_ms;
-			myBatchStats->stats_first_dbz_ts = olrdml->dbz_ts_ms;
+			myBatchStats->genstats.stats_first_src_ts = olrdml->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
        	/* (5) clean up */
@@ -2280,18 +2278,16 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 
     	if (islast)
     	{
-			myBatchStats->stats_last_src_ts = olrddl->src_ts_ms;
-			myBatchStats->stats_last_dbz_ts = olrddl->dbz_ts_ms;
+			myBatchStats->genstats.stats_last_src_ts = olrddl->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
     	if (isfirst)
     	{
-			myBatchStats->stats_first_src_ts = olrddl->src_ts_ms;
-			myBatchStats->stats_first_dbz_ts = olrddl->dbz_ts_ms;
+			myBatchStats->genstats.stats_first_src_ts = olrddl->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
 		/* (6) update attribute map table */
