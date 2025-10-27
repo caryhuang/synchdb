@@ -114,7 +114,6 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	{{"mediumtext", false}, "text", -1},
 	{{"tinytext", false}, "text", -1},
 	{{"json", false}, "jsonb", -1},
-	/* spatial types - map to text by default */
 	{{"geometry", false}, "text", -1},
 	{{"geometrycollection", false}, "text", -1},
 	{{"geomcollection", false}, "text", -1},
@@ -192,16 +191,17 @@ DatatypeHashEntry oracle_defaultTypeMappings[] =
 	{{"rowid", false}, "text", 0},
 	{{"urowid", false}, "text", 0},
 	{{"xmltype", false}, "text", 0},
-	/* large objects */
 	{{"bfile", false}, "text", 0},
 	{{"blob", false}, "bytea", 0},
 	{{"clob", false}, "text", 0},
 	{{"nclob", false}, "text", 0},
-	/* spatial types */
 	{{"sdo_geometry", false}, "text", 0},
 	{{"sdo_topo_geometry", false}, "text", 0},
 	{{"sdo_georaster", false}, "text", 0},
 	{{"uritype", false}, "text", 0},
+	{{"anytype", false}, "text", 0},
+	{{"anydata", false}, "text", 0},
+	{{"anydataset", false}, "text", 0},
 };
 #define SIZE_ORACLE_DATATYPE_MAPPING (sizeof(oracle_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
@@ -241,9 +241,8 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 	{{"uniqueidentifier", false}, "uuid", 0},
 	{{"xml", false}, "xml", 0},
 	{{"json", false}, "jsonb", -1},
-	{{"hierarchyid", false}, "text", 0},	/* or ltree if available*/
+	{{"hierarchyid", false}, "text", 0},
 	{{"vector", false}, "text", 0},
-	/* spatial types - map to text by default */
 	{{"geometry", false}, "text", 0},
 	{{"geography", false}, "text", 0},
 };
