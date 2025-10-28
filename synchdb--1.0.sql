@@ -1223,6 +1223,172 @@ END;$$;
 COMMENT ON FUNCTION synchdb_create_oraviews(name, name, jsonb) IS
    'create Oracle foreign tables for the metadata of a foreign server';
 
+CREATE OR REPLACE FUNCTION synchdb_materialize_ora_metadata(
+    p_source_schema name,          -- e.g. 'ora_obj' (must exist; contains FTs)
+    p_dest_schema   name,          -- destination schema to hold local materialized copies
+    p_on_exists     text DEFAULT 'replace'  -- 'replace' | 'skip' | 'error'
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    rname  text;
+    rels   text[] := ARRAY['tables','columns','keys'];  -- materialize just these
+    src_ok boolean;
+    dst_ok boolean;
+    rel_exists boolean;
+BEGIN
+    -- 1) Validate source schema exists
+    SELECT EXISTS (
+        SELECT 1 FROM pg_namespace WHERE nspname = p_source_schema::text
+    ) INTO src_ok;
+
+    IF NOT src_ok THEN
+        RAISE EXCEPTION 'Source schema % does not exist', p_source_schema;
+    END IF;
+
+    -- 2) Ensure destination schema exists (create if needed)
+    SELECT EXISTS (
+        SELECT 1 FROM pg_namespace WHERE nspname = p_dest_schema::text
+    ) INTO dst_ok;
+
+    IF NOT dst_ok THEN
+        EXECUTE format('CREATE SCHEMA %I', p_dest_schema);
+    END IF;
+
+    -- 3) Loop through the three metadata relations
+    FOREACH rname IN ARRAY rels LOOP
+        -- 3a) Make sure the source relation exists (as a table/foreign table/view)
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = p_source_schema::text
+              AND c.relname = rname
+              AND c.relkind IN ('r','v','f','m')  -- table, view, foreign table, matview
+        ) INTO rel_exists;
+
+        IF NOT rel_exists THEN
+            RAISE NOTICE 'Skipping %.% (not found in source)', p_source_schema, rname;
+            CONTINUE;
+        END IF;
+
+        -- 3b) Handle destination existence policy
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = p_dest_schema::text
+              AND c.relname = rname
+              AND c.relkind IN ('r','m','f','v')
+        ) INTO rel_exists;
+
+        IF rel_exists THEN
+            IF p_on_exists = 'replace' THEN
+                EXECUTE format('DROP TABLE IF EXISTS %I.%I CASCADE', p_dest_schema, rname);
+                -- If it was a view/FT/mview, DROP TABLE IF EXISTS won't catch; drop any object kind:
+                BEGIN
+                    EXECUTE format('DROP VIEW IF EXISTS %I.%I CASCADE', p_dest_schema, rname);
+                EXCEPTION WHEN undefined_table THEN END;
+                BEGIN
+                    EXECUTE format('DROP MATERIALIZED VIEW IF EXISTS %I.%I CASCADE', p_dest_schema, rname);
+                EXCEPTION WHEN undefined_table THEN END;
+                BEGIN
+                    EXECUTE format('DROP FOREIGN TABLE IF EXISTS %I.%I CASCADE', p_dest_schema, rname);
+                EXCEPTION WHEN undefined_table THEN END;
+            ELSIF p_on_exists = 'skip' THEN
+                RAISE NOTICE 'Skipping %.% (already exists and on_exists=skip)', p_dest_schema, rname;
+                CONTINUE;
+            ELSE
+                RAISE EXCEPTION 'Destination %.% already exists (on_exists=%)', p_dest_schema, rname, p_on_exists;
+            END IF;
+        END IF;
+
+        -- 3c) Materialize as UNLOGGED table (structure+data)
+        EXECUTE format(
+            'CREATE UNLOGGED TABLE %I.%I AS TABLE %I.%I',
+            p_dest_schema, rname, p_source_schema, rname
+        );
+
+        RAISE NOTICE 'Materialized %.% -> %.% (UNLOGGED)', p_source_schema, rname, p_dest_schema, rname;
+
+        -- 3d) Add helpful indexes if the expected columns exist
+        -- For tables(schema, table_name)
+        IF rname = 'tables' THEN
+            PERFORM 1 FROM information_schema.columns
+             WHERE table_schema = p_dest_schema::text
+               AND table_name   = 'tables'
+               AND column_name  = 'schema';
+            IF FOUND THEN
+                PERFORM 1 FROM information_schema.columns
+                 WHERE table_schema = p_dest_schema::text
+                   AND table_name   = 'tables'
+                   AND column_name  = 'table_name';
+                IF FOUND THEN
+                    EXECUTE format(
+                        'CREATE INDEX ON %I.%I(("schema"), table_name)',
+                        p_dest_schema, rname
+                    );
+                END IF;
+            END IF;
+        END IF;
+
+        -- For columns(schema, table_name, position)
+        IF rname = 'columns' THEN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = p_dest_schema::text AND table_name='columns'
+                  AND column_name IN ('schema','table_name','position')
+                GROUP BY table_schema, table_name
+                HAVING count(*) = 3
+            ) THEN
+                EXECUTE format(
+                    'CREATE INDEX ON %I.%I(("schema"), table_name, position)',
+                    p_dest_schema, rname
+                );
+            END IF;
+        END IF;
+
+        -- For keys(schema, table_name[, constraint_name])
+        IF rname = 'keys' THEN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = p_dest_schema::text AND table_name='keys'
+                  AND column_name IN ('schema','table_name')
+                GROUP BY table_schema, table_name
+                HAVING count(*) = 2
+            ) THEN
+                EXECUTE format(
+                    'CREATE INDEX ON %I.%I(("schema"), table_name)',
+                    p_dest_schema, rname
+                );
+            END IF;
+
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = p_dest_schema::text AND table_name='keys'
+                  AND column_name = 'constraint_name'
+            ) THEN
+                EXECUTE format(
+                    'CREATE INDEX ON %I.%I((constraint_name))',
+                    p_dest_schema, rname
+                );
+            END IF;
+        END IF;
+
+    END LOOP;
+
+    -- 4) Analyze for better local planning
+    EXECUTE format('ANALYZE %I.tables',  p_dest_schema);
+    EXECUTE format('ANALYZE %I.columns', p_dest_schema);
+    EXECUTE format('ANALYZE %I.keys',    p_dest_schema);
+
+    RAISE NOTICE 'Materialization complete into schema %', p_dest_schema;
+END;
+$$;
+
+COMMENT ON FUNCTION synchdb_materialize_ora_metadata(name, name, text) IS
+   'create a metadata schema with selected ora_obj foreign tables materialized';
 
 CREATE OR REPLACE FUNCTION synchdb_create_current_scn_ft(
     p_schema name,   -- e.g. 'ora_obj'
@@ -2277,7 +2443,8 @@ COMMENT ON FUNCTION synchdb_apply_table_mappings(name, name, name, name) IS
 CREATE OR REPLACE FUNCTION synchdb_finalize_initial_snapshot(
     p_source_schema  name,              -- e.g. 'ora_obj'
     p_stage_schema   name,              -- e.g. 'ora_stage'
-    p_connector_name name               -- e.g. 'ora19cconn'  -> server 'ora19cconn_oracle'
+    p_connector_name name,              -- e.g. 'ora19cconn'  -> server 'ora19cconn_oracle'
+	p_meta_schema	 name
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -2307,7 +2474,17 @@ BEGIN
     END IF;
 
     ----------------------------------------------------------------------
-    -- 3) Drop user mappings for server <connector>_oracle (if the server exists)
+    -- 3) Drop metadata schema (materialized FDW objects)
+    ----------------------------------------------------------------------
+    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = p_meta_schema) THEN
+        RAISE NOTICE 'Dropping metadata schema "%" CASCADE', p_meta_schema;
+        EXECUTE format('DROP SCHEMA %I CASCADE', p_meta_schema);
+    ELSE
+        RAISE NOTICE 'Metadata schema "%" does not exist, skipping', p_meta_schema;
+    END IF;
+
+    ----------------------------------------------------------------------
+    -- 4) Drop user mappings for server <connector>_oracle (if the server exists)
     ----------------------------------------------------------------------
     IF EXISTS (SELECT 1 FROM pg_foreign_server WHERE srvname = v_server) THEN
         FOR r IN
@@ -2326,7 +2503,7 @@ BEGIN
         END LOOP;
 
         ------------------------------------------------------------------
-        -- 4) Drop the FDW server itself
+        -- 5) Drop the FDW server itself
         ------------------------------------------------------------------
         RAISE NOTICE 'Dropping SERVER "%" CASCADE', v_server;
         EXECUTE format('DROP SERVER IF EXISTS %I CASCADE', v_server);
@@ -2336,7 +2513,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_finalize_initial_snapshot(name, name, name) IS
+COMMENT ON FUNCTION synchdb_finalize_initial_snapshot(name, name, name, name) IS
    'finalize initial snapshot by cleaning up resources and objects';
 
 CREATE OR REPLACE FUNCTION synchdb_do_initial_snapshot(
@@ -2359,6 +2536,7 @@ DECLARE
     v_case_json     jsonb;
     v_effective_scn numeric;
     v_server_name   text;   -- will be set by synchdb_prepare_initial_snapshot()
+	v_meta_schema 	name;
 BEGIN
     ----------------------------------------------------------------------
     -- Step 0: Prepare FDW server & user mapping from connector metadata
@@ -2380,17 +2558,21 @@ BEGIN
                  p_source_schema, v_server_name;
     PERFORM synchdb_create_oraviews(v_server_name, p_source_schema, v_case_json);
 
-    RAISE NOTICE 'Step 2: Creating/ensuring current_scn foreign table exists in schema "%" using server "%"',
-                 p_source_schema, v_server_name;
-    PERFORM synchdb_create_current_scn_ft(p_source_schema, v_server_name);
+	RAISE NOTICE 'Step 1.5: Materialize foreign object views to %', v_meta_schema;
+	v_meta_schema := ('metaschema_' || p_connector_name)::name;
+	PERFORM synchdb_materialize_ora_metadata(p_source_schema, v_meta_schema, p_on_exists);
 
-    RAISE NOTICE 'Step 3: Reading current SCN value from %.current_scn', p_source_schema;
-    EXECUTE format('SELECT current_scn FROM %I.current_scn', p_source_schema)
+    RAISE NOTICE 'Step 2: Creating/ensuring current_scn foreign table exists in schema "%" using server "%"',
+                 v_meta_schema, v_server_name;
+    PERFORM synchdb_create_current_scn_ft(v_meta_schema, v_server_name);
+
+    RAISE NOTICE 'Step 3: Reading current SCN value from %.current_scn', v_meta_schema;
+    EXECUTE format('SELECT current_scn FROM %I.current_scn', v_meta_schema)
        INTO v_scn;
 
     IF (p_scn IS NULL OR p_scn <= 0) THEN
         IF v_scn IS NULL THEN
-            RAISE EXCEPTION 'Unable to read current SCN from %.current_scn', p_source_schema;
+            RAISE EXCEPTION 'Unable to read current SCN from %.current_scn', v_meta_schema;
         END IF;
         v_effective_scn := v_scn;
     ELSE
@@ -2409,7 +2591,7 @@ BEGIN
         p_lower_names,
         p_on_exists,
         v_effective_scn,
-        p_source_schema
+        v_meta_schema
     );
 
     RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
@@ -2434,7 +2616,7 @@ BEGIN
 
     RAISE NOTICE 'Initial snapshot completed successfully at SCN %', v_effective_scn;
 
-    PERFORM synchdb_finalize_initial_snapshot(p_source_schema, p_stage_schema, p_connector_name);
+    PERFORM synchdb_finalize_initial_snapshot(p_source_schema, p_stage_schema, p_connector_name, v_meta_schema);
 
     PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, 0::bigint, 0::bigint,
                                   (extract(epoch from clock_timestamp()) * 1000)::bigint);
@@ -2470,6 +2652,7 @@ DECLARE
     v_case_json     jsonb;
     v_effective_scn numeric;
     v_server_name   text;   -- will be set by synchdb_prepare_initial_snapshot()
+	v_meta_schema   name;
 BEGIN
     ----------------------------------------------------------------------
     -- Step 0: Prepare FDW server & user mapping from connector metadata
@@ -2490,17 +2673,21 @@ BEGIN
                  p_source_schema, v_server_name;
     PERFORM synchdb_create_oraviews(v_server_name, p_source_schema, v_case_json);
 
-    RAISE NOTICE 'Step 2: Creating/ensuring current_scn foreign table exists in schema "%" using server "%"',
-                 p_source_schema, v_server_name;
-    PERFORM synchdb_create_current_scn_ft(p_source_schema, v_server_name);
+    RAISE NOTICE 'Step 1.5: Materialize foreign object views to %', v_meta_schema;
+    v_meta_schema := ('metaschema_' || p_connector_name)::name;
+    PERFORM synchdb_materialize_ora_metadata(p_source_schema, v_meta_schema, p_on_exists);
 
-    RAISE NOTICE 'Step 3: Reading current SCN value from %.current_scn', p_source_schema;
-    EXECUTE format('SELECT current_scn FROM %I.current_scn', p_source_schema)
+    RAISE NOTICE 'Step 2: Creating/ensuring current_scn foreign table exists in schema "%" using server "%"',
+                 v_meta_schema, v_server_name;
+    PERFORM synchdb_create_current_scn_ft(v_meta_schema, v_server_name);
+
+    RAISE NOTICE 'Step 3: Reading current SCN value from %.current_scn', v_meta_schema;
+    EXECUTE format('SELECT current_scn FROM %I.current_scn', v_meta_schema)
        INTO v_scn;
 
     IF (p_scn IS NULL OR p_scn <= 0) THEN
         IF v_scn IS NULL THEN
-            RAISE EXCEPTION 'Unable to read current SCN from %.current_scn', p_source_schema;
+            RAISE EXCEPTION 'Unable to read current SCN from %.current_scn', v_meta_schema;
         END IF;
         v_effective_scn := v_scn;
     ELSE
@@ -2519,7 +2706,7 @@ BEGIN
         p_lower_names,
         p_on_exists,
         v_effective_scn,
-        p_source_schema
+        v_meta_schema
     );
 
     RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
@@ -2538,7 +2725,7 @@ BEGIN
 
     RAISE NOTICE 'schema sync completed successfully at SCN %', v_effective_scn;
 
-    PERFORM synchdb_finalize_initial_snapshot(p_source_schema, p_stage_schema, p_connector_name);
+    PERFORM synchdb_finalize_initial_snapshot(p_source_schema, p_stage_schema, p_connector_name, v_meta_schema);
 
     PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, 0::bigint, 0::bigint,
                                   (extract(epoch from clock_timestamp()) * 1000)::bigint);
