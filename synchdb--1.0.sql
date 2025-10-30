@@ -1443,26 +1443,29 @@ DECLARE
   has_oracle_fdw boolean;
   r              RECORD;
   v_tbl_pg       text;
-  v_cols_sql     text;      -- PG column defs (mapped types)
-  v_sel_list     text;      -- Oracle SELECT column list (for subquery)
+  v_cols_sql     text;
+  v_sel_list     text;
   v_exists       boolean;
   v_subquery     text;
 
-  v_conn_type    name;      -- from synchdb_conninfo.data->>'connector' (only in conninfo mode)
+  v_conn_type    name;      -- from synchdb_conninfo.data->>'connector' (conninfo mode)
   v_srcdb        text;      -- default db token (conninfo mode)
-  -- v_owner not needed globally; use r.ora_owner from metadata
 
   v_snapcfg      jsonb;     -- raw data->'snapshottable' (conninfo mode)
   v_snaptext     text;      -- comma-separated list (normalized)
   v_use_filter   boolean := false;
-  v_type         text;      -- jsonb_typeof(v_snapcfg)
+  v_type         text;
 
   base_sql       text;
 
   use_explicit   boolean := (p_snapshot_tables IS NOT NULL AND btrim(p_snapshot_tables) <> '');
   v_ext_db       text;      -- per-table db token for ext_tbname when explicit list is used
   v_tbl_name_l   text;
-  v_relid        oid;       -- OID of the created foreign table in p_stage_schema
+  v_relid        oid;
+
+  -- error table vars (existence check only; we do NOT create/insert here)
+  v_err_tbl_ident  text;
+  v_err_tbl_exists boolean := false;
 BEGIN
   -- Ensure oracle_fdw is available
   SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='oracle_fdw')
@@ -1470,6 +1473,23 @@ BEGIN
     INTO has_oracle_fdw;
   IF NOT has_oracle_fdw THEN
     RAISE EXCEPTION 'oracle_fdw is not installed. Run: CREATE EXTENSION oracle_fdw;';
+  END IF;
+
+  ----------------------------------------------------------------------
+  -- Per-connector error table identifier (for cleanup in retry mode)
+  ----------------------------------------------------------------------
+  v_err_tbl_ident :=
+      'synchdb_fdw_snapshot_errors_'
+      || regexp_replace(lower(p_connector_name::text), '[^a-z0-9_]', '_', 'g');
+
+  IF use_explicit THEN
+    -- Check if the error table exists; used later for cleanup
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relname = v_err_tbl_ident
+    ) INTO v_err_tbl_exists;
   END IF;
 
   ----------------------------------------------------------------------
@@ -1485,7 +1505,7 @@ BEGIN
   TRUNCATE tmp_snap_list;
 
   IF use_explicit THEN
-    -- Mode A: parse CSV of db.schema.table triplets
+    -- Mode A: parse CSV of db.schema.table triplets (enforce 3-part)
     INSERT INTO tmp_snap_list(db, schem, tbl)
     SELECT lower(parts[1]) AS db,
            lower(parts[2]) AS schem,
@@ -1495,7 +1515,8 @@ BEGIN
       FROM regexp_split_to_table(p_snapshot_tables, '\s*,\s*') AS t(x)
       WHERE trim(x) <> ''
     ) s
-    WHERE array_length(parts,1) = 3;  -- enforce 3-part names
+    WHERE array_length(parts,1) = 3;
+
     v_use_filter := EXISTS (SELECT 1 FROM tmp_snap_list);
 
   ELSE
@@ -1595,7 +1616,9 @@ BEGIN
     END IF;
   END IF;
 
-  -- Iterate rows from the (possibly filtered) list
+  ----------------------------------------------------------------------
+  -- Create (or replace) the stage foreign tables
+  ----------------------------------------------------------------------
   FOR r IN EXECUTE base_sql || ' ORDER BY ora_owner, table_name'
   LOOP
     -- decide PG table name
@@ -1678,7 +1701,6 @@ BEGIN
     END IF;
 
     -- Look up the OID of the just-created foreign table (relkind = 'f')
-    PERFORM 1; -- keep plan stable
     EXECUTE format(
       'SELECT c.oid
          FROM pg_class c
@@ -1709,13 +1731,11 @@ BEGIN
 
     -- Build fully-qualified external table name: db.schema.table (all lower)
     v_tbl_name_l := lower(r.table_name);
-    -- NOTE: use metadata owner (r.ora_owner) for accuracy
-    --       db token comes from explicit list or conninfo
-    --       ext_tbname is recorded as name type, so lower-case is fine.
+
     -- Refresh synchdb_attribute rows for this table
     DELETE FROM public.synchdb_attribute
      WHERE name       = p_connector_name
-       AND type       = v_conn_type
+       AND type       = COALESCE(v_conn_type, 'oracle'::name)
        AND ext_tbname = format('%s.%s.%s', v_ext_db, lower(r.ora_owner), v_tbl_name_l)::name;
 
     EXECUTE format($ins$
@@ -1747,6 +1767,58 @@ BEGIN
                  format('%s.%s.%s', v_ext_db, lower(r.ora_owner), v_tbl_name_l);
 
   END LOOP;
+
+  ----------------------------------------------------------------------
+  -- Snapshot-retry cleanup:
+  -- If (a) we were called with an explicit retry list AND
+  --    (b) the per-connector error table exists,
+  -- then delete error rows for tables that no longer exist in Oracle.
+  --
+  -- We compute:
+  --   requested_full = {db.schema.table} from p_snapshot_tables
+  --   existing_full  = {db.schema.table} that still appear in %I.columns
+  --   dropped_full   = requested_full - existing_full
+  -- and prune rows in the error table whose tbl ∈ dropped_full.
+  ----------------------------------------------------------------------
+  IF use_explicit AND v_err_tbl_exists THEN
+    -- requested_full
+    CREATE TEMP TABLE IF NOT EXISTS tmp_requested_full(fullname text PRIMARY KEY) ON COMMIT DROP;
+    TRUNCATE tmp_requested_full;
+    INSERT INTO tmp_requested_full(fullname)
+    SELECT format('%s.%s.%s', db, schem, tbl)
+    FROM tmp_snap_list;
+
+    -- existing_full (join requested list to metadata to ensure db token matches)
+    CREATE TEMP TABLE IF NOT EXISTS tmp_existing_full(fullname text PRIMARY KEY) ON COMMIT DROP;
+    TRUNCATE tmp_existing_full;
+
+    EXECUTE format($SQL$
+      INSERT INTO tmp_existing_full(fullname)
+      SELECT format('%%s.%%s.%%s', f.db, lower(c."schema"), lower(c.table_name))
+        FROM %1$I.columns c
+        JOIN tmp_snap_list f
+          ON lower(c.table_name) = f.tbl
+         AND (f.schem IS NULL OR lower(c."schema") = f.schem)
+      GROUP BY f.db, c."schema", c.table_name
+    $SQL$, p_source_schema);
+
+    -- prune: anything requested but not existing anymore
+    EXECUTE format($SQL$
+      DELETE FROM %1$I.%2$I e
+       WHERE e.connector_name = $1
+         AND e.tbl IN (
+               SELECT r.fullname
+                 FROM tmp_requested_full r
+            EXCEPT
+               SELECT x.fullname
+                 FROM tmp_existing_full x
+             )
+    $SQL$, 'public', v_err_tbl_ident)
+    USING p_connector_name;
+
+    RAISE NOTICE 'Snapshot-retry cleanup: pruned stale errors for tables dropped in Oracle (if any).';
+  END IF;
+
 END;
 $$;
 
