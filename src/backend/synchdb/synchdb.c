@@ -117,6 +117,7 @@ int olr_connect_timeout_ms = 5000;
 int olr_read_timeout_ms = 5000;
 int olr_snapshot_engine = ENGINE_DEBEZIUM;
 int cdc_start_delay_ms = 0;
+bool fdw_use_subtx = true;
 
 static const struct config_enum_entry error_strategies[] =
 {
@@ -1591,7 +1592,15 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 #ifdef WITH_OLR
 		if (type == TYPE_OLR)
 		{
-			try_reconnect_olr(connInfo);
+			/*
+			 * if we are still in snapshot or schema sync stage, we shall not
+			 * reconnect olr yet
+			 */
+			if ((connInfo->flag & (CONNFLAG_SCHEMA_SYNC_MODE |
+					CONNFLAG_INITIAL_SNAPSHOT_MODE)) == 0)
+			{
+				try_reconnect_olr(connInfo);
+			}
 			set_shm_connector_state(connectorId, STATE_SYNCING);
 		}
 		else
@@ -2077,28 +2086,82 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						}
 						else if (connInfo->snapengine == ENGINE_FDW)
 						{
-							orascn scn = 0;
+							orascn scn_req = 0;
+							orascn scn_res = 0;
+							int ret = -1, ntables = 0;
+							char * tbl_list = NULL;
 
-							/* invoke initial snapshot or schema sync PL/pgSQL workflow - OLR only*/
-							scn = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag);
-							if (scn > 0)
+							ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &scn_req);
+
+						    if (ntables > 0 && tbl_list != NULL)
+						    {
+						    	elog(WARNING, "Retry on failed snapshot tables %s as of %llu for %s",
+						    			tbl_list, scn_req, connInfo->name);
+						    }
+
+							if (connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE)
+							{
+								if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
+									set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+							}
+							else
+							{
+								if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+									set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+							}
+
+							/* invoke initial snapshot or schema sync PL/pgSQL workflow - OLR only */
+						    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list, scn_req, fdw_use_subtx);
+							if (scn_res > 0)
 							{
 								/* initial snapshot is considered completed */
-								elog(WARNING, "oracle_fdw based snapshot is done with scn %lld", scn);
+								elog(WARNING, "oracle_fdw based snapshot is done with scn %lld", scn_res);
 
-								/* set scn to OLR client so it knows where to resume CDC */
-								olr_client_set_scns(scn, scn, 0);
+								/* clean tbl_list if needed */
+								if (tbl_list != NULL)
+								{
+									pfree(tbl_list);
+									tbl_list = NULL;
+								}
 
-								/* change the state to STATE_SCHEMA_SYNC_DONE to handle the transition */
-								set_shm_connector_state(myConnectorId, STATE_SCHEMA_SYNC_DONE);
+								ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &scn_req);
+								if (ret != 0 || ntables == 0 || tbl_list == NULL)
+								{
+									/* all tables succeeded, proceed to next step... */
+
+									/* set scn to OLR client so it knows where to resume CDC */
+									olr_client_set_scns(scn_res, scn_res, 0);
+
+									/* change the state to STATE_SCHEMA_SYNC_DONE to handle the transition */
+									set_shm_connector_state(myConnectorId, STATE_SCHEMA_SYNC_DONE);
+								}
+								else
+								{
+									/* some tables have failed... */
+									elog(WARNING, "oracle_fdw based snapshot is done with errors: failed tables are: %s",
+											tbl_list);
+
+									set_shm_connector_state(myConnectorId, STATE_PAUSED);
+									set_shm_connector_errmsg(myConnectorId, "some tables have failed the snapshot. "
+											"Check synchdb_fdw_snapshot_errors_x tables for datails. "
+											"Resume connector to try again");
+
+									if (tbl_list != NULL)
+										pfree(tbl_list);
+								}
 							}
 							else
 							{
 								elog(WARNING, "oracle_fdw based snapshot is not successfully done");
+
+								/* clean tbl_list if needed */
+								if (tbl_list != NULL)
+									pfree(tbl_list);
+
 								set_shm_connector_state(myConnectorId, STATE_PAUSED);
 								set_shm_connector_errmsg(myConnectorId, "oracle_fdw based snapshot "
 										"is not successfully done - connector paused for troubleshooting. "
-										"Send resume command to try gain");
+										"Send resume command to try again");
 							}
 						}
 					}
@@ -2192,6 +2255,9 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						/* remove the snapshot flag as well if set, so cdc resume at next iteration */
 						if ((connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE))
 							connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
+
+						/* set the stage to change data capture */
+						set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 					}
 					else
 					{
@@ -2201,6 +2267,9 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 							connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
 							set_shm_connector_state(myConnectorId, STATE_SYNCING);
 						}
+
+						/* set the stage to change data capture */
+						set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 					}
 
 					/* update schema history metadata file to indicate we have completed a snapshot */
@@ -2234,6 +2303,9 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						pfree(snapshotMode);
 						snapshotMode = pstrdup("initial");
 					}
+
+					/* clear error messages */
+					set_shm_connector_errmsg(myConnectorId, NULL);
 
 					/*
 					 * if cdc_start_delay_ms is set > 0, we need to delay here before the
@@ -3593,6 +3665,17 @@ _PG_init(void)
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("synchdb.fdw_migrate_with_subtx",
+							 "whether or not to use subtransaction for per table migration",
+							 NULL,
+							 &fdw_use_subtx,
+							 true,
+							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
 
 	/* initialize data type mapping engine for all connectors */
 	fc_initFormatConverter(TYPE_MYSQL);

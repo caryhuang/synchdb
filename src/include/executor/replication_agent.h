@@ -77,6 +77,8 @@ int ra_listObjmaps(const char * name, ObjectMap ** out, int * numout);
 
 void destroyPGDDL(PG_DDL * ddlinfo);
 void destroyPGDML(PG_DML * dmlinfo);
-orascn ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag);
+orascn ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
+		const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx);
+int ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, orascn * scn_out);
 
 #endif /* SYNCHDB_REPLICATION_AGENT_H_ */

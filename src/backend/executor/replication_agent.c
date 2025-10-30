@@ -1384,29 +1384,40 @@ destroyPGDML(PG_DML * dmlinfo)
 }
 
 orascn
-ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag)
+ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
+		const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx)
 {
 	int ret = -1, i = 0;
 	bool isnull = false;
 	Datum d;
 	char *s = NULL;
-	orascn scn = 0;
+	orascn scn_res = 0;
 	bool skiptx = false;
 	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE] = {0};
+	char scn_buf[64] = {0};
 
 	const char *sql = (flag & CONNFLAG_SCHEMA_SYNC_MODE) ?
 			"SELECT synchdb_do_schema_sync("
 			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
-			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric)" :
+			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"
+			"  $11::text,$12::bool)" :
 			"SELECT synchdb_do_initial_snapshot("
 			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
-			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric)";
-	Oid   argtypes[10] = {
+			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"
+			"  $11::text,$12::bool)";
+	Oid   argtypes[12] = {
 		NAMEOID, TEXTOID, NAMEOID, NAMEOID, NAMEOID,
-		TEXTOID, NAMEOID, BOOLOID, TEXTOID, NUMERICOID
+		TEXTOID, NAMEOID, BOOLOID, TEXTOID, NUMERICOID,
+		TEXTOID, BOOLOID
 	};
-	Datum values[10];
-	char  nulls[10] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+	Datum values[12];
+	char  nulls[12] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+
+	/* compute scn */
+	if (scn_req > 0)
+		snprintf(scn_buf, sizeof(scn_buf), "%llu", scn_req);
+	else
+		snprintf(scn_buf, sizeof(scn_buf), "%s", "0");
 
 	/*
 	 * if we are already in transaction or transaction block, we can skip
@@ -1439,14 +1450,20 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag)
 		values[7]  = BoolGetDatum(true);
 		values[8]  = CStringGetTextDatum("replace");
 		values[9]  = DirectFunctionCall3(numeric_in,
-										 CStringGetDatum("0"),
+										 CStringGetDatum(scn_buf),
 										 ObjectIdGetDatum(InvalidOid),
 										 Int32GetDatum(-1));
+		if (snapshot_tables)
+			values[10] = CStringGetTextDatum(snapshot_tables);
+		else
+			nulls[10] = 'n';
+
+		values[11] = BoolGetDatum(fdw_use_subtx);
 
 		if (SPI_connect() != SPI_OK_CONNECT)
 			elog(ERROR, "SPI_connect failed");
 
-		ret = SPI_execute_with_args(sql, 10, argtypes, values, nulls, false, 1);
+		ret = SPI_execute_with_args(sql, 12, argtypes, values, nulls, false, 1);
 		if (ret != SPI_OK_SELECT || SPI_processed != 1 || SPI_tuptable == NULL)
 		{
 			SPI_finish();
@@ -1462,7 +1479,7 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag)
 
 		s = DatumGetCString(DirectFunctionCall1(numeric_out, d));
 		errno = 0;
-		scn = strtoull(s, NULL, 10);
+		scn_res = strtoull(s, NULL, 10);
 		if (errno != 0)
 		{
 			SPI_finish();
@@ -1489,12 +1506,121 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag)
 		FreeErrorData(errdata);
 		MemoryContextSwitchTo(oldctx);
 		SPI_finish();
-		scn = 0;
+		scn_res = 0;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	elog(WARNING, "scn to resume cdc %llu", scn);
-	return scn;
+	elog(WARNING, "scn to resume cdc %llu", scn_res);
+	return scn_res;
 }
 
+/*
+ * ra_get_fdw_snapshot_err_table_list
+ *
+ * This function queries synchdb_fdw_snapshot_errors tables and build a list of tables that
+ * have failed in previous FDW based initial snapshot.
+ */
+int
+ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, orascn *scn_out)
+{
+	int ret = -1;
+	StringInfoData strinfo;
+	char *agg_tbls = NULL;
+	char *scn_txt  = NULL;
+	bool skiptx = false;
+
+	if (out)
+		*out = NULL;
+	if (numout)
+		*numout = 0;
+	if (scn_out)
+		*scn_out = 0;  /* default if no rows / errors */
+
+	initStringInfo(&strinfo);
+	appendStringInfo(&strinfo,
+			"SELECT string_agg(tbl, ',' ORDER BY tbl) AS failed_tables, "
+			"max(scn) AS scn_val "
+			"FROM synchdb_fdw_snapshot_errors_%s "
+			"WHERE connector_name = '%s'",
+			name, name);
+
+	if (IsTransactionOrTransactionBlock())
+		skiptx = true;
+
+	if (!skiptx)
+	{
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
+
+	PG_TRY();
+	{
+		if (SPI_connect() != SPI_OK_CONNECT)
+		{
+			elog(WARNING, "SPI_connect failed");
+			goto cleanup_tx;
+		}
+
+		ret = SPI_execute(strinfo.data, true, 0);
+		if (ret != SPI_OK_SELECT || SPI_tuptable == NULL)
+		{
+			SPI_finish();
+			goto cleanup_tx;
+		}
+
+		if (SPI_processed == 1)
+		{
+			MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
+
+			/* col 1: failed_tables (text via string_agg) */
+			agg_tbls = SPI_getvalue(SPI_tuptable->vals[0],
+						SPI_tuptable->tupdesc, 1);
+			if (agg_tbls != NULL && out)
+			{
+				*out = pstrdup(agg_tbls);
+				if (numout) *numout = 1; /* you treat it as a single CSV string */
+			}
+
+			/* col 2: scn_val (numeric -> text) */
+			scn_txt = SPI_getvalue(SPI_tuptable->vals[0],
+					   SPI_tuptable->tupdesc, 2);
+			if (scn_txt && scn_out)
+			{
+				/* parse as unsigned long long (orascn) */
+				errno = 0;
+				*scn_out = (orascn) strtoull(scn_txt, NULL, 10);
+				if (errno != 0)
+					*scn_out = 0; /* fall back if parse failed */
+			}
+			MemoryContextSwitchTo(oldctx);
+		}
+
+		SPI_finish();
+		ret = 0;
+	}
+	PG_CATCH();
+	{
+		SPI_finish();
+		FlushErrorState();
+
+		if (!skiptx)
+		{
+			PopActiveSnapshot();
+			CommitTransactionCommand();
+		}
+		pfree(strinfo.data);
+		return -1;
+	}
+	PG_END_TRY();
+
+	cleanup_tx:
+	if (!skiptx)
+	{
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+
+	pfree(strinfo.data);
+	return ret;
+}

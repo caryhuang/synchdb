@@ -1434,7 +1434,8 @@ CREATE OR REPLACE FUNCTION synchdb_create_ora_stage_fts(
     p_lower_names    boolean DEFAULT true,               -- lower-case PG table/column names
     p_on_exists      text DEFAULT 'replace',             -- 'replace' | 'drop' | 'skip'
     p_scn            numeric DEFAULT 0,                  -- >0 => use AS OF SCN subquery
-    p_source_schema  name DEFAULT 'ora_obj'::name        -- metadata source schema (…columns)
+    p_source_schema  name DEFAULT 'ora_obj'::name,       -- metadata source schema (…columns)
+    p_snapshot_tables text DEFAULT NULL                  -- CSV of db.schema.table; when set, bypass conninfo
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -1447,18 +1448,21 @@ DECLARE
   v_exists       boolean;
   v_subquery     text;
 
-  v_conn_type    name;      -- from synchdb_conninfo.data->>'connector'
-  v_srcdb        text;      -- lower(data->>'srcdb')
-  v_owner        text;      -- lower(data->>'user')
-  v_ext_tbname   text;      -- "<db>.<schema>.<table>" all lower
-  v_relid        oid;       -- OID of the created foreign table in p_stage_schema
+  v_conn_type    name;      -- from synchdb_conninfo.data->>'connector' (only in conninfo mode)
+  v_srcdb        text;      -- default db token (conninfo mode)
+  -- v_owner not needed globally; use r.ora_owner from metadata
 
-  v_snapcfg      jsonb;     -- raw data->'snapshottable'
+  v_snapcfg      jsonb;     -- raw data->'snapshottable' (conninfo mode)
   v_snaptext     text;      -- comma-separated list (normalized)
   v_use_filter   boolean := false;
   v_type         text;      -- jsonb_typeof(v_snapcfg)
 
   base_sql       text;
+
+  use_explicit   boolean := (p_snapshot_tables IS NOT NULL AND btrim(p_snapshot_tables) <> '');
+  v_ext_db       text;      -- per-table db token for ext_tbname when explicit list is used
+  v_tbl_name_l   text;
+  v_relid        oid;       -- OID of the created foreign table in p_stage_schema
 BEGIN
   -- Ensure oracle_fdw is available
   SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='oracle_fdw')
@@ -1468,32 +1472,10 @@ BEGIN
     RAISE EXCEPTION 'oracle_fdw is not installed. Run: CREATE EXTENSION oracle_fdw;';
   END IF;
 
-  -- Pull connector info and snapshot filter source
-  SELECT (data->>'connector')::name,
-         lower(data->>'srcdb'),
-         lower(data->>'user'),
-         data->'snapshottable'
-    INTO v_conn_type, v_srcdb, v_owner, v_snapcfg
-  FROM synchdb_conninfo
-  WHERE name = p_connector_name;
-
-  IF v_conn_type IS NULL OR v_conn_type = ''::name THEN
-    RAISE EXCEPTION 'synchdb_conninfo[%]: data->>connector is missing/empty', p_connector_name;
-  END IF;
-  IF v_srcdb IS NULL OR v_srcdb = '' THEN
-    RAISE EXCEPTION 'synchdb_conninfo[%]: data->>srcdb is missing/empty', p_connector_name;
-  END IF;
-  IF v_owner IS NULL OR v_owner = '' THEN
-    RAISE EXCEPTION 'synchdb_conninfo[%]: data->>user is missing/empty', p_connector_name;
-  END IF;
-
   ----------------------------------------------------------------------
-  -- Normalize snapshottable into a temp filter list (db, schem, tbl)
-  -- Accepts:
-  --   - JSON string with CSV: "db.schema.tbl, db.tbl, ..."
-  --   - JSON string "file:/path/to/file.json"  (will read + expand)
-  --   - JSON array: ["db.schema.tbl","db.tbl", ...]
-  -- If snapshottable is NULL => migrate ALL tables (no filter).
+  -- Build tmp_snap_list in one of two modes:
+  --   A) Explicit list mode (p_snapshot_tables provided)
+  --   B) Conninfo+snapshottable mode (legacy/default)
   ----------------------------------------------------------------------
   CREATE TEMP TABLE IF NOT EXISTS tmp_snap_list (
     db    text NOT NULL,
@@ -1502,57 +1484,76 @@ BEGIN
   ) ON COMMIT DROP;
   TRUNCATE tmp_snap_list;
 
-  IF v_snapcfg IS NULL OR v_snapcfg::text = 'null' THEN
-    v_use_filter := false;  -- migrate all
-  ELSE
-    v_type := jsonb_typeof(v_snapcfg);
-
-    -- Build v_snaptext as a single comma-separated list, regardless of input shape
-    IF v_type = 'string' THEN
-      -- Strip JSON quotes
-      v_snaptext := trim(both '"' from v_snapcfg::text);
-
-      -- If it's a file: URI, read & expand to CSV using the helper
-      IF position('file:' IN v_snaptext) = 1 THEN
-        v_snaptext := read_snapshot_table_list(v_snaptext);
-      END IF;
-
-    ELSIF v_type = 'array' THEN
-      -- Turn array into CSV
-      SELECT string_agg(x, ',')
-        INTO v_snaptext
-      FROM jsonb_array_elements_text(v_snapcfg) AS t(x);
-
-    ELSE
-      RAISE EXCEPTION 'synchdb_conninfo[%.data->snapshottable] must be string or array, got %',
-                      p_connector_name, v_type;
-    END IF;
-
-    -- Parse the CSV list we now have in v_snaptext
+  IF use_explicit THEN
+    -- Mode A: parse CSV of db.schema.table triplets
     INSERT INTO tmp_snap_list(db, schem, tbl)
-    SELECT
-      lower((parts)[1]) AS db,
-      CASE
-        WHEN array_length(parts,1) = 3 THEN lower((parts)[2])
-        ELSE NULL
-      END AS schem,
-      CASE
-        WHEN array_length(parts,1) = 3 THEN lower((parts)[3])
-        WHEN array_length(parts,1) = 2 THEN lower((parts)[2])
-        ELSE NULL
-      END AS tbl
+    SELECT lower(parts[1]) AS db,
+           lower(parts[2]) AS schem,
+           lower(parts[3]) AS tbl
     FROM (
       SELECT regexp_split_to_array(trim(x), '\.') AS parts
-      FROM regexp_split_to_table(v_snaptext, '\s*,\s*') AS t(x)
+      FROM regexp_split_to_table(p_snapshot_tables, '\s*,\s*') AS t(x)
       WHERE trim(x) <> ''
     ) s
-    WHERE array_length(parts,1) IN (2,3);  -- enforce "db.tbl" or "db.schema.tbl"
-
-    -- Only keep items that match desired DB
-    DELETE FROM tmp_snap_list WHERE db <> lower(p_desired_db);
-
-    -- At least one usable filter row?
+    WHERE array_length(parts,1) = 3;  -- enforce 3-part names
     v_use_filter := EXISTS (SELECT 1 FROM tmp_snap_list);
+
+  ELSE
+    -- Mode B: legacy behavior using synchdb_conninfo + data->snapshottable
+    SELECT (data->>'connector')::name,
+           lower(data->>'srcdb'),
+           data->'snapshottable'
+      INTO v_conn_type, v_srcdb, v_snapcfg
+    FROM synchdb_conninfo
+    WHERE name = p_connector_name;
+
+    IF v_conn_type IS NULL OR v_conn_type = ''::name THEN
+      RAISE EXCEPTION 'synchdb_conninfo[%]: data->>connector is missing/empty', p_connector_name;
+    END IF;
+    IF v_srcdb IS NULL OR v_srcdb = '' THEN
+      RAISE EXCEPTION 'synchdb_conninfo[%]: data->>srcdb is missing/empty', p_connector_name;
+    END IF;
+
+    IF v_snapcfg IS NULL OR v_snapcfg::text = 'null' THEN
+      v_use_filter := false;  -- migrate all
+    ELSE
+      v_type := jsonb_typeof(v_snapcfg);
+
+      -- Build v_snaptext as a single comma-separated list, regardless of input shape
+      IF v_type = 'string' THEN
+        v_snaptext := trim(both '"' from v_snapcfg::text);
+        IF position('file:' IN v_snaptext) = 1 THEN
+          v_snaptext := read_snapshot_table_list(v_snaptext);
+        END IF;
+      ELSIF v_type = 'array' THEN
+        SELECT string_agg(x, ',')
+          INTO v_snaptext
+        FROM jsonb_array_elements_text(v_snapcfg) AS t(x);
+      ELSE
+        RAISE EXCEPTION 'synchdb_conninfo[%.data->snapshottable] must be string or array, got %',
+                        p_connector_name, v_type;
+      END IF;
+
+      -- Parse CSV into tmp_snap_list allowing "db.tbl" or "db.schema.tbl"
+      INSERT INTO tmp_snap_list(db, schem, tbl)
+      SELECT
+        lower((parts)[1]) AS db,
+        CASE WHEN array_length(parts,1) = 3 THEN lower((parts)[2]) ELSE NULL END AS schem,
+        CASE WHEN array_length(parts,1) = 3 THEN lower((parts)[3])
+             WHEN array_length(parts,1) = 2 THEN lower((parts)[2])
+             ELSE NULL END AS tbl
+      FROM (
+        SELECT regexp_split_to_array(trim(x), '\.') AS parts
+        FROM regexp_split_to_table(v_snaptext, '\s*,\s*') AS t(x)
+        WHERE trim(x) <> ''
+      ) s
+      WHERE array_length(parts,1) IN (2,3);
+
+      -- Keep only rows that match desired DB (legacy behavior)
+      DELETE FROM tmp_snap_list WHERE db <> lower(p_desired_db);
+
+      v_use_filter := EXISTS (SELECT 1 FROM tmp_snap_list);
+    END IF;
   END IF;
 
   -- ensure stage schema
@@ -1569,19 +1570,29 @@ BEGIN
   );
 
   IF v_use_filter THEN
-    -- Require: db == p_desired_db; table match; and IF filter item had a schema, it must equal p_desired_schema.
-    -- If the filter item had NO schema, schema match is optional (not enforced).
-    base_sql := base_sql || format(
-      ' HAVING EXISTS (
-           SELECT 1
-             FROM tmp_snap_list f
-            WHERE f.db  = %L
-              AND lower(table_name) = f.tbl
-              AND (f.schem IS NULL OR f.schem = %L)
-        )',
-      lower(p_desired_db),
-      lower(p_desired_schema)
-    );
+    IF use_explicit THEN
+      -- Match by table and (optionally) owner from the explicit list; no DB gating here
+      base_sql := base_sql || '
+        HAVING EXISTS (
+          SELECT 1
+            FROM tmp_snap_list f
+           WHERE lower(table_name) = f.tbl
+             AND (f.schem IS NULL OR lower("schema") = f.schem)
+        )';
+    ELSE
+      -- Legacy gating: require DB == p_desired_db; optional schema == p_desired_schema
+      base_sql := base_sql || format(
+        ' HAVING EXISTS (
+             SELECT 1
+               FROM tmp_snap_list f
+              WHERE f.db  = %L
+                AND lower(table_name) = f.tbl
+                AND (f.schem IS NULL OR f.schem = %L)
+          )',
+        lower(p_desired_db),
+        lower(p_desired_schema)
+      );
+    END IF;
   END IF;
 
   -- Iterate rows from the (possibly filtered) list
@@ -1611,7 +1622,7 @@ BEGIN
       END IF;
     END IF;
 
-    -- Build PG column list using your translator
+    -- Build PG column list using translator
     EXECUTE format(
       'SELECT string_agg(
                 quote_ident(%s) || '' '' ||
@@ -1636,7 +1647,6 @@ BEGIN
 
     -- Create the staging FT (snapshot or not)
     IF p_scn IS NOT NULL AND p_scn > 0 THEN
-      -- Explicit column list (stable order)
       EXECUTE format(
         'SELECT string_agg(quote_ident(c.column_name), '', '' ORDER BY c.position)
            FROM %I.columns c
@@ -1658,7 +1668,6 @@ BEGIN
       RAISE NOTICE 'Created FT %.% at SCN % -> %.% on %',
                    p_stage_schema, v_tbl_pg, p_scn::text, r.ora_owner, r.table_name, p_server_name;
     ELSE
-      -- No snapshot: point at base owner.table
       EXECUTE format(
         'CREATE FOREIGN TABLE %I.%I (%s) SERVER %I OPTIONS (schema %L, "table" %L)',
         p_stage_schema, v_tbl_pg, v_cols_sql, p_server_name, r.ora_owner, r.table_name
@@ -1669,6 +1678,7 @@ BEGIN
     END IF;
 
     -- Look up the OID of the just-created foreign table (relkind = 'f')
+    PERFORM 1; -- keep plan stable
     EXECUTE format(
       'SELECT c.oid
          FROM pg_class c
@@ -1679,20 +1689,34 @@ BEGIN
         LIMIT 1',
       p_stage_schema, v_tbl_pg
     )
-    INTO v_relid;
+    INTO STRICT v_relid;
 
-    IF v_relid IS NULL THEN
-      RAISE EXCEPTION 'Could not resolve OID for foreign table %.%', p_stage_schema, v_tbl_pg;
+    -- Determine db token for ext_tbname:
+    IF use_explicit THEN
+      SELECT f.db
+        INTO v_ext_db
+      FROM tmp_snap_list f
+      WHERE lower(f.tbl) = lower(r.table_name)
+        AND (f.schem IS NULL OR f.schem = lower(r.ora_owner))
+      LIMIT 1;
+      IF v_ext_db IS NULL THEN
+        -- Fallback (shouldn't happen if filter matched); use p_desired_db
+        v_ext_db := lower(p_desired_db::text);
+      END IF;
+    ELSE
+      v_ext_db := v_srcdb;  -- from conninfo
     END IF;
 
-    -- Build fully-qualified external table name: db.schema.table (lower)
-    v_ext_tbname := format('%s.%s.%s', v_srcdb, v_owner, lower(r.table_name));
-
+    -- Build fully-qualified external table name: db.schema.table (all lower)
+    v_tbl_name_l := lower(r.table_name);
+    -- NOTE: use metadata owner (r.ora_owner) for accuracy
+    --       db token comes from explicit list or conninfo
+    --       ext_tbname is recorded as name type, so lower-case is fine.
     -- Refresh synchdb_attribute rows for this table
     DELETE FROM public.synchdb_attribute
      WHERE name       = p_connector_name
        AND type       = v_conn_type
-       AND ext_tbname = v_ext_tbname::name;
+       AND ext_tbname = format('%s.%s.%s', v_ext_db, lower(r.ora_owner), v_tbl_name_l)::name;
 
     EXECUTE format($ins$
       INSERT INTO public.synchdb_attribute
@@ -1709,23 +1733,24 @@ BEGIN
       WHERE c."schema"   = %L
         AND c.table_name = %L
       ORDER BY c.position
-    $ins$, p_connector_name, v_conn_type, v_relid::text,
-          v_ext_tbname,
+    $ins$, p_connector_name, COALESCE(v_conn_type, 'oracle'::name), v_relid::text,
+          format('%s.%s.%s', v_ext_db, lower(r.ora_owner), v_tbl_name_l),
           p_source_schema, r.ora_owner, r.table_name);
 
     RAISE NOTICE 'Recorded % Oracle columns for %.% into synchdb_attribute (attrelid=%) as %',
                  (SELECT count(*)
                     FROM public.synchdb_attribute
                    WHERE name = p_connector_name
-                     AND type = v_conn_type
-                     AND ext_tbname = v_ext_tbname::name),
-                 r.ora_owner, r.table_name, v_relid::text, v_ext_tbname;
+                     AND type = COALESCE(v_conn_type, 'oracle'::name)
+                     AND ext_tbname = format('%s.%s.%s', v_ext_db, lower(r.ora_owner), v_tbl_name_l)::name),
+                 r.ora_owner, r.table_name, v_relid::text,
+                 format('%s.%s.%s', v_ext_db, lower(r.ora_owner), v_tbl_name_l);
 
   END LOOP;
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, name, name, boolean, text, numeric, name) IS
+COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, name, name, boolean, text, numeric, name, text) IS
    'create a staging schema, migrate table schemas with translated data types';
 
 CREATE OR REPLACE FUNCTION synchdb_materialize_schema(
@@ -2106,6 +2131,439 @@ COMMENT ON FUNCTION synchdb_apply_column_mappings(name, name, name, name) IS
    'transform column name mappings based on synchdb_objmap';
 
 CREATE OR REPLACE FUNCTION synchdb_migrate_data_with_transforms(
+    p_src_schema        name,                 -- e.g. 'ora_stage'
+    p_connector_name    name,                 -- connector for stats + objmap filter
+    p_dst_schema        name,                 -- e.g. 'psql_stage'
+    p_desired_db        name,                 -- e.g. 'free'
+    p_scn               numeric,              -- SCN used during this snapshot run
+    p_desired_schema    name DEFAULT NULL,    -- e.g. 'dbzuser'
+    p_do_truncate       boolean DEFAULT false,
+    p_rows_per_tick     integer DEFAULT 0,    -- 0/NULL = no batching; >0 = stats every N rows
+    p_continue_on_error boolean DEFAULT true,
+    p_batch_subxact     boolean DEFAULT true  -- only used when batching
+) RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  r                 record;
+  dst_list          text;
+  src_list          text;
+  v_rows            bigint;
+  v_total           bigint;
+  v_off             bigint;
+  ins_sql           text;
+
+  err_state         text;
+  err_msg           text;
+
+  v_started_at      timestamptz := now();
+
+  -- per-connector error table name, created lazily on first failure
+  v_err_tbl_ident   text;       -- 'synchdb_fdw_snapshot_errors_<connector>'
+  v_err_tbl_created boolean := false;
+
+  v_tbl_display     text;       -- db[.schema].table display name
+
+  v_err_tbl_exists  boolean;    -- for conditional delete without creating the table
+  v_err_count       bigint;     -- summary count at end
+
+  v_any_batch_failed boolean;   -- tracks data failures in batching mode
+BEGIN
+  -- sanitize connector name to identifier suffix
+  v_err_tbl_ident :=
+      'synchdb_fdw_snapshot_errors_'
+      || regexp_replace(lower(p_connector_name::text), '[^a-z0-9_]', '_', 'g');
+
+  -- helper to check if the per-connector error table already exists (in public)
+  WITH tbl AS (
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relname = v_err_tbl_ident
+    ) AS exists
+  )
+  SELECT exists INTO v_err_tbl_exists FROM tbl;
+
+  FOR r IN
+    SELECT lower(c.relname) AS tbl
+    FROM   pg_foreign_table ft
+    JOIN   pg_class        c ON c.oid = ft.ftrelid
+    JOIN   pg_namespace    n ON n.oid = c.relnamespace
+    WHERE  n.nspname = p_src_schema
+      AND  EXISTS (
+             SELECT 1
+             FROM pg_class c2
+             JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
+             WHERE n2.nspname = p_dst_schema
+               AND lower(c2.relname) = lower(c.relname)
+               AND c2.relkind = 'r'
+           )
+  LOOP
+    v_tbl_display :=
+      CASE
+        WHEN p_desired_schema IS NULL OR btrim(p_desired_schema::text) = ''
+          THEN lower(p_desired_db::text) || '.' || r.tbl
+        ELSE lower(p_desired_db::text) || '.' || lower(p_desired_schema::text) || '.' || r.tbl
+      END;
+
+    v_any_batch_failed := false;
+
+    BEGIN
+      -- Build column/expr lists
+      WITH dst_cols AS (
+        SELECT c.ordinal_position, lower(c.column_name) AS dst_col
+        FROM information_schema.columns c
+        WHERE c.table_schema = p_dst_schema
+          AND c.table_name   = r.tbl
+      ),
+      colmap AS (
+        SELECT
+          lower(split_part(m.srcobj,'.',2)) AS tbl,
+          lower(split_part(m.srcobj,'.',3)) AS src_col,
+          (regexp_split_to_array(lower(m.dstobj), '\.'))[
+            array_length(regexp_split_to_array(lower(m.dstobj), '\.'),1)
+          ] AS dst_col
+        FROM synchdb_objmap AS m
+        WHERE m.objtype='column' AND m.enabled
+          AND m.name = p_connector_name
+          AND lower(split_part(m.srcobj,'.',1)) = lower(p_src_schema)
+          AND m.dstobj IS NOT NULL AND btrim(m.dstobj) <> ''
+
+        UNION ALL
+
+        SELECT
+          CASE WHEN array_length(arr,1)=4 THEN arr[3]
+               WHEN array_length(arr,1)=3 THEN arr[2] END AS tbl,
+          arr[array_length(arr,1)]                        AS src_col,
+          (regexp_split_to_array(lower(m2.dstobj), '\.'))[
+            array_length(regexp_split_to_array(lower(m2.dstobj), '\.'),1)
+          ] AS dst_col
+        FROM (
+          SELECT regexp_split_to_array(lower(srcobj), '\.') AS arr, dstobj
+          FROM synchdb_objmap
+          WHERE objtype='column' AND enabled
+            AND name = p_connector_name
+            AND dstobj IS NOT NULL AND btrim(dstobj) <> ''
+        ) m2
+        WHERE arr[1] = lower(p_desired_db)
+          AND (
+            p_desired_schema IS NULL OR p_desired_schema = ''
+            OR array_length(arr,1)=3
+            OR arr[2] = lower(p_desired_schema)
+          )
+      ),
+      col_map AS (
+        SELECT d.ordinal_position,
+               d.dst_col,
+               COALESCE(
+                 (SELECT cm.src_col
+                    FROM colmap cm
+                   WHERE cm.tbl = r.tbl AND cm.dst_col = d.dst_col
+                   LIMIT 1),
+                 d.dst_col
+               ) AS src_col
+        FROM dst_cols d
+      ),
+      src_presence AS (
+        SELECT lower(table_name) AS tbl, lower(column_name) AS src_col
+        FROM information_schema.columns
+        WHERE table_schema = p_src_schema
+      ),
+      tmap AS (
+        SELECT
+          lower(split_part(mt.srcobj,'.',2)) AS tbl,
+          lower(split_part(mt.srcobj,'.',3)) AS src_col,
+          mt.dstobj                          AS expr
+        FROM synchdb_objmap AS mt
+        WHERE mt.objtype='transform' AND mt.enabled
+          AND mt.name = p_connector_name
+          AND lower(split_part(mt.srcobj,'.',1)) = lower(p_src_schema)
+
+        UNION ALL
+
+        SELECT
+          CASE WHEN array_length(arr,1)=4 THEN arr[3]
+               WHEN array_length(arr,1)=3 THEN arr[2] END AS tbl,
+          arr[array_length(arr,1)]                        AS src_col,
+          t.dstobj                                        AS expr
+        FROM (
+          SELECT regexp_split_to_array(lower(srcobj), '\.') AS arr, dstobj
+          FROM synchdb_objmap
+          WHERE objtype='transform' AND enabled
+            AND name = p_connector_name
+            AND dstobj IS NOT NULL AND btrim(dstobj) <> ''
+        ) t
+        WHERE arr[1] = lower(p_desired_db)
+          AND (
+            p_desired_schema IS NULL OR p_desired_schema = ''
+            OR array_length(arr,1)=3
+            OR arr[2] = lower(p_desired_schema)
+          )
+      ),
+      exprs AS (
+        SELECT
+          m.ordinal_position,
+          m.dst_col,
+          CASE
+            WHEN NOT EXISTS (
+              SELECT 1 FROM src_presence sp
+               WHERE sp.tbl = r.tbl AND sp.src_col = m.src_col
+            )
+              THEN 'NULL'
+            ELSE COALESCE(
+                   (SELECT replace(tt.expr, '%d', quote_ident(m.src_col))
+                      FROM tmap tt
+                     WHERE tt.tbl = r.tbl AND tt.src_col = m.src_col
+                     LIMIT 1),
+                   quote_ident(m.src_col)
+                 )
+          END AS src_expr
+        FROM col_map m
+      )
+      SELECT
+        string_agg(quote_ident(dst_col), ', ' ORDER BY ordinal_position),
+        string_agg(src_expr,              ', ' ORDER BY ordinal_position)
+      INTO dst_list, src_list
+      FROM exprs;
+
+      IF dst_list IS NULL OR src_list IS NULL THEN
+        RAISE NOTICE 'Skipping %.%: no column metadata', p_dst_schema, r.tbl;
+        RETURN;
+      END IF;
+
+      -- Optional truncate
+      IF p_do_truncate THEN
+        BEGIN
+          EXECUTE format('TRUNCATE %I.%I', p_dst_schema, r.tbl);
+        EXCEPTION WHEN OTHERS THEN
+          -- record failure (UPSERT)
+          IF NOT v_err_tbl_created THEN
+            EXECUTE format(
+              'CREATE TABLE IF NOT EXISTS %I.%I (
+                 connector_name name        NOT NULL,
+                 tbl            text        NOT NULL,
+                 err_state      text        NOT NULL,
+                 err_msg        text        NOT NULL,
+                 scn            numeric     NOT NULL,
+                 ts             timestamptz NOT NULL DEFAULT now(),
+                 CONSTRAINT %I UNIQUE (connector_name, tbl)
+               )',
+              'public', v_err_tbl_ident, ('uq_'||v_err_tbl_ident)
+            );
+            -- after creation, mark both flags
+            v_err_tbl_created := true;
+            v_err_tbl_exists  := true;
+          END IF;
+
+          GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE,
+                                  err_msg   = MESSAGE_TEXT;
+
+          EXECUTE format(
+            'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, scn)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (connector_name, tbl)
+             DO UPDATE SET err_state = EXCLUDED.err_state,
+                           err_msg   = EXCLUDED.err_msg,
+                           scn       = EXCLUDED.scn,
+                           ts        = now()',
+            'public', v_err_tbl_ident
+          )
+          USING p_connector_name, v_tbl_display, err_state, err_msg, p_scn;
+
+          IF NOT p_continue_on_error THEN
+            RAISE;
+          ELSE
+            RAISE WARNING 'TRUNCATE %.% failed: % [%]', p_dst_schema, r.tbl, err_msg, err_state;
+          END IF;
+        END;
+      END IF;
+
+      -- Insert path
+      IF COALESCE(p_rows_per_tick,0) <= 0 THEN
+        EXECUTE format(
+          'INSERT INTO %I.%I (%s) SELECT %s FROM %I.%I',
+          p_dst_schema, r.tbl, dst_list, src_list, p_src_schema, r.tbl
+        );
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, v_rows::bigint, 0::bigint, 0::bigint);
+        RAISE NOTICE 'Loaded %.% from %.% (rows=%)', p_dst_schema, r.tbl, p_src_schema, r.tbl, v_rows;
+
+        -- success for the whole table (non-batch): delete error row if table exists
+        IF v_err_tbl_exists THEN
+          EXECUTE format(
+            'DELETE FROM %I.%I WHERE connector_name = $1 AND tbl = $2',
+            'public', v_err_tbl_ident
+          )
+          USING p_connector_name, v_tbl_display;
+        END IF;
+
+      ELSE
+        -- Batching path
+        EXECUTE format(
+          'SELECT count(*) FROM (SELECT %s FROM %I.%I) q',
+          src_list, p_src_schema, r.tbl
+        )
+        INTO v_total;
+
+        v_off := 0;
+        WHILE v_off < v_total LOOP
+          ins_sql := format(
+            $sql$
+            INSERT INTO %I.%I (%s)
+            SELECT %s
+            FROM (
+              SELECT %s, row_number() OVER () AS rn
+              FROM %I.%I
+            ) t
+            WHERE t.rn > %s AND t.rn <= %s
+            $sql$,
+            p_dst_schema, r.tbl,
+            dst_list,
+            src_list,
+            src_list,
+            p_src_schema, r.tbl,
+            v_off, v_off + p_rows_per_tick
+          );
+
+          IF p_batch_subxact THEN
+            BEGIN
+              EXECUTE ins_sql;
+              GET DIAGNOSTICS v_rows = ROW_COUNT;
+            EXCEPTION WHEN OTHERS THEN
+              v_any_batch_failed := true;
+
+              IF NOT v_err_tbl_created THEN
+                EXECUTE format(
+                  'CREATE TABLE IF NOT EXISTS %I.%I (
+                     connector_name name        NOT NULL,
+                     tbl            text        NOT NULL,
+                     err_state      text        NOT NULL,
+                     err_msg        text        NOT NULL,
+                     scn            numeric     NOT NULL,
+                     ts             timestamptz NOT NULL DEFAULT now(),
+                     CONSTRAINT %I UNIQUE (connector_name, tbl)
+                   )',
+                  'public', v_err_tbl_ident, ('uq_'||v_err_tbl_ident)
+                );
+                v_err_tbl_created := true;
+                v_err_tbl_exists  := true;
+              END IF;
+
+              GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE,
+                                      err_msg   = MESSAGE_TEXT;
+
+              EXECUTE format(
+                'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, scn)
+                 VALUES ($1,$2,$3,$4,$5)
+                 ON CONFLICT (connector_name, tbl)
+                 DO UPDATE SET err_state = EXCLUDED.err_state,
+                               err_msg   = EXCLUDED.err_msg,
+                               scn       = EXCLUDED.scn,
+                               ts        = now()',
+                'public', v_err_tbl_ident
+              )
+              USING p_connector_name, v_tbl_display, err_state, err_msg, p_scn;
+
+              IF NOT p_continue_on_error THEN
+                RAISE;
+              ELSE
+                RAISE WARNING 'Batch insert %.% rows (%-%) failed: % [%]',
+                              p_dst_schema, r.tbl, v_off+1, v_off+p_rows_per_tick, err_msg, err_state;
+                v_rows := 0;
+              END IF;
+            END;
+          ELSE
+            EXECUTE ins_sql;
+            GET DIAGNOSTICS v_rows = ROW_COUNT;
+          END IF;
+
+          IF v_rows > 0 THEN
+            PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, v_rows::bigint, 0::bigint, 0::bigint);
+            RAISE NOTICE 'Loaded batch: %.% (+% rows, offset % / %)',
+                         p_dst_schema, r.tbl, v_rows, v_off, v_total;
+          END IF;
+
+          v_off := v_off + p_rows_per_tick;
+        END LOOP;
+
+        -- If no batch failed, delete error row for this table (if the table exists)
+        IF NOT v_any_batch_failed AND v_err_tbl_exists THEN
+          EXECUTE format(
+            'DELETE FROM %I.%I WHERE connector_name = $1 AND tbl = $2',
+            'public', v_err_tbl_ident
+          )
+          USING p_connector_name, v_tbl_display;
+        END IF;
+      END IF;
+
+    EXCEPTION
+      WHEN OTHERS THEN
+        -- record failure (UPSERT)
+        IF NOT v_err_tbl_created THEN
+          EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS %I.%I (
+               connector_name name        NOT NULL,
+               tbl            text        NOT NULL,
+               err_state      text        NOT NULL,
+               err_msg        text        NOT NULL,
+               scn            numeric     NOT NULL,
+               ts             timestamptz NOT NULL DEFAULT now(),
+               CONSTRAINT %I UNIQUE (connector_name, tbl)
+             )',
+            'public', v_err_tbl_ident, ('uq_'||v_err_tbl_ident)
+          );
+          v_err_tbl_created := true;
+          v_err_tbl_exists  := true;
+        END IF;
+
+        GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE,
+                                err_msg   = MESSAGE_TEXT;
+
+        EXECUTE format(
+          'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, scn)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (connector_name, tbl)
+           DO UPDATE SET err_state = EXCLUDED.err_state,
+                         err_msg   = EXCLUDED.err_msg,
+                         scn       = EXCLUDED.scn,
+                         ts        = now()',
+          'public', v_err_tbl_ident
+        )
+        USING p_connector_name, v_tbl_display, err_state, err_msg, p_scn;
+
+        IF NOT p_continue_on_error THEN
+          RAISE;
+        ELSE
+          RAISE WARNING 'Table %.% failed, continuing: % [%]',
+                        p_dst_schema, r.tbl, err_msg, err_state;
+        END IF;
+    END; -- end per-table subtransaction
+  END LOOP;
+
+  -- Final summary (only if we created the error table this run OR it pre-existed)
+  IF v_err_tbl_created OR v_err_tbl_exists THEN
+    EXECUTE format(
+      'SELECT count(*)
+         FROM %I.%I
+        WHERE connector_name = $1
+          AND ts >= $2',
+      'public', v_err_tbl_ident
+    )
+    INTO v_err_count
+    USING p_connector_name, v_started_at;
+
+    RAISE NOTICE 'Migration finished. Errors recorded this run: %', v_err_count;
+  ELSE
+    RAISE NOTICE 'Migration finished. No errors recorded this run.';
+  END IF;
+END;
+$$;
+
+COMMENT ON FUNCTION synchdb_migrate_data_with_transforms(name, name, name, name, numeric, name, boolean, int, boolean, boolean) IS
+   'migrate data while applying transform expressions if available - sub-transaction mode';
+
+CREATE OR REPLACE FUNCTION synchdb_migrate_data_with_transforms_nosubs(
     p_src_schema      name,                 -- e.g. 'ora_stage'
     p_connector_name  name,                 -- connector for stats + objmap filter
     p_dst_schema      name,                 -- e.g. 'psql_stage'
@@ -2329,8 +2787,8 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_migrate_data_with_transforms(name, name, name, name, name, boolean, int) IS
-   'migrate data while applying transform expressions if available';
+COMMENT ON FUNCTION synchdb_migrate_data_with_transforms_nosubs(name, name, name, name, name, boolean, int) IS
+   'migrate data while applying transform expressions if available - all or nothing mode';
 
 CREATE OR REPLACE FUNCTION synchdb_apply_table_mappings(
     p_src_schema      name,               -- e.g. 'psql_stage'
@@ -2452,6 +2910,11 @@ AS $$
 DECLARE
     v_server  text := format('%s_oracle', p_connector_name);
     r         record;
+
+	-- error table handling
+    v_err_tbl_ident    text;      -- synchdb_fdw_snapshot_errors_<sanitized connector>
+    v_err_tbl_exists   boolean;
+    v_err_count        bigint;
 BEGIN
     ----------------------------------------------------------------------
     -- 1) Drop stage schema (often contains FTs that depend on the FDW)
@@ -2510,6 +2973,42 @@ BEGIN
     ELSE
         RAISE NOTICE 'Server "%" does not exist, skipping user mappings and server drop', v_server;
     END IF;
+
+	----------------------------------------------------------------------
+    -- 6) Per-connector error table housekeeping
+    --    If table doesn't exist  -> do nothing
+    --    If exists and empty     -> drop it
+    --    If exists and non-empty -> keep it (do nothing)
+    ----------------------------------------------------------------------
+    v_err_tbl_ident :=
+        'synchdb_fdw_snapshot_errors_'
+        || regexp_replace(lower(p_connector_name::text), '[^a-z0-9_]', '_', 'g');
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname = v_err_tbl_ident
+    )
+    INTO v_err_tbl_exists;
+
+    IF v_err_tbl_exists THEN
+        EXECUTE format('SELECT count(*) FROM %I.%I', 'public', v_err_tbl_ident)
+        INTO v_err_count;
+
+        IF COALESCE(v_err_count, 0) = 0 THEN
+            RAISE NOTICE 'Dropping empty error table %.% (all snapshot errors resolved)',
+                         'public', v_err_tbl_ident;
+            EXECUTE format('DROP TABLE %I.%I', 'public', v_err_tbl_ident);
+        ELSE
+            RAISE NOTICE 'Error table %.% retained with % outstanding item(s)',
+                         'public', v_err_tbl_ident, v_err_count;
+        END IF;
+    ELSE
+        -- not present: nothing to do
+        NULL;
+    END IF;
 END;
 $$;
 
@@ -2526,7 +3025,9 @@ CREATE OR REPLACE FUNCTION synchdb_do_initial_snapshot(
     p_lookup_schema   name,               -- e.g. 'dbzuser'
     p_lower_names     boolean DEFAULT true,
     p_on_exists       text    DEFAULT 'replace',  -- 'replace' | 'drop' | 'skip'
-    p_scn             numeric DEFAULT 0           -- >0 to force a specific SCN; else auto-read
+    p_scn             numeric DEFAULT 0,          -- >0 to force a specific SCN; else auto-read
+	p_snapshot_tables text    DEFAULT null,
+	p_use_subtx         boolean DEFAULT true
 )
 RETURNS numeric
 LANGUAGE plpgsql
@@ -2591,7 +3092,8 @@ BEGIN
         p_lower_names,
         p_on_exists,
         v_effective_scn,
-        v_meta_schema
+        v_meta_schema,
+		p_snapshot_tables
     );
 
     RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
@@ -2606,9 +3108,32 @@ BEGIN
 
     RAISE NOTICE 'Step 8: Migrating data with transforms from "%" to "%" (lookup: %.% for connector %)',
                  p_stage_schema, p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
-    PERFORM synchdb_migrate_data_with_transforms(
-        p_stage_schema, p_connector_name, p_dest_schema, p_lookup_db, p_lookup_schema, false, 0
-    );
+
+    IF p_use_subtx THEN
+		-- With per-table subtransactions
+        PERFORM synchdb_migrate_data_with_transforms(
+            p_stage_schema,
+		    p_connector_name,
+		    p_dest_schema,
+		    p_lookup_db,
+		    v_effective_scn,
+		    p_lookup_schema,
+		    false, 0,
+		    true,
+		    true
+        );
+    ELSE
+        -- All-or-nothing (no subtransactions)
+        PERFORM synchdb_migrate_data_with_transforms_nosubs(
+            p_stage_schema,
+		    p_connector_name,
+		    p_dest_schema,
+		    p_lookup_db,
+		    p_lookup_schema,
+		    false,
+		    0
+	    );
+    END IF;
 
     RAISE NOTICE 'Step 9: Applying table mappings on destination schema "%" (lookup: %.% for connector %)',
                  p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
@@ -2629,7 +3154,7 @@ EXCEPTION
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_do_initial_snapshot(name, text, name, name, name, text, name, boolean, text, numeric) IS
+COMMENT ON FUNCTION synchdb_do_initial_snapshot(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean) IS
    'perform initial snapshot procedure + data transforms using a oracle_fdw server';
 
 CREATE OR REPLACE FUNCTION synchdb_do_schema_sync(
@@ -2642,7 +3167,9 @@ CREATE OR REPLACE FUNCTION synchdb_do_schema_sync(
     p_lookup_schema   name,               -- e.g. 'dbzuser'
     p_lower_names     boolean DEFAULT true,
     p_on_exists       text    DEFAULT 'replace',  -- 'replace' | 'drop' | 'skip'
-    p_scn             numeric DEFAULT 0           -- >0 to force a specific SCN; else auto-read
+    p_scn             numeric DEFAULT 0,          -- >0 to force a specific SCN; else auto-read
+	p_snapshot_tables text    DEFAULT null,
+	p_use_subtx         boolean DEFAULT true
 )
 RETURNS numeric
 LANGUAGE plpgsql
@@ -2701,12 +3228,13 @@ BEGIN
 		p_connector_name,
 		p_lookup_db,
 		p_lookup_schema,
-        p_stage_schema,
+synchdb_finalize_initial_snapshot        p_stage_schema,
         v_server_name,
         p_lower_names,
         p_on_exists,
         v_effective_scn,
-        v_meta_schema
+        v_meta_schema,
+		p_snapshot_tables
     );
 
     RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
@@ -2738,6 +3266,6 @@ EXCEPTION
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_do_schema_sync(name, text, name, name, name, text, name, boolean, text, numeric) IS
+COMMENT ON FUNCTION synchdb_do_schema_sync(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean) IS
    'perform schema only sync procedure + transforms using a oracle_fdw server - no data migration';
 
