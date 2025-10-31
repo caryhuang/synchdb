@@ -1536,7 +1536,7 @@ BEGIN
     END IF;
 
     IF v_snapcfg IS NULL OR v_snapcfg::text = 'null' THEN
-      v_use_filter := false;  -- migrate all
+      v_use_filter := false;  -- migrate all (but we'll still restrict by p_desired_schema below)
     ELSE
       v_type := jsonb_typeof(v_snapcfg);
 
@@ -1581,18 +1581,20 @@ BEGIN
   EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', p_stage_schema);
 
   ----------------------------------------------------------------------
-  -- Base table list from metadata; optionally restrict by tmp_snap_list
+  -- Base table list from metadata; now RESTRICT to p_desired_schema
   ----------------------------------------------------------------------
   base_sql := format(
     'SELECT "schema" AS ora_owner, table_name
-       FROM %I.columns
+       FROM %1$I.columns
+      WHERE upper("schema") = upper(%2$L)
       GROUP BY "schema", table_name',
-    p_source_schema
+    p_source_schema,
+    p_desired_schema::text
   );
 
   IF v_use_filter THEN
     IF use_explicit THEN
-      -- Match by table and (optionally) owner from the explicit list; no DB gating here
+      -- Match by table and (optionally) owner from the explicit list; still within desired schema
       base_sql := base_sql || '
         HAVING EXISTS (
           SELECT 1
@@ -1601,7 +1603,7 @@ BEGIN
              AND (f.schem IS NULL OR lower("schema") = f.schem)
         )';
     ELSE
-      -- Legacy gating: require DB == p_desired_db; optional schema == p_desired_schema
+      -- Legacy gating: require DB == p_desired_db and (optionally) exact schema match in tmp list
       base_sql := base_sql || format(
         ' HAVING EXISTS (
              SELECT 1
@@ -1770,15 +1772,6 @@ BEGIN
 
   ----------------------------------------------------------------------
   -- Snapshot-retry cleanup:
-  -- If (a) we were called with an explicit retry list AND
-  --    (b) the per-connector error table exists,
-  -- then delete error rows for tables that no longer exist in Oracle.
-  --
-  -- We compute:
-  --   requested_full = {db.schema.table} from p_snapshot_tables
-  --   existing_full  = {db.schema.table} that still appear in %I.columns
-  --   dropped_full   = requested_full - existing_full
-  -- and prune rows in the error table whose tbl ∈ dropped_full.
   ----------------------------------------------------------------------
   IF use_explicit AND v_err_tbl_exists THEN
     -- requested_full
