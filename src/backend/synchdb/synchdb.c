@@ -115,9 +115,9 @@ int olr_read_buffer_size = 128;	/* in MB */
 int dbz_logminer_stream_mode = LOGMINER_MODE_UNCOMMITTED;
 int olr_connect_timeout_ms = 5000;
 int olr_read_timeout_ms = 5000;
-int olr_snapshot_engine = ENGINE_DEBEZIUM;
+int synchdb_snapshot_engine = ENGINE_DEBEZIUM;
 int cdc_start_delay_ms = 0;
-bool fdw_use_subtx = true;
+bool synchdb_fdw_use_subtx = true;
 
 static const struct config_enum_entry error_strategies[] =
 {
@@ -192,12 +192,14 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 		const ExtraConnectionInfo * extraConnInfo, const OLRConnectionInfo * olrConnInfo,
 		const IspnInfo * ispnInfo);
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
-#ifdef WITH_OLR
 static void is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * snapshot, bool * cdc);
+#ifdef WITH_OLR
 static void try_reconnect_olr(ConnectionInfo * connInfo);
 static int olr_set_offset_from_raw(char * offsetdata);
 #endif
-
+static bool dbz_read_snapshot_state(ConnectorType type, const char * offset);
+static int populate_debezium_metadata(const char * name, ConnectorType connectorType,
+		orascn scn, const char * dstdb, const char * srcdb);
 /*
  * count_active_connectors
  *
@@ -1610,18 +1612,42 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 			elog(DEBUG1, "restart dbz engine...");
 
 			/*
-			 * always resumes to initial mode for safety reasons. Users can use the restart
-			 * routine to switch to a different snapshot mode as needed
+			 * we are using debezium based snapshot engine, we should always start
+			 * debezium to allow it to resume or retry whatever it needs to do
 			 */
-			ret = dbz_engine_start(connInfo, type, "initial");
-			if (ret < 0)
+			if (connInfo->snapengine == ENGINE_DEBEZIUM)
 			{
-				elog(WARNING, "Failed to restart dbz engine");
-				reset_shm_request_state(connectorId);
-				pfree(reqcopy);
-				pfree(currstatecopy);
-				return;
+				ret = dbz_engine_start(connInfo, type, "initial");
+				if (ret < 0)
+				{
+					elog(WARNING, "Failed to restart dbz engine");
+					reset_shm_request_state(connectorId);
+					pfree(reqcopy);
+					pfree(currstatecopy);
+					return;
+				}
 			}
+			else if (connInfo->snapengine == ENGINE_FDW)
+			{
+				/*
+				 * for fdw based snapshot, we can only start debezium to resume CDC
+				 * once we have successfully done with the fdw based initial snapshot
+				 */
+				if ((connInfo->flag & (CONNFLAG_SCHEMA_SYNC_MODE |
+						CONNFLAG_INITIAL_SNAPSHOT_MODE)) == 0 )
+				{
+					ret = dbz_engine_start(connInfo, type, "initial");
+					if (ret < 0)
+					{
+						elog(WARNING, "Failed to restart dbz engine");
+						reset_shm_request_state(connectorId);
+						pfree(reqcopy);
+						pfree(currstatecopy);
+						return;
+					}
+				}
+			}
+
 			set_shm_connector_state(connectorId, STATE_SYNCING);
 		}
 	}
@@ -1658,7 +1684,7 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 		{
 			/* derive offset file*/
 			snprintf(offsetfile, MAX_PATH_LENGTH, SYNCHDB_OFFSET_FILE_PATTERN,
-					get_shm_connector_name(type), connInfo->name, connInfo->srcdb);
+					get_shm_connector_name(type), connInfo->name, connInfo->dstdb);
 
 			set_shm_connector_state(connectorId, STATE_OFFSET_UPDATE);
 			ret = dbz_engine_set_offset(type, srcdb, reqcopy->reqdata, offsetfile);
@@ -1982,6 +2008,175 @@ start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInf
 }
 
 /*
+ * populate_debezium_metadata - Create debezium metadata file based on current conditions
+ *
+ * This function populates a schema history file by reading the schema_history_{} table
+ * and an offset file derived from the input argument. (Oracle connector only for now).
+ *
+ * @param name: The name of the connector
+ * @param connectorType: The type of connector
+ * @param scn: the scn value to build the offset
+ * @param dstdb: destination database name
+ */
+static int
+populate_debezium_metadata(const char * name, ConnectorType connectorType,
+		orascn scn, const char * dstdb, const char * srcdb)
+{
+	int ret = -1;
+	jmethodID createoffsets;
+	char * offsetstr = NULL;
+	jstring joffsetstr, jdb, jfile;
+	jthrowable exception;
+	char * sql = NULL;
+	char * offsetfile = psprintf(SYNCHDB_OFFSET_FILE_PATTERN,
+			get_shm_connector_name(connectorType), name, dstdb);
+	char * schemahistoryfile = psprintf(SYNCHDB_SCHEMA_FILE_PATTERN,
+			get_shm_connector_name(connectorType), name, dstdb);
+
+	if (connectorType != TYPE_ORACLE)
+	{
+		elog(WARNING, "only debezium oracle connector type can populate metadata (for now)");
+		goto end;
+	}
+
+	if (!jvm)
+	{
+		elog(WARNING, "jvm not initialized");
+		goto end;
+	}
+
+	if (!env)
+	{
+		elog(WARNING, "jvm env not initialized");
+		goto end;
+	}
+
+	/* Find the createOffsetFile method */
+	createoffsets = (*env)->GetMethodID(env, cls, "createOffsetFile",
+									 "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
+	if (createoffsets == NULL)
+	{
+		elog(WARNING, "Failed to find createoffsets method");
+		goto end;
+	}
+
+	/* Create Java strings from C strings */
+	offsetstr = psprintf("{\"commit_scn\":\"%llu\",\"snapshot_scn\":\"%llu\",\"scn\":\"%llu\"}", scn+1, scn, scn);
+	joffsetstr = (*env)->NewStringUTF(env, offsetstr);
+	jdb = (*env)->NewStringUTF(env, srcdb);
+	jfile = (*env)->NewStringUTF(env, offsetfile);
+
+	/* Call the Java method */
+	(*env)->CallVoidMethod(env, obj, createoffsets, jfile, (int)connectorType, jdb, joffsetstr);
+
+	/* Check for exceptions */
+	exception = (*env)->ExceptionOccurred(env);
+	if (exception)
+	{
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		elog(WARNING, "Exception occurred while creating connector offset");
+		goto end;
+	}
+
+	/* populate schema history file */
+	ret = dump_schema_history_to_file(name, schemahistoryfile);
+	if (ret)
+	{
+		elog(WARNING, "Failed to populate schema history file %s",
+				schemahistoryfile);
+		return -1;
+	}
+
+	/* after schema history file is populated we can drop the source schema history table */
+	sql = psprintf("DROP TABLE IF EXISTS schema_history_%s", name);
+	ra_executeCommand(sql);
+	pfree(sql);
+
+	ret = 0;
+end:
+	if (offsetfile)
+		pfree(offsetfile);
+
+	if (schemahistoryfile)
+		pfree(schemahistoryfile);
+
+	pfree(offsetstr);
+	(*env)->DeleteLocalRef(env, joffsetstr);
+	(*env)->DeleteLocalRef(env, jdb);
+	(*env)->DeleteLocalRef(env, jfile);
+
+	return ret;
+}
+
+/*
+ * dbz_read_snapshot_state
+ *
+ * This function determines if initial snapshot has been completed based
+ * on offset information
+ *
+ * @param connectorType: The type of connector
+ * @param offset: current offset of the connector
+ * @param isSnapshotDone: whether or not snapshot has been done - set and returned as output
+ */
+static bool
+dbz_read_snapshot_state(ConnectorType type, const char * offset)
+{
+	if (!offset)
+		return false;
+
+	switch(type)
+	{
+		case TYPE_ORACLE:
+		{
+			if (offset && (!strcasecmp(offset, "no offset") ||
+					!strcasecmp(offset, "offset file not flushed yet")))
+			{
+				/* no offset available - assuming snapshot is not done */
+				elog(WARNING, "offset file absent. Assuming snapshot is not done...");
+				return false;
+			}
+			else
+			{
+				/*
+				 * if all 3 of these are present, that means debezium has already
+				 * been in CDC stage, so we can assume that initial snapshot has
+				 * been completed.
+				 */
+				if (strstr(offset, "commit_scn") &&
+					strstr(offset, "snapshot_scn") &&
+					strstr(offset, "scn"))
+				{
+					return true;
+				}
+
+				/*
+				 * snapshot is also considered done if debezium explicitly said
+				 * it is completed
+				 */
+				if (strstr(offset, "\"snapshot_completed\":true"))
+				{
+					return true;
+				}
+			}
+			break;
+		}
+		case TYPE_MYSQL:
+		case TYPE_SQLSERVER:
+		case TYPE_OLR:
+		default:
+		{
+			set_shm_connector_errmsg(myConnectorId, "unsupported connector type"
+					" to read snapshot status");
+			elog(ERROR, "unsupported connector type %d to read snapshot status",
+					type);
+			break;
+		}
+	}
+	return false;
+}
+
+/*
  * main_loop - Main processor of SynchDB connector worker
  *
  * This function continuously fetches change requests from Debezium runner and
@@ -1998,6 +2193,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 	bool dbzExitSignal = false;
 	BatchInfo myBatchInfo = {0};
 	SynchdbStatistics myBatchStats = {0};
+	orascn dbz_ora_resume_scn = 0;	/* used by FDW based snapshot for oracle connector */
 
 	elog(LOG, "Main LOOP ENTER ");
 	while (!ShutdownRequestPending)
@@ -2025,30 +2221,127 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 			{
 				if (connectorType != TYPE_OLR)
 				{
-					/* continuously poll change events via Debezium */
-					/* reset batchinfo and batchStats*/
-					myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
-					myBatchInfo.batchSize = 0;
-					memset(&myBatchStats, 0, sizeof(myBatchStats));
-
-					dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
-							&myBatchInfo, &myBatchStats,
-							connInfo->flag);
-
-					/*
-					 * if a valid batchid is set by dbz_engine_get_change(), it means we have
-					 * successfully completed a batch change request and we shall notify dbz
-					 * that it's been completed.
-					 */
-					if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
+					if (((connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE) ||
+						(connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)) &&
+						connInfo->snapengine == ENGINE_FDW &&
+						connectorType == TYPE_ORACLE)
 					{
-						dbz_mark_batch_complete(myBatchInfo.batchId);
+						/*
+						 * FDW based snapshot and schema only sync processing logics here.
+						 * Only Oracle connector is supported for now. May extend to support
+						 * other connector types in the future.
+						 */
+						orascn scn_req = 0;
+						orascn scn_res = 0;
+						int ret = -1, ntables = 0;
+						char * tbl_list = NULL;
 
-						/* increment batch connector statistics */
-						increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+						dbz_ora_resume_scn = 0;
+						ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &scn_req);
 
-						/* update the batch statistics to shared memory */
-						set_shm_connector_statistics(myConnectorId, &myBatchStats);
+					    if (ntables > 0 && tbl_list != NULL)
+					    {
+					    	elog(WARNING, "Retry on failed snapshot tables %s as of %llu for %s",
+					    			tbl_list, scn_req, connInfo->name);
+					    }
+
+						if (connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE)
+						{
+							if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
+								set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+						}
+						else
+						{
+							if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+								set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+						}
+
+						/* invoke initial snapshot or schema sync PL/pgSQL workflow with schema history requested */
+					    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list,
+					    		scn_req, synchdb_fdw_use_subtx, true);
+						if (scn_res > 0)
+						{
+							/* initial snapshot is considered completed */
+							elog(WARNING, "oracle_fdw based snapshot is done with scn %lld", scn_res);
+
+							/* clean tbl_list if needed */
+							if (tbl_list != NULL)
+							{
+								pfree(tbl_list);
+								tbl_list = NULL;
+							}
+
+							ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &scn_req);
+							if (ret != 0 || ntables == 0 || tbl_list == NULL)
+							{
+								/*
+								 * all tables succeeded! remember the value of scn_res, this value is required to
+								 * build debezium metadata to resume CDC after FDW snapshot has been done.
+								 */
+								dbz_ora_resume_scn = scn_res;
+
+								/* change the state to STATE_SCHEMA_SYNC_DONE to handle the transition */
+								set_shm_connector_state(myConnectorId, STATE_SCHEMA_SYNC_DONE);
+							}
+							else
+							{
+								/* some tables have failed... */
+								elog(WARNING, "oracle_fdw based snapshot is done with errors: failed tables are: %s",
+										tbl_list);
+
+								set_shm_connector_state(myConnectorId, STATE_PAUSED);
+								set_shm_connector_errmsg(myConnectorId, "some tables have failed the snapshot. "
+										"Check synchdb_fdw_snapshot_errors_x tables for datails. "
+										"Resume connector to try again");
+
+								if (tbl_list != NULL)
+									pfree(tbl_list);
+							}
+						}
+						else
+						{
+							elog(WARNING, "oracle_fdw based snapshot is not successfully done");
+
+							/* clean tbl_list if needed */
+							if (tbl_list != NULL)
+								pfree(tbl_list);
+
+							set_shm_connector_state(myConnectorId, STATE_PAUSED);
+							set_shm_connector_errmsg(myConnectorId, "oracle_fdw based snapshot "
+									"is not successfully done - connector paused for troubleshooting. "
+									"Send resume command to try again");
+						}
+					}
+					else
+					{
+						/* Debezium based snapshot, schema and CDC processing logics here */
+
+						myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
+						myBatchInfo.batchSize = 0;
+						memset(&myBatchStats, 0, sizeof(myBatchStats));
+
+						dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
+								&myBatchInfo, &myBatchStats,
+								connInfo->flag);
+
+						/*
+						 * if a valid batchid is set by dbz_engine_get_change(), it means we have
+						 * successfully completed a batch change request and we shall notify dbz
+						 * that it's been completed.
+						 */
+						if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
+						{
+							dbz_mark_batch_complete(myBatchInfo.batchId);
+
+							/* increment batch connector statistics */
+							increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
+
+							/* update the batch statistics to shared memory */
+							set_shm_connector_statistics(myConnectorId, &myBatchStats);
+
+							/* update offset for displaying to user */
+							set_shm_dbz_offset(myConnectorId);
+						}
 					}
 				}
 #ifdef WITH_OLR
@@ -2057,7 +2350,8 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 					if ((connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE) ||
 						(connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE))
 					{
-						/* initial snapshot needed */
+						/* initial snapshot processing logics here */
+
 						if (connInfo->snapengine == ENGINE_DEBEZIUM)
 						{
 							/* continuously poll changes from debezium engine */
@@ -2110,8 +2404,9 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 									set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
 							}
 
-							/* invoke initial snapshot or schema sync PL/pgSQL workflow - OLR only */
-						    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list, scn_req, fdw_use_subtx);
+							/* invoke initial snapshot or schema sync PL/pgSQL workflow without schema history*/
+						    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list,
+						    		scn_req, synchdb_fdw_use_subtx, false);
 							if (scn_res > 0)
 							{
 								/* initial snapshot is considered completed */
@@ -2167,6 +2462,8 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 					}
 					else
 					{
+						/* Openlog Replicator based CDC processing logics here */
+
 						int ret = -1;
 						bool sendconfirm = false;
 
@@ -2183,7 +2480,6 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						/* check if connection is still alive */
 						if (olr_client_get_connect_status())
 						{
-							/* todo: support different snapshot mode */
 							memset(&myBatchStats, 0, sizeof(myBatchStats));
 							ret = olr_client_get_change(myConnectorId, &dbzExitSignal, &myBatchStats,
 									&sendconfirm);
@@ -2252,7 +2548,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						connInfo->flag &= ~CONNFLAG_SCHEMA_SYNC_MODE;
 						set_shm_connector_state(myConnectorId, STATE_PAUSED);
 
-						/* remove the snapshot flag as well if set, so cdc resume at next iteration */
+						/* remove the snapshot flag as well if set, so cdc can commence when resumed */
 						if ((connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE))
 							connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
 
@@ -2317,28 +2613,75 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 				else
 #endif
 				{
-					/* exit schema sync mode if set and enter pause state */
+					/* exit schema sync mode if set and enter pause state - takes precedence */
 					if ((connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE))
 					{
 						connInfo->flag &= ~CONNFLAG_SCHEMA_SYNC_MODE;
 						set_shm_connector_state(myConnectorId, STATE_PAUSED);
-					}
 
-					/*
-					 * when schema sync is done, we will put connector into pause state so the user
-					 * can review the table schema and attribute mappings before proceeding.
-					 */
-					elog(DEBUG1, "shut down dbz engine...");
-					if (dbz_engine_stop())
-					{
-						elog(WARNING, "failed to stop dbz engine...");
-					}
+						/* remove the snapshot flag as well if set, so cdc can commence when resumed */
+						if ((connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE))
+							connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
 
-					/* change snapshot mode back to normal */
-					if (snapshotMode)
+						/* set the stage to change data capture */
+						set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+
+						/*
+						 * when schema sync is done, we will put connector into pause state so the user
+						 * can review the table schema and attribute mappings before proceeding.
+						 */
+						elog(DEBUG1, "shut down dbz engine...");
+						if (dbz_engine_stop())
+						{
+							elog(WARNING, "failed to stop dbz engine...");
+						}
+
+						/*
+						 * if this round of schema sync is done via the FDW, we need to populate
+						 * the metadata for debezium to resume CDC
+						 */
+						if (connInfo->snapengine == ENGINE_FDW &&
+								connectorType == TYPE_ORACLE)
+						{
+							populate_debezium_metadata(connInfo->name, connectorType, dbz_ora_resume_scn,
+														connInfo->dstdb, connInfo->srcdb);
+						}
+					}
+					else
 					{
-						pfree(snapshotMode);
-						snapshotMode = pstrdup("initial");
+						/* exit initial snapshot mode if set and resume syncing state */
+						if ((connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE))
+						{
+							connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
+							set_shm_connector_state(myConnectorId, STATE_SYNCING);
+
+							/* post fdw-snapshot: populate metadata for debezium to resume CDC */
+							populate_debezium_metadata(connInfo->name, connectorType, dbz_ora_resume_scn,
+									connInfo->dstdb, connInfo->srcdb);
+
+							/* change snapshot mode back to normal */
+							if (snapshotMode)
+							{
+								pfree(snapshotMode);
+								snapshotMode = pstrdup("initial");
+							}
+
+							/* clear error messages */
+							set_shm_connector_errmsg(myConnectorId, NULL);
+
+							/*
+							 * if cdc_start_delay_ms is set > 0, we need to delay here before the
+							 * next iteration, which will begin the CDC process
+							 */
+							if (cdc_start_delay_ms > 0)
+								usleep(cdc_start_delay_ms * 1000);
+
+							/* start debezium now */
+							start_debezium_engine(connectorType, connInfo, snapshotMode);
+						}
+
+						/* set the stage to change data capture */
+						set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 					}
 				}
 				break;
@@ -2907,8 +3250,15 @@ set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats)
 
 	/* the following should be overwritten \n */
 	if (stats->snapstats.snapstats_begintime_ts > 0)
+	{
 		sdb_state->connectors[connectorId].stats.snapstats.snapstats_begintime_ts =
 				stats->snapstats.snapstats_begintime_ts;
+		/*
+		 * when begintime_ts is set, we assume it is the beginning of a snapshot, so
+		 * we set endtime_ts to 0 to indicate a fresh start.
+		 */
+		sdb_state->connectors[connectorId].stats.snapstats.snapstats_endtime_ts = 0;
+	}
 	if (stats->snapstats.snapstats_endtime_ts > 0)
 		sdb_state->connectors[connectorId].stats.snapstats.snapstats_endtime_ts =
 				stats->snapstats.snapstats_endtime_ts;
@@ -2939,7 +3289,6 @@ set_shm_connector_snapshot_statistics(int connectorId, SnapshotStatistics * snap
 	LWLockRelease(&sdb_state->lock);
 }
 
-#ifdef WITH_OLR
 static void
 is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * snapshot, bool * cdc)
 {
@@ -2976,7 +3325,7 @@ is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * sna
 		*cdc = true;
 	}
 }
-
+#ifdef WITH_OLR
 static void
 try_reconnect_olr(ConnectionInfo * connInfo)
 {
@@ -3643,10 +3992,10 @@ _PG_init(void)
 							0,
 							NULL, NULL, NULL);
 
-	DefineCustomEnumVariable("synchdb.olr_snapshot_engine",
+	DefineCustomEnumVariable("synchdb.snapshot_engine",
 							"engine used to complete initial snapshot for OLR connector",
 							 NULL,
-							 &olr_snapshot_engine,
+							 &synchdb_snapshot_engine,
 							 ENGINE_DEBEZIUM,
 							 snapshot_engines,
 							 PGC_SIGHUP,
@@ -3669,7 +4018,7 @@ _PG_init(void)
 	DefineCustomBoolVariable("synchdb.fdw_migrate_with_subtx",
 							 "whether or not to use subtransaction for per table migration",
 							 NULL,
-							 &fdw_use_subtx,
+							 &synchdb_fdw_use_subtx,
 							 true,
 							 PGC_SIGHUP,
 							 0,
@@ -3765,8 +4114,69 @@ synchdb_engine_main(Datum main_arg)
 		memset(sdb_state->connectors[myConnectorId].dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
 		set_shm_dbz_offset(myConnectorId);
 
-		/* start Debezium engine */
-		start_debezium_engine(connectorType, &connInfo, snapshotMode);
+		/* set the desired snapshot engine */
+		connInfo.snapengine = synchdb_snapshot_engine;
+
+		if (connInfo.snapengine == ENGINE_DEBEZIUM)
+		{
+			/*
+			 * All debezium based connectors support debezium-based snapshot,
+			 * so, just launch debezium and let it take care of everything in
+			 * the main_loop. Debezium knows whether or not a snapshot has
+			 * been done before or needs to do again.
+			 */
+			start_debezium_engine(connectorType, &connInfo, snapshotMode);
+		}
+		else if (connInfo.snapengine == ENGINE_FDW)
+		{
+			/*
+			 * Only Oracle and OLR connectors support FDW based snapshot at this
+			 * moment. We may expand to support other connectors in the future.
+			 * The FDW based snapshot is handled entirely by synchdb so we need
+			 * to find out if a snapshot has been done before, either via FDW or
+			 * via Debezium, so we can signal main_loop correctly if FDW snapshot
+			 * is required.
+			 */
+			if (connectorType != TYPE_ORACLE)
+			{
+				/* none-Oracle connectors, just start Debezium */
+				start_debezium_engine(connectorType, &connInfo, snapshotMode);
+			}
+			else
+			{
+				/* Oracle connectors with FDW snapshot. Check if it is required. */
+				const char * curroffset = get_shm_dbz_offset(myConnectorId);
+				bool isSnapshotDone = false;
+				bool snapshot = false, cdc = false;;
+
+				isSnapshotDone = dbz_read_snapshot_state(connectorType, curroffset);
+				is_snapshot_cdc_needed(snapshotMode, isSnapshotDone, &snapshot, &cdc);
+
+				elog(WARNING,"snapshot mode %s: isSnapshotDone %d, snapshot %d, cdc %d",
+						snapshotMode, isSnapshotDone, snapshot, cdc);
+
+				/* xxx set no cdc flag if requested - does it apply here?? */
+				if (!cdc)
+					connInfo.flag |= CONNFLAG_NO_CDC_MODE;
+
+				if (snapshot)
+				{
+					/*
+					 * indicate to main_loop that we want to do initial snapshot
+					 * via FDW by ourselves and not use debezium engine.
+					 */
+					connInfo.flag |= CONNFLAG_INITIAL_SNAPSHOT_MODE;
+
+					/* set to the right state */
+					set_shm_connector_state(myConnectorId, STATE_SYNCING);
+				}
+				else
+				{
+					/* snapshot already done, start debezium and resume CDC normally */
+					start_debezium_engine(connectorType, &connInfo, snapshotMode);
+				}
+			}
+		}
 
 		elog(LOG, "Going to main loop .... ");
 		main_loop(connectorType, &connInfo, snapshotMode);
@@ -3778,7 +4188,7 @@ synchdb_engine_main(Datum main_arg)
 		bool snapshot = false, cdc = false;
 
 		/* set the desired snapshot engine */
-		connInfo.snapengine = olr_snapshot_engine;
+		connInfo.snapengine = synchdb_snapshot_engine;
 
 		if (!olr_client_read_snapshot_state(connectorType, connInfo.name,
 				connInfo.dstdb, &isSnapshotDone))
@@ -3791,13 +4201,13 @@ synchdb_engine_main(Datum main_arg)
 		elog(WARNING,"snapshot mode %s: isSnapshotDone %d, snapshot %d, cdc %d",
 				snapshotMode, isSnapshotDone, snapshot, cdc);
 
-		/* set no cdc flag is requested */
+		/* set no cdc flag if requested */
 		if (!cdc)
 			connInfo.flag |= CONNFLAG_NO_CDC_MODE;
 
 		if (snapshot)
 		{
-			/* indiate to main_loop that we need to do initial snapshot */
+			/* indicate to main_loop that we need to do initial snapshot */
 			connInfo.flag |= CONNFLAG_INITIAL_SNAPSHOT_MODE;
 
 			/* start JVM if needed */

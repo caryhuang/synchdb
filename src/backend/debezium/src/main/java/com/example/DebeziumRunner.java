@@ -1218,6 +1218,37 @@ public class DebeziumRunner {
         }
     }
 
+	public void createOffsetFile(String filename, int type, String db, String value)
+	{
+		File out = new File(filename);
+
+		/* Build the Debezium FileOffsetBackingStore key - must align with ones in setConnectorOffset() */
+		final String key;
+		switch (type)
+		{
+			case TYPE_MYSQL:
+			case TYPE_ORACLE:
+				/* Debezium key for mysql/oracle doesn’t include database */
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
+				break;
+			case TYPE_SQLSERVER:
+				/* SQL Server includes the database name */
+				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
+				break;
+			default:
+				throw new IllegalArgumentException("Unsupported connector type: " + type);
+		}
+
+		Map<byte[], byte[]> map = new HashMap<>();
+		map.put(key.getBytes(StandardCharsets.US_ASCII),
+				value.getBytes(StandardCharsets.US_ASCII));
+
+		/* Write serialized HashMap<byte[],byte[]> */
+		writeOffsetFile(out, map);
+
+		logger.info("Created new Debezium offset file at" + out.getAbsolutePath() + " with 1 entry with value " + value);
+	}
+
 	public void jvmMemDump()
 	{
 		checkMemoryStatus();

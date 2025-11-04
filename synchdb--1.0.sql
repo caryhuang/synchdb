@@ -1426,16 +1426,17 @@ COMMENT ON FUNCTION synchdb_create_current_scn_ft(name, name) IS
    'create Oracle foreign tables for current scn';
 
 CREATE OR REPLACE FUNCTION synchdb_create_ora_stage_fts(
-    p_connector_name name,                               -- connector name for attribute rows
-    p_desired_db     name,                               -- db token to match entries in snapshottable
-    p_desired_schema name,                               -- schema to match when entry includes schema
-    p_stage_schema   name DEFAULT 'ora_stage'::name,     -- target schema in Postgres
-    p_server_name    name DEFAULT 'oracle'::name,        -- oracle_fdw server name
-    p_lower_names    boolean DEFAULT true,               -- lower-case PG table/column names
-    p_on_exists      text DEFAULT 'replace',             -- 'replace' | 'drop' | 'skip'
-    p_scn            numeric DEFAULT 0,                  -- >0 => use AS OF SCN subquery
-    p_source_schema  name DEFAULT 'ora_obj'::name,       -- metadata source schema (…columns)
-    p_snapshot_tables text DEFAULT NULL                  -- CSV of db.schema.table; when set, bypass conninfo
+    p_connector_name        name,                         -- connector name for attribute rows
+    p_desired_db            name,                         -- db token to match entries in snapshottable
+    p_desired_schema        name,                         -- schema to match when entry includes schema
+    p_stage_schema          name DEFAULT 'ora_stage'::name, -- target schema in Postgres
+    p_server_name           name DEFAULT 'oracle'::name,  -- oracle_fdw server name
+    p_lower_names           boolean DEFAULT true,         -- lower-case PG table/column names
+    p_on_exists             text DEFAULT 'replace',       -- 'replace' | 'drop' | 'skip'
+    p_scn                   numeric DEFAULT 0,            -- >0 => use AS OF SCN subquery
+    p_source_schema         name DEFAULT 'ora_obj'::name, -- metadata source schema (…columns)
+    p_snapshot_tables       text DEFAULT NULL,            -- CSV of db.schema.table; when set, bypass conninfo
+    p_write_dbz_schema_info boolean DEFAULT false         -- when true, store Debezium schema-history JSON
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -1463,7 +1464,18 @@ DECLARE
   v_tbl_name_l   text;
   v_relid        oid;
 
-  -- error table vars (existence check only; we do NOT create/insert here)
+  -- JSON construction vars
+  v_pk_json      jsonb;
+  v_cols_json    jsonb;
+  v_table_obj    jsonb;
+  v_change_obj   jsonb;
+  v_msg_json     jsonb;
+  v_ts_ms        bigint;
+
+  -- per-connector schema-history table name (sanitized)
+  v_schema_tbl   text;
+
+  -- error table vars (existence check only)
   v_err_tbl_ident  text;
   v_err_tbl_exists boolean := false;
 BEGIN
@@ -1473,6 +1485,26 @@ BEGIN
     INTO has_oracle_fdw;
   IF NOT has_oracle_fdw THEN
     RAISE EXCEPTION 'oracle_fdw is not installed. Run: CREATE EXTENSION oracle_fdw;';
+  END IF;
+
+  ----------------------------------------------------------------------
+  -- Prepare per-connector schema-history table (if requested)
+  ----------------------------------------------------------------------
+  IF p_write_dbz_schema_info THEN
+    v_schema_tbl :=
+      format('schema_history_%s',
+             regexp_replace(lower(p_connector_name::text), '[^a-z0-9_]', '_', 'g'));
+
+    -- single-column table: line TEXT
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS %I.%I (
+         line  text NOT NULL
+       )',
+      'public', v_schema_tbl
+    );
+
+    -- truncate at start so each run produces a clean set
+    EXECUTE format('TRUNCATE TABLE %I.%I', 'public', v_schema_tbl);
   END IF;
 
   ----------------------------------------------------------------------
@@ -1768,10 +1800,96 @@ BEGIN
                  r.ora_owner, r.table_name, v_relid::text,
                  format('%s.%s.%s', v_ext_db, lower(r.ora_owner), v_tbl_name_l);
 
+    ------------------------------------------------------------------
+    -- Build, log, and store Debezium schema-history JSON (if enabled)
+    ------------------------------------------------------------------
+    IF p_write_dbz_schema_info THEN
+      -- current time in ms
+      v_ts_ms := FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000);
+
+      -- primary key column names as JSON array
+      EXECUTE format(
+        'SELECT COALESCE(jsonb_agg(k.column_name ORDER BY k.position), ''[]''::jsonb)
+           FROM %I.keys k
+          WHERE k."schema" = %L
+            AND k.table_name = %L
+            AND k.is_primary IS TRUE',
+        p_source_schema, r.ora_owner, r.table_name
+      )
+      INTO v_pk_json;
+
+      -- columns JSON array
+      EXECUTE format($SQL$
+        SELECT jsonb_agg(
+                 jsonb_build_object(
+                   'name',            c.column_name,
+                   'jdbcType',        oracle_type_to_jdbc(lower(c.type_name)),
+                   'typeName',        upper(c.type_name),
+                   'typeExpression',  upper(c.type_name),
+                   'charsetName',     NULL,
+                   'length',          COALESCE(c.length, 0),
+                   'position',        c.position,
+                   'optional',        COALESCE(c.nullable, TRUE),
+                   'autoIncremented', FALSE,
+                   'generated',       FALSE,
+                   'comment',         NULL,
+                   'hasDefaultValue', (c.default_value IS NOT NULL),
+                   'enumValues',      '[]'::jsonb
+                 )
+                 ORDER BY c.position
+               )
+          FROM %1$I.columns c
+         WHERE c."schema" = %2$L
+           AND c.table_name = %3$L
+      $SQL$, p_source_schema, r.ora_owner, r.table_name)
+      INTO v_cols_json;
+
+      v_table_obj := jsonb_build_object(
+        'defaultCharsetName', NULL,
+        'primaryKeyColumnNames', COALESCE(v_pk_json, '[]'::jsonb),
+        'columns', COALESCE(v_cols_json, '[]'::jsonb)
+      );
+
+      v_change_obj := jsonb_build_object(
+        'type', 'CREATE',
+        'id', format('"%s"."%s"."%s"',
+                     upper(p_desired_db::text),
+                     upper(p_desired_schema::text),
+                     upper(r.table_name)),
+        'table', v_table_obj,
+        'comment', NULL
+      );
+
+      v_msg_json := jsonb_build_object(
+        'source',   jsonb_build_object('server', 'synchdb-connector'),
+        'position', jsonb_build_object(
+                       'snapshot_scn',       p_scn::text,
+                       'snapshot',           TRUE,
+                       'scn',                p_scn::text,
+                       'snapshot_completed', TRUE
+                     ),
+        'ts_ms', v_ts_ms,
+        'databaseName', upper(p_desired_db::text),
+        'schemaName',   upper(p_desired_schema::text),
+        'ddl', '',
+        'tableChanges', jsonb_build_array(v_change_obj)
+      );
+
+      -- log for visibility
+      -- RAISE WARNING '%', v_msg_json::text;
+
+      -- store one JSON line per table
+      EXECUTE format(
+        'INSERT INTO %I.%I(line) VALUES ($1)',
+        'public', v_schema_tbl
+      )
+      USING v_msg_json::text;
+    END IF;
+
   END LOOP;
 
   ----------------------------------------------------------------------
-  -- Snapshot-retry cleanup:
+  -- Snapshot-retry cleanup (unchanged):
   ----------------------------------------------------------------------
   IF use_explicit AND v_err_tbl_exists THEN
     -- requested_full
@@ -1815,7 +1933,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, name, name, boolean, text, numeric, name, text) IS
+COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, name, name, boolean, text, numeric, name, text, boolean) IS
    'create a staging schema, migrate table schemas with translated data types';
 
 CREATE OR REPLACE FUNCTION synchdb_materialize_schema(
@@ -3092,7 +3210,8 @@ CREATE OR REPLACE FUNCTION synchdb_do_initial_snapshot(
     p_on_exists       text    DEFAULT 'replace',  -- 'replace' | 'drop' | 'skip'
     p_scn             numeric DEFAULT 0,          -- >0 to force a specific SCN; else auto-read
 	p_snapshot_tables text    DEFAULT null,
-	p_use_subtx         boolean DEFAULT true
+	p_use_subtx         boolean DEFAULT true,
+	p_write_schema_hist boolean	DEFAULT false
 )
 RETURNS numeric
 LANGUAGE plpgsql
@@ -3158,7 +3277,8 @@ BEGIN
         p_on_exists,
         v_effective_scn,
         v_meta_schema,
-		p_snapshot_tables
+		p_snapshot_tables,
+		p_write_schema_hist
     );
 
     RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
@@ -3219,7 +3339,7 @@ EXCEPTION
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_do_initial_snapshot(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean) IS
+COMMENT ON FUNCTION synchdb_do_initial_snapshot(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean, boolean) IS
    'perform initial snapshot procedure + data transforms using a oracle_fdw server';
 
 CREATE OR REPLACE FUNCTION synchdb_do_schema_sync(
@@ -3234,7 +3354,8 @@ CREATE OR REPLACE FUNCTION synchdb_do_schema_sync(
     p_on_exists       text    DEFAULT 'replace',  -- 'replace' | 'drop' | 'skip'
     p_scn             numeric DEFAULT 0,          -- >0 to force a specific SCN; else auto-read
 	p_snapshot_tables text    DEFAULT null,
-	p_use_subtx         boolean DEFAULT true
+	p_use_subtx         boolean DEFAULT true,
+	p_write_schema_hist boolean	DEFAULT false
 )
 RETURNS numeric
 LANGUAGE plpgsql
@@ -3293,13 +3414,14 @@ BEGIN
 		p_connector_name,
 		p_lookup_db,
 		p_lookup_schema,
-synchdb_finalize_initial_snapshot        p_stage_schema,
+		p_stage_schema,
         v_server_name,
         p_lower_names,
         p_on_exists,
         v_effective_scn,
         v_meta_schema,
-		p_snapshot_tables
+		p_snapshot_tables,
+		p_write_schema_hist
     );
 
     RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
@@ -3331,6 +3453,113 @@ EXCEPTION
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_do_schema_sync(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean) IS
+COMMENT ON FUNCTION synchdb_do_schema_sync(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean, boolean) IS
    'perform schema only sync procedure + transforms using a oracle_fdw server - no data migration';
+
+CREATE OR REPLACE FUNCTION oracle_type_to_jdbc(ora_type_text text)
+RETURNS integer
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+  t    text;      -- normalized input
+  base text;      -- base type token(s)
+  m    text[];    -- regex match for (...) args
+BEGIN
+  -- Normalize: trim, compress spaces, uppercase, strip quotes
+  t := regexp_replace(upper(btrim(ora_type_text)), '\s+', ' ', 'g');
+  t := replace(replace(t, '"', ''), '''', '');
+
+  -- Multi-word TZ types FIRST (match full text)
+  IF t LIKE 'TIMESTAMP% WITH TIME ZONE%' THEN
+    RETURN -101;     -- OracleTypes.TIMESTAMPTZ
+  ELSIF t LIKE 'TIMESTAMP% WITH LOCAL TIME ZONE%' THEN
+    RETURN -102;     -- OracleTypes.TIMESTAMPLTZ
+  ELSIF t LIKE 'INTERVAL YEAR% TO MONTH%' THEN
+    RETURN -103;     -- OracleTypes.INTERVALYM
+  ELSIF t LIKE 'INTERVAL DAY% TO SECOND%' THEN
+    RETURN -104;     -- OracleTypes.INTERVALDS
+  END IF;
+
+  -- Extract base token before any ( ... ) or trailing qualifiers
+  m := regexp_match(t, '^([A-Z ]+)\s*\(');
+  IF m IS NOT NULL THEN
+    base := btrim(m[1]);
+  ELSE
+    base := t;
+  END IF;
+
+  -- Switch on base (single-word & simple multi-word that remain)
+  CASE base
+    -- Numeric family (Debezium sets NUMBER/DECIMAL/NUMERIC → Types.NUMERIC)
+    WHEN 'NUMBER', 'DECIMAL', 'NUMERIC', 'INT', 'INTEGER', 'SMALLINT' THEN
+      RETURN 2;          -- java.sql.Types.NUMERIC
+
+    -- Floating family
+    WHEN 'BINARY_FLOAT' THEN
+      RETURN 100;        -- OracleTypes.BINARY_FLOAT
+    WHEN 'BINARY_DOUBLE' THEN
+      RETURN 101;        -- OracleTypes.BINARY_DOUBLE
+    WHEN 'FLOAT' THEN
+      RETURN 6;          -- java.sql.Types.FLOAT
+    WHEN 'DOUBLE' THEN
+      -- In Debezium grammar DOUBLE PRECISION maps to FLOAT (length set separately)
+      RETURN 6;          -- java.sql.Types.FLOAT
+    WHEN 'REAL' THEN
+      RETURN 6;          -- Debezium maps REAL → FLOAT too
+
+    -- Date/Time (Oracle JDBC reports DATE as TIMESTAMP)
+    WHEN 'DATE' THEN
+      RETURN 93;         -- java.sql.Types.TIMESTAMP
+    WHEN 'TIMESTAMP' THEN
+      RETURN 93;         -- java.sql.Types.TIMESTAMP
+
+    -- Character family
+    WHEN 'CHAR', 'CHARACTER' THEN
+      RETURN 1;          -- CHAR
+    WHEN 'NCHAR' THEN
+      RETURN -15;        -- NCHAR
+    WHEN 'VARCHAR2', 'VARCHAR' THEN
+      RETURN 12;         -- VARCHAR
+    WHEN 'NVARCHAR2', 'NVARCHAR' THEN
+      RETURN -9;         -- NVARCHAR
+	WHEN 'LONG' THEN
+	  RETURN -1;         -- LONG
+
+    -- LOBs
+    WHEN 'BLOB' THEN
+      RETURN 2004;       -- BLOB
+    WHEN 'CLOB' THEN
+      RETURN 2005;       -- CLOB
+    WHEN 'NCLOB' THEN
+      RETURN 2011;       -- NCLOB
+    WHEN 'BFILE' THEN
+      RETURN -13;        -- OracleTypes.BFILE
+
+    -- Binary
+    WHEN 'RAW' THEN
+      RETURN -3;         -- OracleTypes.RAW (maps to BINARY)
+    WHEN 'LONG RAW' THEN
+      RETURN -4;         -- LONGVARBINARY
+
+    -- Rowid (Debezium code sets ROWID → VARCHAR)
+    WHEN 'ROWID', 'UROWID' THEN
+      RETURN -8;         -- VARCHAR
+
+    -- XML / Spatial / Other
+    WHEN 'XMLTYPE' THEN
+      RETURN 2009;       -- SQLXML (fall back to 1111 if your driver lacks it)
+    WHEN 'SDO_GEOMETRY' THEN
+      RETURN 1111;       -- OTHER
+
+    -- 23ai BOOLEAN (if encountered)
+    WHEN 'BOOLEAN' THEN
+      RETURN 16;         -- java.sql.Types.BOOLEAN
+
+    ELSE
+      RETURN 1111;       -- OTHER (catch-all for unrecognized)
+  END CASE;
+END;
+$$;
 
