@@ -10,8 +10,9 @@ jobs:
     runs-on: ubuntu-22.04
     name: Initialize parameters
     outputs:
-      pg16_version: '{ "major": "16", "full": "REL_16_4" }'
-      pg17_version: '{ "major": "17", "full": "REL_17_4" }'
+      pg16_version: '{ "major": "16", "full": "REL_16_9" }'
+      pg17_version: '{ "major": "17", "full": "REL_17_6" }'
+      pg18_version: '{ "major": "18", "full": "REL_18_0" }'
     steps:
       - name: set up parameters
         run: echo 'noop'
@@ -23,6 +24,7 @@ jobs:
         pg_version:
           - ${{ needs.params.outputs.pg16_version }}
           - ${{ needs.params.outputs.pg17_version }}
+          - ${{ needs.params.outputs.pg18_version }}
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v2
@@ -62,6 +64,7 @@ jobs:
         pg_version:
           - ${{ needs.params.outputs.pg16_version }}
           - ${{ needs.params.outputs.pg17_version }}
+          - ${{ needs.params.outputs.pg18_version }}
         dbtypes:
           - mysql
           - oracle
