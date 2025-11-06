@@ -51,7 +51,16 @@ function build_synchdb()
         	./configure --prefix=${installdir}/usr/local && \
         	make && \
         	make install
+	
 	)
+
+	git clone https://github.com/laurenz/oracle_fdw.git --branch ORACLE_FDW_2_8_0 postgres/contrib/oracle_fdw
+	(
+		cd postgres/contrib/oracle_fdw && \
+			make PG_CONFIG=${installdir}/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+			make install PG_CONFIG=${installdir}/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+	)
+
 
 	mkdir -p postgres/contrib/synchdb
 	rsync -a --delete \
