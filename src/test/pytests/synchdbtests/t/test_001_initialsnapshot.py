@@ -85,7 +85,7 @@ def test_ConnectorStart(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
 
-def test_InitialSnapshot(pg_cursor, dbvendor):
+def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
     
@@ -219,9 +219,28 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     assert int(pgrow[3]) == int(extrow[0][3])
     assert int(pgrow[4]) == int(extrow[0][4])
 
+    # test cdc now
+    query = """
+        INSERT INTO orders(order_number, order_date, purchaser, quantity,
+        product_id) VALUES (10005, TO_DATE('2025-12-12', 'YYYY-MM-DD'),
+        1002, 10000, 102);
+    """
+    
+    run_remote_query(dbvendor, query)
+    if dbvendor == "oracle" or dbvendor == "olr":
+        time.sleep(30)
+    else:
+        time.sleep(10)
+
+    pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM {dbname}.orders WHERE order_number = 10005")
+    assert pgrow != None
+    assert int(pgrow[3]) == 10000
+
+    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number = 10005")
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+
 
 def test_ConnectorStartSchemaSyncMode(pg_cursor, dbvendor):
     assert True
