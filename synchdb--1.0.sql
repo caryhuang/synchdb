@@ -1619,6 +1619,7 @@ BEGIN
     'SELECT "schema" AS ora_owner, table_name
        FROM %1$I.columns
       WHERE upper("schema") = upper(%2$L)
+	    AND lower(table_name) <> ''log_mining_flush''
       GROUP BY "schema", table_name',
     p_source_schema,
     p_desired_schema::text

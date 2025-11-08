@@ -1,4 +1,4 @@
-
+import os
 import subprocess
 import socket
 import time
@@ -317,3 +317,17 @@ def drop_default_pg_schema(cursor, vendor):
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS testdb CASCADE")
     else:
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS free CASCADE")
+
+def update_guc_conf(cursor, key, val, reload_conf=False):
+    temp_dir = "synchdb_testdir"
+    data_dir = os.path.join(temp_dir, "data")
+    conf_file = os.path.join(data_dir, "postgresql.conf")
+
+    # Append parameter
+    with open(conf_file, "a") as f:
+        f.write(f"\n{key} = {val}\n")
+
+    # Apply changes if requested
+    if reload_conf:
+        cursor.execute("SELECT pg_reload_conf()")
+

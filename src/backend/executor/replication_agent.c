@@ -1386,7 +1386,7 @@ destroyPGDML(PG_DML * dmlinfo)
 orascn
 ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 		const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx,
-		bool write_schema_hist)
+		bool write_schema_hist, const char * snapshotMode)
 {
 	int ret = -1, i = 0;
 	bool isnull = false;
@@ -1397,7 +1397,8 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE] = {0};
 	char scn_buf[64] = {0};
 
-	const char *sql = (flag & CONNFLAG_SCHEMA_SYNC_MODE) ?
+	const char *sql = (flag & CONNFLAG_SCHEMA_SYNC_MODE) ||
+			!strcasecmp(snapshotMode, "no_data")?
 			"SELECT synchdb_do_schema_sync("
 			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
 			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"

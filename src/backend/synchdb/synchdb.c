@@ -2258,7 +2258,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 
 						/* invoke initial snapshot or schema sync PL/pgSQL workflow with schema history requested */
 					    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list,
-					    		scn_req, synchdb_fdw_use_subtx, true);
+					    		scn_req, synchdb_fdw_use_subtx, true, snapshotMode);
 						if (scn_res > 0)
 						{
 							/* initial snapshot is considered completed */
@@ -2406,7 +2406,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 
 							/* invoke initial snapshot or schema sync PL/pgSQL workflow without schema history*/
 						    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list,
-						    		scn_req, synchdb_fdw_use_subtx, false);
+						    		scn_req, synchdb_fdw_use_subtx, false, snapshotMode);
 							if (scn_res > 0)
 							{
 								/* initial snapshot is considered completed */

@@ -39,6 +39,18 @@ jobs:
       uses: stCarolas/setup-maven@v4.5
       with:
         maven-version: 3.9.8
+    - name: Setup Oracle Instant Client v23.9
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/oci && cd $GITHUB_WORKSPACE/oci
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-basic-linux.x64-23.9.0.25.07.zip
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        unzip -q instantclient-basic-linux.x64-23.9.0.25.07.zip
+        unzip -q -o instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        echo "OCI_HOME=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
+        echo "OCI_LIB_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
+        echo "OCI_INC_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9/sdk/include" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/oci/instantclient_23_9:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+        echo "$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_PATH
     - name: Install Protobuf
       run: |
         sudo apt-get update
@@ -116,6 +128,18 @@ jobs:
         sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
         sudo apt-get install -y docker-compose
         docker-compose --version
+    - name: Setup Oracle Instant Client v23.9
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/oci && cd $GITHUB_WORKSPACE/oci
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-basic-linux.x64-23.9.0.25.07.zip
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        unzip -q instantclient-basic-linux.x64-23.9.0.25.07.zip
+        unzip -q -o instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        echo "OCI_HOME=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
+        echo "OCI_LIB_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
+        echo "OCI_INC_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9/sdk/include" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/oci/instantclient_23_9:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+        echo "$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_PATH
     - name: Install Protobuf
       run: |
         sudo apt-get update
