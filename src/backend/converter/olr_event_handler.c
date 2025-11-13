@@ -40,7 +40,7 @@ extern char * g_eventStr;
 
 /* Oracle raw parser function prototype */
 typedef List * (*oracle_raw_parser_fn)(const char *str, RawParseMode mode);
-static oracle_raw_parser_fn oracle_raw_parser = NULL;
+static oracle_raw_parser_fn synchdb_oracle_raw_parser = NULL;
 static void * handle = NULL;
 
 static char * strtoupper(const char *input);
@@ -497,7 +497,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	/* Parse the Oracle SQL */
 	PG_TRY();
 	{
-		ptree = oracle_raw_parser(sql.data, RAW_PARSE_DEFAULT);
+		ptree = synchdb_oracle_raw_parser(sql.data, RAW_PARSE_DEFAULT);
 	}
 	PG_CATCH();
 	{
@@ -653,7 +653,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 								ddlcol->optional = false;
 							}
 							else
-								elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+								elog(WARNING, "unsupported constraint type %d", constr->contype);
 						}
 					}
 					olrddl->columns = lappend(olrddl->columns, ddlcol);
@@ -822,7 +822,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 									ddlcol->optional = false;
 								}
 								else
-									elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+									elog(WARNING, "unsupported constraint type %d", constr->contype);
 							}
 
 							if (pklist.len > 1)	/* longer than '[' */
@@ -989,7 +989,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						}
 						else
 						{
-							elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+							elog(WARNING, "unsupported constraint type %d", constr->contype);
 						}
 						break;
 					}
@@ -1068,7 +1068,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 				}
 			}
 			else
-				elog(DEBUG1, "unsupported drop type %d", dropStmt->removeType);
+				elog(WARNING, "unsupported drop type %d", dropStmt->removeType);
 		}
 		else if (IsA(stmt, TruncateStmt))
 		{
@@ -1110,10 +1110,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 		}
 		else
 		{
-			if (synchdb_log_event_on_error && g_eventStr != NULL)
-				elog(LOG, "%s", g_eventStr);
-
-			elog(WARNING, "unsupported stmt type: %d ",  nodeTag(stmt));
+			elog(DEBUG1, "unsupported stmt type: %d ",  nodeTag(stmt));
 			destroyOLRDDL(olrddl);
 			olrddl = NULL;
 			goto end;
@@ -2192,7 +2189,7 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 		increment_connector_statistics(myBatchStats, STATS_DDL, 1);
 
 		/* (1) make sure oracle parser is ready to use - todo move earlier */
-		if (oracle_raw_parser == NULL)
+		if (synchdb_oracle_raw_parser == NULL)
 		{
 			char * oralib_path = NULL, * error = NULL;
 
@@ -2211,14 +2208,14 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 			}
 			pfree(oralib_path);
 
-			oracle_raw_parser = (oracle_raw_parser_fn) dlsym(handle, "oracle_raw_parser");
+			synchdb_oracle_raw_parser = (oracle_raw_parser_fn) dlsym(handle, "synchdb_oracle_raw_parser");
 			if ((error = dlerror()) != NULL)
 			{
-				set_shm_connector_errmsg(myConnectorId, "failed to load oracle_raw_parser symbol");
+				set_shm_connector_errmsg(myConnectorId, "failed to load synchdb_oracle_raw_parser symbol");
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("failed to load oracle_raw_parser function symbol"),
-						 errhint("make sure oracle_raw_parser() function in oracle_parser.so is "
+						 errmsg("failed to load synchdb_oracle_raw_parser function symbol"),
+						 errhint("make sure synchdb_oracle_raw_parser() function in libsynchdb_oracle_parser.so is "
 								 "publicly accessible ")));
 			}
 		}

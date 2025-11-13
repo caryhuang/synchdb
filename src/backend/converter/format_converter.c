@@ -2492,6 +2492,19 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 					}
 					break;
 				}
+#ifdef WITH_OLR
+				case OLRTYPE_NUMBER:
+				{
+					/* OLR represents date as nanoseconds since epoch*/
+					if (strstr(colval->typname, "date"))
+						out = handle_numeric_to_date(in, addquote, TIME_NANOTIMESTAMP);
+					else if (strstr(colval->typname, "timestamp"))
+						out = handle_numeric_to_timestamp(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
+					else
+						out = handle_numeric_to_time(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
+					break;
+				}
+#endif
 				default:
 				{
 					if (strstr(colval->typname, "date"))
@@ -2561,6 +2574,14 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 						out = pstrdup(in);
 					break;
 				}
+#ifdef WITH_OLR
+				case OLRTYPE_NUMBER:
+				{
+					/* oracle number represented as interval - usd nanoseconds */
+					out = handle_numeric_to_interval(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
+					break;
+				}
+#endif
 				default:
 				{
 					out = handle_numeric_to_interval(in, addquote, colval->timerep, colval->typemod);

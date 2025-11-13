@@ -71,10 +71,8 @@ olr_client_start_or_cont_replication(char * source, bool which)
 			OPEN_LOG_REPLICATOR__PB__REQUEST_CODE__CONTINUE;
 	request.database_name = source;
 	request.tm_val_case = OPEN_LOG_REPLICATOR__PB__REDO_REQUEST__TM_VAL_SCN;
-	request.scn = olr_client_get_scn() == 0 ? olr_client_get_scn() :
-			olr_client_get_scn() + 1;
-	request.c_scn = olr_client_get_c_scn() == 0 ? olr_client_get_c_scn() :
-			olr_client_get_c_scn() + 1; /* resume beyond last know c_scn */
+	request.scn = olr_client_get_scn();
+	request.c_scn = olr_client_get_c_scn();
 
 	elog(WARNING, "requested scn %lu c_scn %lu, nschema %ld",
 			request.scn, request.c_scn, request.n_schema);

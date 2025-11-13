@@ -68,7 +68,7 @@
 
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
 #define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
-#define ORACLE_RAW_PARSER_LIB "liboracle_parser.so"
+#define ORACLE_RAW_PARSER_LIB "libsynchdb_oracle_parser.so"
 #define MAX_PATH_LENGTH 1024
 #define MAX_JAVA_OPTION_LENGTH 256
 #define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_%s_offsets.dat"
@@ -447,5 +447,6 @@ ConnectorType get_shm_connector_type_enum(int connectorId);
 ConnectorStage get_shm_connector_stage_enum(int connectorId);
 void increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics which, int incby);
 ConnectorType stringToConnectorType(const char * type);
+bool get_shm_ora_compat(int connectorId);
 
 #endif /* SYNCHDB_SYNCHDB_H_ */

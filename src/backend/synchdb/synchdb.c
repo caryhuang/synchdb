@@ -1844,6 +1844,7 @@ setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char 
 	if (conninfo->isOraCompat)
 	{
 		SetConfigOption("ivorysql.compatible_mode", "oracle", PGC_USERSET, PGC_S_OVERRIDE);
+		SetConfigOption("ivorysql.identifier_case_switch", "normal", PGC_USERSET, PGC_S_OVERRIDE);
 		elog(LOG,"IvorySQL Oracle compatible mode enabled");
 	}
 
@@ -3723,6 +3724,22 @@ get_shm_connector_user_by_id(int connectorId)
 
 	return (sdb_state->connectors[connectorId].conninfo.user[0] != '\0') ?
 			sdb_state->connectors[connectorId].conninfo.user : "no user";
+}
+
+/*
+ * get_shm_ora_compat - check if we are running against oracle compatible ivorysql
+ *
+ * This method returns true if we are in oracle compatible mode, false otherwise
+ *
+ * @param connectorId: Connector ID of interest
+ */
+bool
+get_shm_ora_compat(int connectorId)
+{
+	if (!sdb_state)
+		return false;
+
+	return sdb_state->connectors[connectorId].conninfo.isOraCompat;
 }
 
 /*
