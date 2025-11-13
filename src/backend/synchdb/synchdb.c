@@ -2257,9 +2257,25 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 								set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
 						}
 
+						/*
+						 * the fdw initial snapshot scripts are written according to pg parsing
+						 * standard, so we need to temporarily change to pg compatible mode for
+						 * the duration of the fdw snapshot
+						 */
+						if (connInfo->isOraCompat)
+						{
+							SetConfigOption("ivorysql.compatible_mode", "pg", PGC_USERSET, PGC_S_OVERRIDE);
+						}
+
 						/* invoke initial snapshot or schema sync PL/pgSQL workflow with schema history requested */
 					    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list,
 					    		scn_req, synchdb_fdw_use_subtx, true, snapshotMode);
+
+					    if (connInfo->isOraCompat)
+					    {
+					    	SetConfigOption("ivorysql.compatible_mode", "oracle", PGC_USERSET, PGC_S_OVERRIDE);
+					    }
+
 						if (scn_res > 0)
 						{
 							/* initial snapshot is considered completed */
@@ -2405,9 +2421,25 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 									set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
 							}
 
+							/*
+							 * the fdw initial snapshot scripts are written according to pg parsing
+							 * standard, so we need to temporarily change to pg compatible mode for
+							 * the duration of the fdw snapshot
+							 */
+							if (connInfo->isOraCompat)
+							{
+								SetConfigOption("ivorysql.compatible_mode", "pg", PGC_USERSET, PGC_S_OVERRIDE);
+							}
+
 							/* invoke initial snapshot or schema sync PL/pgSQL workflow without schema history*/
 						    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list,
 						    		scn_req, synchdb_fdw_use_subtx, false, snapshotMode);
+
+						    if (connInfo->isOraCompat)
+						    {
+								SetConfigOption("ivorysql.compatible_mode", "oracle", PGC_USERSET, PGC_S_OVERRIDE);
+						    }
+
 							if (scn_res > 0)
 							{
 								/* initial snapshot is considered completed */
