@@ -6,7 +6,7 @@ SynchDB is a dual-language module, combining Java (for utilizing Debezium Embedd
 
 ### Supported PostgreSQL Versions
 * PostgreSQL: 16, 17, 18
-* IvorySQL: 4, 5
+* IvorySQL: 3, 4, 5
 
 ### Supported Source Databases
 * MySQL: 8.0.x, 8.2
@@ -38,7 +38,7 @@ The following software is required to build and run SynchDB. The versions listed
 
 * libprotobuf-c v1.5.2. Refer to [here](https://github.com/protobuf-c/protobuf-c.git) to build from source.
 
-**The following is required if you would like to use FDW based snapshot (Oracle and Openlog Replicator Connectors only)**
+**The following is required if you would like to use FDW based snapshot**
 * OCI v23.9.0. Refer to [here](https://docs.synchdb.com/user-guide/configure_snapshot_engine/) for more information
 * oracle_fdw v2.8.0. Refer to [here](https://github.com/laurenz/oracle_fdw) to build from source
 
@@ -74,7 +74,7 @@ git clone https://github.com/Hornetlabs/synchdb.git
 
 **Build and Install PostgreSQL from Source**
 
-This can be done by following the standard build and install procedure as described [here](https://www.postgresql.org/docs/current/install-make.html). SynchDB requires PostgreSQL to be built with OpenSSL support.
+This can be done by following the standard build and install procedure as described [here](https://www.postgresql.org/docs/current/install-make.html).
 
 ``` BASH
 cd /home/$USER/postgres
