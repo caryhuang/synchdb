@@ -6,7 +6,7 @@ SynchDB is a dual-language module, combining Java (for utilizing Debezium Embedd
 
 ### Supported PostgreSQL Versions
 * PostgreSQL: 16, 17, 18
-* IvorySQL: 4, 5
+* IvorySQL: 3, 4, 5
 
 ### Supported Source Databases
 * MySQL: 8.0.x, 8.2
@@ -38,12 +38,29 @@ The following software is required to build and run SynchDB. The versions listed
 
 * libprotobuf-c v1.5.2. Refer to [here](https://github.com/protobuf-c/protobuf-c.git) to build from source.
 
-**The following is required if you would like to use FDW based snapshot (Oracle and Openlog Replicator Connectors only)**
+**The following is required if you would like to use FDW based snapshot**
 * OCI v23.9.0. Refer to [here](https://docs.synchdb.com/user-guide/configure_snapshot_engine/) for more information
 * oracle_fdw v2.8.0. Refer to [here](https://github.com/laurenz/oracle_fdw) to build from source
 
 ## Build Procedure
-### Prepare Source (Using 16.3 as example)
+
+### Default SynchDB Build - Support MySQL, SQLServer and Oracle Connectors
+
+If you already have PostgreSQL installed, you can build and install Default SynchDB with PGXS. Please note that your PostgreSQL installation must have pgcrypto extension as required by SynchDB.
+
+``` BASH
+USE_PGXS=1 make PG_CONFIG=$(which pg_config)
+USE_PGXS=1 make build_dbz PG_CONFIG=$(which pg_config)
+
+sudo USE_PGXS=1 make PG_CONFIG=$(which pg_config) install
+sudo USE_PGXS=1 make install_dbz PG_CONFIG=$(which pg_config)
+```
+
+### Build SynchDB with Openlog Replicator Connector Support
+
+To build Synchdb with Openlog Replicator Connector support, an additional `Synchdb Oracle Parser` component must be built as well. This component is based on IvorySQL's Oracle Parser, modified to suit SynchDB and it requires PostgreSQL backend source codes to build successfully. Here's the procedure:
+
+**Prepare Source (Using 16.3 as example)**
 
 ``` BASH
 # Clone the PostgreSQL source and switch to 16.3 release tag
@@ -55,8 +72,9 @@ cd contrib/
 git clone https://github.com/Hornetlabs/synchdb.git
 ```
 
-### Build and Install PostgreSQL from Source
-This can be done by following the standard build and install procedure as described [here](https://www.postgresql.org/docs/current/install-make.html). SynchDB requires PostgreSQL to be built with OpenSSL support.
+**Build and Install PostgreSQL from Source**
+
+This can be done by following the standard build and install procedure as described [here](https://www.postgresql.org/docs/current/install-make.html).
 
 ``` BASH
 cd /home/$USER/postgres
@@ -66,30 +84,15 @@ sudo make install
 
 ```
 
-You should build and install the default extensions as well. SynchDB requires pgcrypto to be installed as it uses its cipher utilties
+**Build pgcrypto as required by SynchDB**
 
 ``` BASH
-cd /home/$USER/postgres/contrib
+cd /home/$USER/postgres/contrib/pgcrypto
 make
 sudo make install
 ```
 
-### Build SynchDB
-This is the default build procedure, supporting MySQL, SQLServer and Oracle connectors.
-
-``` BASH
-# build and install debezium runner
-cd /home/$USER/postgres/contrib/synchdb
-make build_dbz
-sudo make install_dbz
-
-# build and install synchdb
-make
-sudo make install
-```
-
-### Build SynchDB with Openlog Replicator Connector Support
-This is the optional build procesure, which adds additional Openlog Replicator (for Oracle) connector support.
+**Build SynchDB with Additional Openlog Replicator Connector Support**
 
 ``` BASH
 # build and install debezium runner
