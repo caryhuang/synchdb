@@ -5,8 +5,8 @@ SynchDB is a PostgreSQL extension designed for fast and reliable data replicatio
 SynchDB is a dual-language module, combining Java (for utilizing Debezium Embedded connectors) and C (for interacting with PostgreSQL core) components, and requires the Java Virtual Machine (JVM) and Java Native Interface (JNI) to operate together.
 
 ### Supported PostgreSQL Versions
-* PostgreSQL: 16, 17
-* IvorySQL: 4
+* PostgreSQL: 16, 17, 18
+* IvorySQL: 4, 5
 
 ### Supported Source Databases
 * MySQL: 8.0.x, 8.2
@@ -34,9 +34,12 @@ The following software is required to build and run SynchDB. The versions listed
 * Docker compose 2.28.1 (for testing). Refer to [here](https://docs.docker.com/compose/install/linux/)
 * Unix based operating system like Ubuntu 22.04 or MacOS
 
-**The following is required if Openlog Replicator Connector Support is enabled in build**
+**The following is required if Openlog Replicator Connector is enabled in build**
 
 * libprotobuf-c v1.5.2. Refer to [here](https://github.com/protobuf-c/protobuf-c.git) to build from source.
+
+**The following is required if you would like to use FDW based snapshot (Oracle and Openlog Replicator Connectors only)**
+* OCI v23.9.0. Refer to [here](https://docs.synchdb.com/user-guide/configure_snapshot_engine/) for more information
 * oracle_fdw v2.8.0. Refer to [here](https://github.com/laurenz/oracle_fdw) to build from source
 
 ## Build Procedure
@@ -234,8 +237,8 @@ postgres=# select * from synchdb_state_view;
 ---------------+--------------------+--------+---------------------+---------+----------+------------------------------------------------------------------------------------------------------
  sqlserverconn | sqlserver          | 579820 | change data capture | polling | no error | {"commit_lsn":"0000006a:00006608:0003","snapshot":true,"snapshot_completed":false}
  mysqlconn     | mysql              | 579845 | change data capture | polling | no error | {"ts_sec":1741301103,"file":"mysql-bin.000009","pos":574318212,"row":1,"server_id":223344,"event":2}
- oracleconn    | oracle             | 580053 | change data capture | polling | no error | offset file not flushed yet
- olrconn       | openlog_replicator | 121673 | change data capture | polling | no error | {"scn":8367394, "c_scn":8367394}
+ oracleconn    | oracle             | 580053 | change data capture | polling | no error | {"commit_scn":"2311579","snapshot_scn":"2311578","scn":"2311578"}
+ olrconn       | olr                | 121673 | change data capture | polling | no error | {"scn":2362817, "c_scn":2362820, "c_idx":4}
 (4 rows)
 
 ```
