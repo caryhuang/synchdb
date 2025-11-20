@@ -30,6 +30,7 @@ extern int myConnectorId;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 extern HTAB * dataCacheHash;
+extern int synchdb_letter_casing_strategy;
 
 static DdlType name_to_ddltype(const char * name);
 static DbzType getDbzTypeFromString(const char * typestring);
@@ -354,9 +355,11 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
     	return NULL;
     }
 
-    /* once we are done checking ddlinfo->id, we turn it to lowercase */
-	for (j = 0; j < strlen(ddlinfo->id); j++)
-		ddlinfo->id[j] = (char) pg_tolower((unsigned char) ddlinfo->id[j]);
+//    /* once we are done checking ddlinfo->id, we turn it to lowercase */
+//	for (j = 0; j < strlen(ddlinfo->id); j++)
+//		ddlinfo->id[j] = (char) pg_tolower((unsigned char) ddlinfo->id[j]);
+
+    fc_normalize_name(synchdb_letter_casing_strategy, ddlinfo->id, strlen(ddlinfo->id));
 
     if (ddlinfo->type == DDL_CREATE_TABLE || ddlinfo->type == DDL_ALTER_TABLE)
     {
@@ -493,9 +496,12 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->name = pstrdup(value);
 
-						/* convert typeName to lowercase for consistency */
-						for (j = 0; j < strlen(ddlcol->name); j++)
-							ddlcol->name[j] = (char) pg_tolower(ddlcol->name[j]);
+//						/* convert typeName to lowercase for consistency */
+//						for (j = 0; j < strlen(ddlcol->name); j++)
+//							ddlcol->name[j] = (char) pg_tolower(ddlcol->name[j]);
+
+						fc_normalize_name(synchdb_letter_casing_strategy, ddlcol->name,
+								strlen(ddlcol->name));
 					}
 					if (!strcmp(key, "length"))
 					{
@@ -517,9 +523,12 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->typeName = pstrdup(value);
 
-						/* convert typeName to lowercase for consistency */
-						for (j = 0; j < strlen(ddlcol->typeName); j++)
-							ddlcol->typeName[j] = (char) pg_tolower(ddlcol->typeName[j]);
+//						/* convert typeName to lowercase for consistency */
+//						for (j = 0; j < strlen(ddlcol->typeName); j++)
+//							ddlcol->typeName[j] = (char) pg_tolower(ddlcol->typeName[j]);
+						/* data type names always normalized to lower case */
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->typeName,
+								strlen(ddlcol->typeName));
 					}
 					if (!strcmp(key, "enumValues"))
 					{
@@ -686,9 +695,11 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			dbzdml->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
 
-	/* table name transformation and normalized objectid to lower case */
-	for (j = 0; j < objid.len; j++)
-		objid.data[j] = (char) pg_tolower((unsigned char) objid.data[j]);
+	fc_normalize_name(synchdb_letter_casing_strategy, objid.data, objid.len);
+
+//	/* table name transformation and normalized objectid to lower case */
+//	for (j = 0; j < objid.len; j++)
+//		objid.data[j] = (char) pg_tolower((unsigned char) objid.data[j]);
 
 	dbzdml->remoteObjectId = pstrdup(objid.data);
 	dbzdml->mappedObjectId = transform_object_name(dbzdml->remoteObjectId, "table");
@@ -753,11 +764,15 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	 * created. However, catalog lookups are case sensitive so here we must
 	 * convert db and table to all lower case letters.
 	 */
-	for (j = 0; j < strlen(dbzdml->schema); j++)
-		dbzdml->schema[j] = (char) pg_tolower((unsigned char) dbzdml->schema[j]);
 
-	for (j = 0; j < strlen(dbzdml->table); j++)
-		dbzdml->table[j] = (char) pg_tolower((unsigned char) dbzdml->table[j]);
+	fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->schema, strlen(dbzdml->schema));
+	fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->table, strlen(dbzdml->table));
+
+//	for (j = 0; j < strlen(dbzdml->schema); j++)
+//		dbzdml->schema[j] = (char) pg_tolower((unsigned char) dbzdml->schema[j]);
+//
+//	for (j = 0; j < strlen(dbzdml->table); j++)
+//		dbzdml->table[j] = (char) pg_tolower((unsigned char) dbzdml->table[j]);
 
 	/* prepare cache key */
 	strlcpy(cachekey.schema, dbzdml->schema, sizeof(cachekey.schema));
@@ -985,14 +1000,17 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 					if (key != NULL && value != NULL)
 					{
 						char * mappedColumnName = NULL;
+						char * colname_lower = NULL;
 						StringInfoData colNameObjId;
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-						/* convert to lower case column name */
-						for (j = 0; j < strlen(colval->name); j++)
-							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
+//						/* convert to lower case column name */
+//						for (j = 0; j < strlen(colval->name); j++)
+//							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
+
+						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
 
 						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
@@ -1026,7 +1044,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+						/* jsonpos hash must be looked up using lower case names - todo */
+						colname_lower = pstrdup(colval->remoteColumnName);
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 						if (found)
 						{
 							colval->dbztype = entry2->dbztype;
@@ -1035,7 +1056,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						}
 						else
 							elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
-									colval->name, colval->remoteColumnName);
+									colval->name, colname_lower);
+						pfree(colname_lower);
 
 						dbzdml->columnValuesAfter = lappend(dbzdml->columnValuesAfter, colval);
 						pfree(key);
@@ -1144,14 +1166,17 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 					if (key != NULL && value != NULL)
 					{
 						char * mappedColumnName = NULL;
+						char * colname_lower = NULL;
 						StringInfoData colNameObjId;
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-						/* convert to lower case column name */
-						for (j = 0; j < strlen(colval->name); j++)
-							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
+//						/* convert to lower case column name */
+//						for (j = 0; j < strlen(colval->name); j++)
+//							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
+
+						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
 
 						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
@@ -1186,7 +1211,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+						/* jsonpos hash must be looked up using lower case names - todo */
+						colname_lower = pstrdup(colval->remoteColumnName);
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 						if (found)
 						{
 							colval->dbztype = entry2->dbztype;
@@ -1195,7 +1223,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						}
 						else
 							elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
-									colval->name, colval->remoteColumnName);
+									colval->name, colname_lower);
+						pfree(colname_lower);
 
 						dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
 						pfree(key);
@@ -1327,14 +1356,17 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						if (key != NULL && value != NULL)
 						{
 							char * mappedColumnName = NULL;
+							char * colname_lower = NULL;
 							StringInfoData colNameObjId;
 
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 							colval->name = pstrdup(key);
 
-							/* convert to lower case column name */
-							for (j = 0; j < strlen(colval->name); j++)
-								colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
+//							/* convert to lower case column name */
+//							for (j = 0; j < strlen(colval->name); j++)
+//								colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
+
+							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
 
 							colval->value = pstrdup(value);
 							/* a copy of original column name for expression rule lookup at later stage */
@@ -1368,7 +1400,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							else
 								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+							/* jsonpos hash must be looked up using lower case names - todo */
+							colname_lower = pstrdup(colval->remoteColumnName);
+							fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 							if (found)
 							{
 								colval->dbztype = entry2->dbztype;
@@ -1377,7 +1412,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							}
 							else
 								elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
-										colval->name, colval->remoteColumnName);
+										colval->name, colname_lower);
+							pfree(colname_lower);
 
 							if (i == 0)
 								dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);

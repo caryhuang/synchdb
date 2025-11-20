@@ -213,5 +213,6 @@ PG_DML * convert2PGDML(DBZ_DML * dbzdml, ConnectorType type);
 bool fc_translate_datatype(ConnectorType connectorType,
 		const char * ext_datatype, int ext_length, int ext_scale,
 		char ** pg_datatype, int * pg_datatype_len);
+void fc_normalize_name(LetterCasingStrategy strategy, char * name, int len);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */

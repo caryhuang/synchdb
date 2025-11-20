@@ -228,6 +228,16 @@ typedef enum _SnapshotEngine
 	ENGINE_FDW
 } SnapshotEngine;
 
+/*
+ * letter casing strategies
+ */
+typedef enum _LetterCasingStrategy
+{
+	LCS_AS_IS,
+	LCS_NORMALIZE_LOWERCASE,
+	LCS_NORMALIZE_UPPERCASE,
+} LetterCasingStrategy;
+
 /**
  * BatchInfo - Structure containing the metadata of a batch change request
  */

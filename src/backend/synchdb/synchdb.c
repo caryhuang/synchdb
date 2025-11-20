@@ -121,6 +121,15 @@ int olr_read_timeout_ms = 5000;
 int synchdb_snapshot_engine = ENGINE_DEBEZIUM;
 int cdc_start_delay_ms = 0;
 bool synchdb_fdw_use_subtx = true;
+int synchdb_letter_casing_strategy = LCS_NORMALIZE_LOWERCASE;
+
+static const struct config_enum_entry letter_casing_strategies[] =
+{
+	{"asis", LCS_AS_IS, false},
+	{"lowercase", LCS_NORMALIZE_LOWERCASE, false},
+	{"uppercase", LCS_NORMALIZE_UPPERCASE, false},
+	{NULL, 0, false}
+};
 
 static const struct config_enum_entry error_strategies[] =
 {
@@ -2316,7 +2325,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 
 						/* invoke initial snapshot or schema sync PL/pgSQL workflow with schema history requested */
 					    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list,
-					    		scn_req, synchdb_fdw_use_subtx, true, snapshotMode);
+					    		scn_req, synchdb_fdw_use_subtx, true, snapshotMode, synchdb_letter_casing_strategy);
 
 					    if (connInfo->isOraCompat)
 					    {
@@ -2480,7 +2489,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 
 							/* invoke initial snapshot or schema sync PL/pgSQL workflow without schema history*/
 						    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list,
-						    		scn_req, synchdb_fdw_use_subtx, false, snapshotMode);
+						    		scn_req, synchdb_fdw_use_subtx, false, snapshotMode, synchdb_letter_casing_strategy);
 
 						    if (connInfo->isOraCompat)
 						    {
@@ -4180,6 +4189,18 @@ _PG_init(void)
 							 NULL,
 							 &synchdb_fdw_use_subtx,
 							 true,
+							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomEnumVariable("synchdb.letter_casing_strategy",
+							"letter casing strategy to use",
+							 NULL,
+							 &synchdb_letter_casing_strategy,
+							 LCS_AS_IS,
+							 letter_casing_strategies,
 							 PGC_SIGHUP,
 							 0,
 							 NULL,

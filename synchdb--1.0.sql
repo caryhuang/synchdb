@@ -1431,12 +1431,13 @@ CREATE OR REPLACE FUNCTION synchdb_create_ora_stage_fts(
     p_desired_schema        name,                         -- schema to match when entry includes schema
     p_stage_schema          name DEFAULT 'ora_stage'::name, -- target schema in Postgres
     p_server_name           name DEFAULT 'oracle'::name,  -- oracle_fdw server name
-    p_lower_names           boolean DEFAULT true,         -- lower-case PG table/column names
+    p_lower_names           boolean DEFAULT true,         -- legacy: lower-case PG table/column names
     p_on_exists             text DEFAULT 'replace',       -- 'replace' | 'drop' | 'skip'
     p_scn                   numeric DEFAULT 0,            -- >0 => use AS OF SCN subquery
     p_source_schema         name DEFAULT 'ora_obj'::name, -- metadata source schema (…columns)
     p_snapshot_tables       text DEFAULT NULL,            -- CSV of db.schema.table; when set, bypass conninfo
-    p_write_dbz_schema_info boolean DEFAULT false         -- when true, store Debezium schema-history JSON
+    p_write_dbz_schema_info boolean DEFAULT false,        -- when true, store Debezium schema-history JSON
+    p_case_strategy         text DEFAULT 'asis'           -- 'upper' | 'lower' | 'asis' (table/column casing)
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -1478,6 +1479,11 @@ DECLARE
   -- error table vars (existence check only)
   v_err_tbl_ident  text;
   v_err_tbl_exists boolean := false;
+
+  -- case strategy: 'lower' | 'upper' | 'asis'
+  v_case_strategy text;
+  -- expression used for column name in dynamic SQL (e.g., 'lower(c.column_name)')
+  v_colname_expr  text;
 BEGIN
   -- Ensure oracle_fdw is available
   SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='oracle_fdw')
@@ -1609,6 +1615,34 @@ BEGIN
     END IF;
   END IF;
 
+  ----------------------------------------------------------------------
+  -- Resolve case strategy for table/column names
+  -- p_case_strategy: 'lower' | 'upper' | 'asis'
+  -- Backward compatibility:
+  --   - NULL/empty: use p_lower_names (true => lower, false => asis)
+  ----------------------------------------------------------------------
+  IF p_case_strategy IS NULL OR btrim(p_case_strategy) = '' THEN
+    IF p_lower_names THEN
+      v_case_strategy := 'lower';
+    ELSE
+      v_case_strategy := 'asis';
+    END IF;
+  ELSE
+    v_case_strategy := lower(btrim(p_case_strategy));
+    IF v_case_strategy NOT IN ('lower','upper','asis') THEN
+      RAISE EXCEPTION 'Invalid p_case_strategy: %, expected lower|upper|asis', p_case_strategy;
+    END IF;
+  END IF;
+
+  -- Column name expression for dynamic SQL (Postgres side)
+  IF v_case_strategy = 'lower' THEN
+    v_colname_expr := 'lower(c.column_name)';
+  ELSIF v_case_strategy = 'upper' THEN
+    v_colname_expr := 'upper(c.column_name)';
+  ELSE
+    v_colname_expr := 'c.column_name';
+  END IF;
+
   -- ensure stage schema
   EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', p_stage_schema);
 
@@ -1619,7 +1653,7 @@ BEGIN
     'SELECT "schema" AS ora_owner, table_name
        FROM %1$I.columns
       WHERE upper("schema") = upper(%2$L)
-	    AND lower(table_name) <> ''log_mining_flush''
+            AND lower(table_name) <> ''log_mining_flush''
       GROUP BY "schema", table_name',
     p_source_schema,
     p_desired_schema::text
@@ -1656,8 +1690,12 @@ BEGIN
   ----------------------------------------------------------------------
   FOR r IN EXECUTE base_sql || ' ORDER BY ora_owner, table_name'
   LOOP
-    -- decide PG table name
-    v_tbl_pg := CASE WHEN p_lower_names THEN lower(r.table_name) ELSE r.table_name END;
+    -- decide PG table name according to case strategy
+    v_tbl_pg := CASE v_case_strategy
+                  WHEN 'lower' THEN lower(r.table_name)
+                  WHEN 'upper' THEN upper(r.table_name)
+                  ELSE r.table_name
+                END;
 
     -- does the FT already exist?
     SELECT EXISTS (
@@ -1680,7 +1718,7 @@ BEGIN
       END IF;
     END IF;
 
-    -- Build PG column list using translator
+    -- Build PG column list using translator, honoring case strategy
     EXECUTE format(
       'SELECT string_agg(
                 quote_ident(%s) || '' '' ||
@@ -1693,7 +1731,7 @@ BEGIN
          FROM %I.columns c
         WHERE c."schema" = %L
           AND c.table_name = %L',
-      CASE WHEN p_lower_names THEN 'lower(c.column_name)' ELSE 'c.column_name' END,
+      v_colname_expr,
       p_source_schema, r.ora_owner, r.table_name
     )
     INTO v_cols_sql;
@@ -1705,18 +1743,32 @@ BEGIN
 
     -- Create the staging FT (snapshot or not)
     IF p_scn IS NOT NULL AND p_scn > 0 THEN
+      ------------------------------------------------------------------
+      -- Build Oracle SELECT list: always double-quote column names
+      -- exactly as in metadata.
+      ------------------------------------------------------------------
       EXECUTE format(
-        'SELECT string_agg(quote_ident(c.column_name), '', '' ORDER BY c.position)
+        'SELECT string_agg(
+                 ''"'' || replace(c.column_name, ''"'', ''""'') || ''"'',
+                 '', '' ORDER BY c.position)
            FROM %I.columns c
-          WHERE c."schema" = %L
+          WHERE c."schema"   = %L
             AND c.table_name = %L',
         p_source_schema, r.ora_owner, r.table_name
       )
       INTO v_sel_list;
 
-      v_subquery := format('(SELECT %s FROM %I.%I AS OF SCN %s)',
-                           COALESCE(v_sel_list, '*'),
-                           r.ora_owner, r.table_name, p_scn::text);
+      ------------------------------------------------------------------
+      -- IMPORTANT: Always double-quote owner and table for Oracle,
+      -- independent of case, so "testtable" stays case-sensitive.
+      ------------------------------------------------------------------
+      v_subquery := format(
+        '(SELECT %s FROM "%s"."%s" AS OF SCN %s)',
+        COALESCE(v_sel_list, '*'),
+        replace(r.ora_owner, '"', '""'),
+        replace(r.table_name, '"', '""'),
+        p_scn::text
+      );
 
       EXECUTE format(
         'CREATE FOREIGN TABLE %I.%I (%s) SERVER %I OPTIONS ("table" %L)',
@@ -1764,7 +1816,7 @@ BEGIN
       v_ext_db := v_srcdb;  -- from conninfo
     END IF;
 
-    -- Build fully-qualified external table name: db.schema.table (all lower)
+    -- Build fully-qualified external table name: db.schema.table (all lower, legacy)
     v_tbl_name_l := lower(r.table_name);
 
     -- Refresh synchdb_attribute rows for this table
@@ -1813,8 +1865,7 @@ BEGIN
         'SELECT COALESCE(jsonb_agg(k.column_name ORDER BY k.position), ''[]''::jsonb)
            FROM %I.keys k
           WHERE k."schema" = %L
-            AND k.table_name = %L
-            AND k.is_primary IS TRUE',
+            AND k.table_name = %L',
         p_source_schema, r.ora_owner, r.table_name
       )
       INTO v_pk_json;
@@ -1876,9 +1927,6 @@ BEGIN
         'tableChanges', jsonb_build_array(v_change_obj)
       );
 
-      -- log for visibility
-      -- RAISE WARNING '%', v_msg_json::text;
-
       -- store one JSON line per table
       EXECUTE format(
         'INSERT INTO %I.%I(line) VALUES ($1)',
@@ -1934,7 +1982,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, name, name, boolean, text, numeric, name, text, boolean) IS
+COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, name, name, boolean, text, numeric, name, text, boolean, text) IS
    'create a staging schema, migrate table schemas with translated data types';
 
 CREATE OR REPLACE FUNCTION synchdb_materialize_schema(
@@ -2045,29 +2093,63 @@ COMMENT ON FUNCTION synchdb_materialize_schema(name, name, name, text) IS
    'materialize table schema from staging to destination schema';
 
 CREATE OR REPLACE FUNCTION synchdb_migrate_primary_keys(
-    p_oraobj_schema name,   -- e.g. 'ora_obj'  (holds table "keys")
-    p_dst_schema    name    -- e.g. 'psql_stage'
+    p_oraobj_schema name,          -- e.g. 'ora_obj'  (holds table "keys")
+    p_dst_schema    name,          -- e.g. 'psql_stage'
+    p_case_strategy text DEFAULT 'asis'  -- 'upper' | 'lower' | 'asis'
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  r record;
-  v_exists  boolean;
-  v_cname   text;
-  v_sql     text;
+  r              record;
+  v_exists       boolean;
+  v_cname        text;
+  v_sql          text;
+
+  -- case strategy: 'lower' | 'upper' | 'asis'
+  v_case_strategy text;
+  v_tbl_expr      text;
+  v_col_expr      text;
 BEGIN
+  ----------------------------------------------------------------------
+  -- Resolve case strategy for table/column names
+  -- p_case_strategy: 'lower' | 'upper' | 'asis'
+  -- Backward compatible default: 'lower'
+  ----------------------------------------------------------------------
+  IF p_case_strategy IS NULL OR btrim(p_case_strategy) = '' THEN
+    v_case_strategy := 'lower';
+  ELSE
+    v_case_strategy := lower(btrim(p_case_strategy));
+    IF v_case_strategy NOT IN ('lower', 'upper', 'asis') THEN
+      RAISE EXCEPTION 'Invalid p_case_strategy: %, expected lower|upper|asis', p_case_strategy;
+    END IF;
+  END IF;
+
+  IF v_case_strategy = 'lower' THEN
+    v_tbl_expr := 'lower(table_name)';
+    v_col_expr := 'lower(column_name)';
+  ELSIF v_case_strategy = 'upper' THEN
+    v_tbl_expr := 'upper(table_name)';
+    v_col_expr := 'upper(column_name)';
+  ELSE
+    v_tbl_expr := 'table_name';
+    v_col_expr := 'column_name';
+  END IF;
+
+  ----------------------------------------------------------------------
   -- Iterate PK definitions from <p_oraobj_schema>.keys
+  -- Apply the same case strategy to table and column names
+  ----------------------------------------------------------------------
   FOR r IN
     EXECUTE format($q$
       SELECT
-        lower(table_name) AS tbl,
-        string_agg(quote_ident(lower(column_name)), ', ' ORDER BY position) AS cols
-      FROM %I.keys
+        %1$s AS tbl,
+        string_agg(quote_ident(%2$s), ', ' ORDER BY position) AS cols
+      FROM %3$I.keys
       WHERE is_primary = true
-      GROUP BY table_name
-    $q$, p_oraobj_schema)
+      GROUP BY %1$s
+    $q$, v_tbl_expr, v_col_expr, p_oraobj_schema)
   LOOP
-    -- Only act if destination table exists
+    -- Only act if destination table exists (relkind 'r' = ordinary table)
     SELECT EXISTS (
       SELECT 1
       FROM pg_class c
@@ -2082,9 +2164,10 @@ BEGIN
       CONTINUE;
     END IF;
 
-    -- Build constraint name (<= 63 chars)
+    -- Build constraint name (<= 63 chars), based on normalized table name
     v_cname := left(r.tbl, 55) || '_pkey';
 
+    -- All identifiers (schema, table, constraint, columns) are quoted
     v_sql := format(
       'ALTER TABLE %I.%I ADD CONSTRAINT %I PRIMARY KEY (%s)',
       p_dst_schema, r.tbl, v_cname, r.cols
@@ -2106,7 +2189,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_migrate_primary_keys(name, name) IS
+COMMENT ON FUNCTION synchdb_migrate_primary_keys(name, name, text) IS
    'migrate primary keys from staging to destination schema';
 
 CREATE OR REPLACE FUNCTION synchdb_apply_column_mappings(
@@ -2369,39 +2452,61 @@ BEGIN
   )
   SELECT exists INTO v_err_tbl_exists FROM tbl;
 
+  ----------------------------------------------------------------------
+  -- Iterate all source FTs that have a same-named real table in dst
+  -- Case-insensitive match, but keep actual relnames for SQL.
+  ----------------------------------------------------------------------
   FOR r IN
-    SELECT lower(c.relname) AS tbl
+    SELECT
+      lower(c.relname) AS tbl_canon,    -- canonical name for matching
+      c.relname        AS src_tbl_name, -- actual FT name in p_src_schema
+      c2.relname       AS dst_tbl_name  -- actual table name in p_dst_schema
     FROM   pg_foreign_table ft
-    JOIN   pg_class        c ON c.oid = ft.ftrelid
-    JOIN   pg_namespace    n ON n.oid = c.relnamespace
-    WHERE  n.nspname = p_src_schema
-      AND  EXISTS (
-             SELECT 1
-             FROM pg_class c2
-             JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
-             WHERE n2.nspname = p_dst_schema
-               AND lower(c2.relname) = lower(c.relname)
-               AND c2.relkind = 'r'
-           )
+    JOIN   pg_class        c  ON c.oid = ft.ftrelid
+    JOIN   pg_namespace    n  ON n.oid = c.relnamespace
+    JOIN   pg_class        c2 ON c2.relname = c.relname
+    JOIN   pg_namespace    n2 ON n2.oid = c2.relnamespace
+    WHERE  n.nspname  = p_src_schema
+      AND  n2.nspname = p_dst_schema
+      AND  c2.relkind = 'r'
   LOOP
-    v_tbl_display :=
-      CASE
-        WHEN p_desired_schema IS NULL OR btrim(p_desired_schema::text) = ''
-          THEN lower(p_desired_db::text) || '.' || r.tbl
-        ELSE lower(p_desired_db::text) || '.' || lower(p_desired_schema::text) || '.' || r.tbl
-      END;
+    ------------------------------------------------------------------
+    -- CHANGED: error-table identity
+    -- DB and SCHEMA are UPPERCASE, TABLE keeps original case from src_tbl_name.
+    -- So for three FTs you'll get:
+    --   FREE.DBZUSER.test_table
+    --   FREE.DBZUSER.TEST_TABLE
+    --   FREE.DBZUSER.test_TABLE
+    ------------------------------------------------------------------
+    IF p_desired_schema IS NULL OR btrim(p_desired_schema::text) = '' THEN
+      v_tbl_display :=
+          upper(p_desired_db::text) || '.' || r.src_tbl_name;
+    ELSE
+      v_tbl_display :=
+          upper(p_desired_db::text) || '.'
+        || upper(p_desired_schema::text) || '.'
+        || r.src_tbl_name;
+    END IF;
+    ------------------------------------------------------------------
 
     v_any_batch_failed := false;
 
     BEGIN
-      -- Build column/expr lists
+      ------------------------------------------------------------------
+      -- Build column/expr lists, using canonical names for matching and
+      -- actual identifiers for SQL and transforms.
+      ------------------------------------------------------------------
       WITH dst_cols AS (
-        SELECT c.ordinal_position, lower(c.column_name) AS dst_col
+        SELECT
+          c.ordinal_position,
+          lower(c.column_name) AS dst_col_canon,
+          c.column_name        AS dst_col_ident
         FROM information_schema.columns c
         WHERE c.table_schema = p_dst_schema
-          AND c.table_name   = r.tbl
+          AND c.table_name   = r.dst_tbl_name
       ),
       colmap AS (
+        -- A) schema-qualified rules: p_src_schema.table.column -> <dst column>
         SELECT
           lower(split_part(m.srcobj,'.',2)) AS tbl,
           lower(split_part(m.srcobj,'.',3)) AS src_col,
@@ -2416,6 +2521,7 @@ BEGIN
 
         UNION ALL
 
+        -- B) db-prefixed rules: db.schema.table.column OR db.table.column -> <dst column>
         SELECT
           CASE WHEN array_length(arr,1)=4 THEN arr[3]
                WHEN array_length(arr,1)=3 THEN arr[2] END AS tbl,
@@ -2438,23 +2544,35 @@ BEGIN
           )
       ),
       col_map AS (
-        SELECT d.ordinal_position,
-               d.dst_col,
-               COALESCE(
-                 (SELECT cm.src_col
-                    FROM colmap cm
-                   WHERE cm.tbl = r.tbl AND cm.dst_col = d.dst_col
-                   LIMIT 1),
-                 d.dst_col
-               ) AS src_col
+        -- Map destination columns (canonical) to canonical source columns
+        SELECT
+          d.ordinal_position,
+          d.dst_col_ident,
+          d.dst_col_canon,
+          COALESCE(
+            (SELECT cm.src_col
+               FROM colmap cm
+              WHERE cm.tbl = r.tbl_canon
+                AND cm.dst_col = d.dst_col_canon
+              LIMIT 1),
+            d.dst_col_canon
+          ) AS src_col_canon
         FROM dst_cols d
       ),
       src_presence AS (
-        SELECT lower(table_name) AS tbl, lower(column_name) AS src_col
+        -- IMPORTANT: key off the *actual* FT name, not the lower-cased canonical name.
+        -- This prevents multiple case-variants (TEST_TABLE, "test_TABLE", "test_table")
+        -- from being merged and causing duplicate columns.
+        SELECT
+          table_name         AS src_tbl_ident,
+          lower(column_name) AS src_col_canon,
+          column_name        AS src_col_ident
         FROM information_schema.columns
         WHERE table_schema = p_src_schema
       ),
       tmap AS (
+        -- Transform rules
+        -- A) schema-qualified
         SELECT
           lower(split_part(mt.srcobj,'.',2)) AS tbl,
           lower(split_part(mt.srcobj,'.',3)) AS src_col,
@@ -2466,6 +2584,7 @@ BEGIN
 
         UNION ALL
 
+        -- B) db-prefixed
         SELECT
           CASE WHEN array_length(arr,1)=4 THEN arr[3]
                WHEN array_length(arr,1)=3 THEN arr[2] END AS tbl,
@@ -2486,40 +2605,44 @@ BEGIN
           )
       ),
       exprs AS (
+        -- Build source expressions using *actual* source column identifiers
         SELECT
           m.ordinal_position,
-          m.dst_col,
+          m.dst_col_ident,
           CASE
-            WHEN NOT EXISTS (
-              SELECT 1 FROM src_presence sp
-               WHERE sp.tbl = r.tbl AND sp.src_col = m.src_col
-            )
-              THEN 'NULL'
+            WHEN sp.src_col_ident IS NULL THEN
+              'NULL'
             ELSE COALESCE(
-                   (SELECT replace(tt.expr, '%d', quote_ident(m.src_col))
+                   (SELECT replace(tt.expr, '%d', quote_ident(sp.src_col_ident))
                       FROM tmap tt
-                     WHERE tt.tbl = r.tbl AND tt.src_col = m.src_col
+                     WHERE tt.tbl = r.tbl_canon
+                       AND tt.src_col = m.src_col_canon
                      LIMIT 1),
-                   quote_ident(m.src_col)
+                   quote_ident(sp.src_col_ident)
                  )
           END AS src_expr
         FROM col_map m
+        LEFT JOIN src_presence sp
+          ON sp.src_tbl_ident = r.src_tbl_name   -- exact FT name
+         AND sp.src_col_canon = m.src_col_canon
       )
       SELECT
-        string_agg(quote_ident(dst_col), ', ' ORDER BY ordinal_position),
-        string_agg(src_expr,              ', ' ORDER BY ordinal_position)
+        string_agg(quote_ident(dst_col_ident), ', ' ORDER BY ordinal_position),
+        string_agg(src_expr,                  ', ' ORDER BY ordinal_position)
       INTO dst_list, src_list
       FROM exprs;
 
       IF dst_list IS NULL OR src_list IS NULL THEN
-        RAISE NOTICE 'Skipping %.%: no column metadata', p_dst_schema, r.tbl;
-        RETURN;
+        RAISE NOTICE 'Skipping %.%: no column metadata', p_dst_schema, r.dst_tbl_name;
+        CONTINUE;
       END IF;
 
+      ------------------------------------------------------------------
       -- Optional truncate
+      ------------------------------------------------------------------
       IF p_do_truncate THEN
         BEGIN
-          EXECUTE format('TRUNCATE %I.%I', p_dst_schema, r.tbl);
+          EXECUTE format('TRUNCATE %I.%I', p_dst_schema, r.dst_tbl_name);
         EXCEPTION WHEN OTHERS THEN
           -- record failure (UPSERT)
           IF NOT v_err_tbl_created THEN
@@ -2558,20 +2681,28 @@ BEGIN
           IF NOT p_continue_on_error THEN
             RAISE;
           ELSE
-            RAISE WARNING 'TRUNCATE %.% failed: % [%]', p_dst_schema, r.tbl, err_msg, err_state;
+            RAISE WARNING 'TRUNCATE %.% failed: % [%]', p_dst_schema, r.dst_tbl_name, err_msg, err_state;
           END IF;
         END;
       END IF;
 
-      -- Insert path
+      ------------------------------------------------------------------
+      -- Insert path (no batching)
+      ------------------------------------------------------------------
       IF COALESCE(p_rows_per_tick,0) <= 0 THEN
         EXECUTE format(
           'INSERT INTO %I.%I (%s) SELECT %s FROM %I.%I',
-          p_dst_schema, r.tbl, dst_list, src_list, p_src_schema, r.tbl
+          p_dst_schema, r.dst_tbl_name,
+          dst_list,
+          src_list,
+          p_src_schema, r.src_tbl_name
         );
         GET DIAGNOSTICS v_rows = ROW_COUNT;
         PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, v_rows::bigint, 0::bigint, 0::bigint);
-        RAISE NOTICE 'Loaded %.% from %.% (rows=%)', p_dst_schema, r.tbl, p_src_schema, r.tbl, v_rows;
+        RAISE NOTICE 'Loaded %.% from %.% (rows=%)',
+                     p_dst_schema, r.dst_tbl_name,
+                     p_src_schema, r.src_tbl_name,
+                     v_rows;
 
         -- success for the whole table (non-batch): delete error row if table exists
         IF v_err_tbl_exists THEN
@@ -2583,10 +2714,12 @@ BEGIN
         END IF;
 
       ELSE
+        ----------------------------------------------------------------
         -- Batching path
+        ----------------------------------------------------------------
         EXECUTE format(
           'SELECT count(*) FROM (SELECT %s FROM %I.%I) q',
-          src_list, p_src_schema, r.tbl
+          src_list, p_src_schema, r.src_tbl_name
         )
         INTO v_total;
 
@@ -2602,11 +2735,11 @@ BEGIN
             ) t
             WHERE t.rn > %s AND t.rn <= %s
             $sql$,
-            p_dst_schema, r.tbl,
+            p_dst_schema, r.dst_tbl_name,
             dst_list,
             src_list,
             src_list,
-            p_src_schema, r.tbl,
+            p_src_schema, r.src_tbl_name,
             v_off, v_off + p_rows_per_tick
           );
 
@@ -2653,7 +2786,9 @@ BEGIN
                 RAISE;
               ELSE
                 RAISE WARNING 'Batch insert %.% rows (%-%) failed: % [%]',
-                              p_dst_schema, r.tbl, v_off+1, v_off+p_rows_per_tick, err_msg, err_state;
+                              p_dst_schema, r.dst_tbl_name,
+                              v_off+1, v_off+p_rows_per_tick,
+                              err_msg, err_state;
                 v_rows := 0;
               END IF;
             END;
@@ -2665,7 +2800,7 @@ BEGIN
           IF v_rows > 0 THEN
             PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, v_rows::bigint, 0::bigint, 0::bigint);
             RAISE NOTICE 'Loaded batch: %.% (+% rows, offset % / %)',
-                         p_dst_schema, r.tbl, v_rows, v_off, v_total;
+                         p_dst_schema, r.dst_tbl_name, v_rows, v_off, v_total;
           END IF;
 
           v_off := v_off + p_rows_per_tick;
@@ -2683,7 +2818,7 @@ BEGIN
 
     EXCEPTION
       WHEN OTHERS THEN
-        -- record failure (UPSERT)
+        -- record failure (UPSERT) for this table
         IF NOT v_err_tbl_created THEN
           EXECUTE format(
             'CREATE TABLE IF NOT EXISTS %I.%I (
@@ -2720,9 +2855,9 @@ BEGIN
           RAISE;
         ELSE
           RAISE WARNING 'Table %.% failed, continuing: % [%]',
-                        p_dst_schema, r.tbl, err_msg, err_state;
+                        p_dst_schema, r.dst_tbl_name, err_msg, err_state;
         END IF;
-    END; -- end per-table subtransaction
+    END; -- end per-table block
   END LOOP;
 
   -- Final summary (only if we created the error table this run OR it pre-existed)
@@ -2766,31 +2901,45 @@ DECLARE
   v_total     bigint;
   v_off       bigint;
   -- helpers for batching
-  base_select text;
   ins_sql     text;
 BEGIN
-  -- Iterate all source FTs that have a same-named real table in the destination schema
+  ----------------------------------------------------------------------
+  -- Iterate all source FTs that have a same-named real table
+  -- in the destination schema.
+  --
+  -- tbl_canon (lowercase) is only for objmap lookups; src_tbl_name
+  -- and dst_tbl_name preserve the exact relname for SQL and column
+  -- metadata, so case-variants stay distinct.
+  ----------------------------------------------------------------------
   FOR r IN
-    SELECT lower(c.relname) AS tbl
+    SELECT
+      lower(c.relname) AS tbl_canon,    -- canonical (lower) name for objmap
+      c.relname        AS src_tbl_name, -- actual source FT name
+      c2.relname       AS dst_tbl_name  -- actual destination table name
     FROM   pg_foreign_table ft
-    JOIN   pg_class        c ON c.oid = ft.ftrelid
-    JOIN   pg_namespace    n ON n.oid = c.relnamespace
-    WHERE  n.nspname = p_src_schema
-      AND  EXISTS (
-             SELECT 1
-             FROM pg_class c2
-             JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
-             WHERE n2.nspname = p_dst_schema
-               AND lower(c2.relname) = lower(c.relname)
-               AND c2.relkind = 'r'
-           )
+    JOIN   pg_class        c  ON c.oid = ft.ftrelid
+    JOIN   pg_namespace    n  ON n.oid = c.relnamespace
+    JOIN   pg_class        c2 ON c2.relname = c.relname    -- *** exact match ***
+    JOIN   pg_namespace    n2 ON n2.oid = c2.relnamespace
+    WHERE  n.nspname  = p_src_schema
+      AND  n2.nspname = p_dst_schema
+      AND  c2.relkind = 'r'
   LOOP
-    -- Build per-table column lists (destination names and source expressions)
+    ------------------------------------------------------------------
+    -- Build per-table column lists:
+    --   - dst_cols: canonical + actual destination column names
+    --   - colmap/tmap: mapping & transforms from synchdb_objmap
+    --   - src_presence: canonical + actual source column names,
+    --                   keyed by the *exact* FT name.
+    ------------------------------------------------------------------
     WITH dst_cols AS (
-      SELECT c.ordinal_position, lower(c.column_name) AS dst_col
+      SELECT
+        c.ordinal_position,
+        lower(c.column_name) AS dst_col_canon,
+        c.column_name        AS dst_col_ident
       FROM information_schema.columns c
       WHERE c.table_schema = p_dst_schema
-        AND c.table_name   = r.tbl
+        AND c.table_name   = r.dst_tbl_name
     ),
     colmap AS (
       -- A) schema-qualified rules: p_src_schema.table.column -> <dst column>
@@ -2831,20 +2980,37 @@ BEGIN
         )
     ),
     col_map AS (
-      SELECT d.ordinal_position,
-             d.dst_col,
-             COALESCE(
-               (SELECT cm.src_col FROM colmap cm WHERE cm.tbl = r.tbl AND cm.dst_col = d.dst_col LIMIT 1),
-               d.dst_col
-             ) AS src_col
+      -- Map destination columns (by canonical name) to canonical source column names
+      SELECT
+        d.ordinal_position,
+        d.dst_col_ident,
+        d.dst_col_canon,
+        COALESCE(
+          (SELECT cm.src_col
+             FROM colmap cm
+            WHERE cm.tbl = r.tbl_canon
+              AND cm.dst_col = d.dst_col_canon
+            LIMIT 1),
+          d.dst_col_canon
+        ) AS src_col_canon
       FROM dst_cols d
     ),
     src_presence AS (
-      SELECT lower(table_name) AS tbl, lower(column_name) AS src_col
+      ----------------------------------------------------------------
+      -- IMPORTANT: key off the *actual* FT name (src_tbl_ident), not
+      -- the lower-cased canonical name. This keeps
+      --   TESTTABLE, "testTABLE", "testtable"
+      -- completely distinct at the metadata level.
+      ----------------------------------------------------------------
+      SELECT
+        table_name         AS src_tbl_ident,
+        lower(column_name) AS src_col_canon,
+        column_name        AS src_col_ident
       FROM information_schema.columns
       WHERE table_schema = p_src_schema
     ),
     tmap AS (
+      -- Transform rules (canonical src_col but free-form dst expr with %d placeholder)
       -- A) schema-qualified
       SELECT
         lower(split_part(mt.srcobj,'.',2)) AS tbl,
@@ -2877,56 +3043,69 @@ BEGIN
         )
     ),
     exprs AS (
+      -- Build source expressions using *actual* source column identifiers,
+      -- falling back to NULL when the source column does not exist.
       SELECT
         m.ordinal_position,
-        m.dst_col,
+        m.dst_col_ident,
         CASE
-          WHEN NOT EXISTS (
-            SELECT 1 FROM src_presence sp WHERE sp.tbl = r.tbl AND sp.src_col = m.src_col
-          )
-            THEN 'NULL'
+          WHEN sp.src_col_ident IS NULL THEN
+            'NULL'
           ELSE COALESCE(
-                 (SELECT replace(tt.expr, '%d', quote_ident(m.src_col))
-                  FROM tmap tt
-                  WHERE tt.tbl = r.tbl AND tt.src_col = m.src_col
-                  LIMIT 1),
-                 quote_ident(m.src_col)
+                 (SELECT replace(tt.expr, '%d', quote_ident(sp.src_col_ident))
+                    FROM tmap tt
+                   WHERE tt.tbl = r.tbl_canon
+                     AND tt.src_col = m.src_col_canon
+                   LIMIT 1),
+                 quote_ident(sp.src_col_ident)
                )
         END AS src_expr
       FROM col_map m
+      LEFT JOIN src_presence sp
+        ON sp.src_tbl_ident  = r.src_tbl_name   -- *** exact FT name ***
+       AND sp.src_col_canon = m.src_col_canon
     )
     SELECT
-      string_agg(quote_ident(dst_col), ', ' ORDER BY ordinal_position),
-      string_agg(src_expr,              ', ' ORDER BY ordinal_position)
+      string_agg(quote_ident(dst_col_ident), ', ' ORDER BY ordinal_position),
+      string_agg(src_expr,                  ', ' ORDER BY ordinal_position)
     INTO dst_list, src_list
     FROM exprs;
 
     IF dst_list IS NULL OR src_list IS NULL THEN
-      RAISE NOTICE 'Skipping %.%: no column metadata', p_dst_schema, r.tbl;
+      RAISE NOTICE 'Skipping %.%: no column metadata', p_dst_schema, r.dst_tbl_name;
       CONTINUE;
     END IF;
 
     IF p_do_truncate THEN
-      EXECUTE format('TRUNCATE %I.%I', p_dst_schema, r.tbl);
+      EXECUTE format('TRUNCATE %I.%I', p_dst_schema, r.dst_tbl_name);
     END IF;
 
-    -- === No batching: one-shot insert, then report actual row count ===
+    ------------------------------------------------------------------
+    -- No batching: one-shot insert, then report actual row count
+    ------------------------------------------------------------------
     IF COALESCE(p_rows_per_tick, 0) <= 0 THEN
       EXECUTE format(
         'INSERT INTO %I.%I (%s) SELECT %s FROM %I.%I',
-        p_dst_schema, r.tbl, dst_list, src_list, p_src_schema, r.tbl
+        p_dst_schema, r.dst_tbl_name,
+        dst_list,
+        src_list,
+        p_src_schema, r.src_tbl_name
       );
       GET DIAGNOSTICS v_rows = ROW_COUNT;
-      -- increment rows counter once for this table
+
       PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, v_rows::bigint, 0::bigint, 0::bigint);
-      RAISE NOTICE 'Loaded %.% from %.% (rows=%)', p_dst_schema, r.tbl, p_src_schema, r.tbl, v_rows;
+      RAISE NOTICE 'Loaded %.% from %.% (rows=%)',
+                   p_dst_schema, r.dst_tbl_name,
+                   p_src_schema, r.src_tbl_name,
+                   v_rows;
 
     ELSE
-      -- === Batching mode: insert in chunks; call stats after each chunk ===
-      -- 1) Count total rows to process using the same SELECT list
+      ----------------------------------------------------------------
+      -- Batching mode: insert in chunks; call stats after each chunk
+      ----------------------------------------------------------------
       EXECUTE format(
         'SELECT count(*) FROM (SELECT %s FROM %I.%I) q',
-        src_list, p_src_schema, r.tbl
+        src_list, p_src_schema, r.src_tbl_name
       )
       INTO v_total;
 
@@ -2942,11 +3121,11 @@ BEGIN
           ) t
           WHERE t.rn > %s AND t.rn <= %s
           $sql$,
-          p_dst_schema, r.tbl,
+          p_dst_schema, r.dst_tbl_name,
           dst_list,
           src_list,
           src_list,
-          p_src_schema, r.tbl,
+          p_src_schema, r.src_tbl_name,
           v_off, v_off + p_rows_per_tick
         );
 
@@ -2956,11 +3135,10 @@ BEGIN
         IF v_rows > 0 THEN
           PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, v_rows::bigint, 0::bigint, 0::bigint);
           RAISE NOTICE 'Loaded batch: %.% (+% rows, offset % / %)',
-                       p_dst_schema, r.tbl, v_rows, v_off, v_total;
+                       p_dst_schema, r.dst_tbl_name, v_rows, v_off, v_total;
         END IF;
 
         v_off := v_off + p_rows_per_tick;
-        -- Optional: exit early if no rows inserted (safety)
         IF v_rows = 0 THEN
           EXIT;
         END IF;
@@ -3212,7 +3390,8 @@ CREATE OR REPLACE FUNCTION synchdb_do_initial_snapshot(
     p_scn             numeric DEFAULT 0,          -- >0 to force a specific SCN; else auto-read
 	p_snapshot_tables text    DEFAULT null,
 	p_use_subtx         boolean DEFAULT true,
-	p_write_schema_hist boolean	DEFAULT false
+	p_write_schema_hist boolean	DEFAULT false,
+	p_case_strategy  text DEFAULT 'asis'
 )
 RETURNS numeric
 LANGUAGE plpgsql
@@ -3279,14 +3458,15 @@ BEGIN
         v_effective_scn,
         v_meta_schema,
 		p_snapshot_tables,
-		p_write_schema_hist
+		p_write_schema_hist,
+		p_case_strategy
     );
 
     RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
     PERFORM synchdb_materialize_schema(p_connector_name, p_stage_schema, p_dest_schema, p_on_exists);
 
     RAISE NOTICE 'Step 6: Migrating primary keys from metadata schema "%" to "%"', p_source_schema, p_dest_schema;
-    PERFORM synchdb_migrate_primary_keys(p_source_schema, p_dest_schema);
+    PERFORM synchdb_migrate_primary_keys(p_source_schema, p_dest_schema, p_case_strategy);
 
     RAISE NOTICE 'Step 7: Applying column mappings to schema "%" using objmap %.% for connector %',
                  p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
@@ -3340,7 +3520,7 @@ EXCEPTION
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_do_initial_snapshot(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean, boolean) IS
+COMMENT ON FUNCTION synchdb_do_initial_snapshot(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean, boolean, text) IS
    'perform initial snapshot procedure + data transforms using a oracle_fdw server';
 
 CREATE OR REPLACE FUNCTION synchdb_do_schema_sync(
@@ -3356,7 +3536,8 @@ CREATE OR REPLACE FUNCTION synchdb_do_schema_sync(
     p_scn             numeric DEFAULT 0,          -- >0 to force a specific SCN; else auto-read
 	p_snapshot_tables text    DEFAULT null,
 	p_use_subtx         boolean DEFAULT true,
-	p_write_schema_hist boolean	DEFAULT false
+	p_write_schema_hist boolean	DEFAULT false,
+	p_case_strategy  text DEFAULT 'asis'
 )
 RETURNS numeric
 LANGUAGE plpgsql
@@ -3422,14 +3603,15 @@ BEGIN
         v_effective_scn,
         v_meta_schema,
 		p_snapshot_tables,
-		p_write_schema_hist
+		p_write_schema_hist,
+		p_case_strategy
     );
 
     RAISE NOTICE 'Step 5: Materializing staging foreign tables from "%"" to "%"', p_stage_schema, p_dest_schema;
     PERFORM synchdb_materialize_schema(p_connector_name, p_stage_schema, p_dest_schema, p_on_exists);
 
     RAISE NOTICE 'Step 6: Migrating primary keys from metadata schema "%" to "%"', p_source_schema, p_dest_schema;
-    PERFORM synchdb_migrate_primary_keys(p_source_schema, p_dest_schema);
+    PERFORM synchdb_migrate_primary_keys(p_source_schema, p_dest_schema, p_case_strategy);
 
     RAISE NOTICE 'Step 7: Applying column mappings to schema "%" using objmap %.% for connector %',
                  p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
@@ -3454,7 +3636,7 @@ EXCEPTION
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_do_schema_sync(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean, boolean) IS
+COMMENT ON FUNCTION synchdb_do_schema_sync(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean, boolean, text) IS
    'perform schema only sync procedure + transforms using a oracle_fdw server - no data migration';
 
 CREATE OR REPLACE FUNCTION oracle_type_to_jdbc(ora_type_text text)

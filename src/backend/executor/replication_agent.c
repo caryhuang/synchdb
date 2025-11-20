@@ -1386,7 +1386,8 @@ destroyPGDML(PG_DML * dmlinfo)
 orascn
 ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 		const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx,
-		bool write_schema_hist, const char * snapshotMode)
+		bool write_schema_hist, const char * snapshotMode,
+		int letter_casing_strategy)
 {
 	int ret = -1, i = 0;
 	bool isnull = false;
@@ -1402,18 +1403,18 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 			"SELECT synchdb_do_schema_sync("
 			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
 			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"
-			"  $11::text,$12::bool,$13::bool)" :
+			"  $11::text,$12::bool,$13::bool,$14::text)" :
 			"SELECT synchdb_do_initial_snapshot("
 			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
 			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"
-			"  $11::text,$12::bool,$13::bool)";
-	Oid   argtypes[13] = {
+			"  $11::text,$12::bool,$13::bool,$14::text)";
+	Oid   argtypes[14] = {
 		NAMEOID, TEXTOID, NAMEOID, NAMEOID, NAMEOID,
 		TEXTOID, NAMEOID, BOOLOID, TEXTOID, NUMERICOID,
-		TEXTOID, BOOLOID, BOOLOID
+		TEXTOID, BOOLOID, BOOLOID, TEXTOID
 	};
-	Datum values[13];
-	char  nulls[13] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+	Datum values[14];
+	char  nulls[14] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
 
 	/* compute scn */
 	if (scn_req > 0)
@@ -1428,9 +1429,11 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 	if (IsTransactionOrTransactionBlock())
 		skiptx = true;
 
-	/* we only work with lower case objects */
-	for (i = 0; i < strlen(conninfo->srcdb); i++)
-		dstdb[i] = (char) pg_tolower((unsigned char) conninfo->srcdb[i]);
+//	/* we only work with lower case objects */
+//	for (i = 0; i < strlen(conninfo->srcdb); i++)
+//		dstdb[i] = (char) pg_tolower((unsigned char) conninfo->srcdb[i]);
+	strlcpy(dstdb, conninfo->srcdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+	fc_normalize_name(letter_casing_strategy, dstdb, strlen(dstdb));
 
 	PG_TRY();
 	{
@@ -1463,10 +1466,17 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 		values[11] = BoolGetDatum(fdw_use_subtx);
 		values[12] = BoolGetDatum(write_schema_hist);
 
+		if (letter_casing_strategy == LCS_NORMALIZE_LOWERCASE)
+			values[13] = CStringGetTextDatum("lower");
+		else if (letter_casing_strategy == LCS_NORMALIZE_UPPERCASE)
+			values[13] = CStringGetTextDatum("upper");
+		else
+			values[13] = CStringGetTextDatum("asis");
+
 		if (SPI_connect() != SPI_OK_CONNECT)
 			elog(ERROR, "SPI_connect failed");
 
-		ret = SPI_execute_with_args(sql, 13, argtypes, values, nulls, false, 1);
+		ret = SPI_execute_with_args(sql, 14, argtypes, values, nulls, false, 1);
 		if (ret != SPI_OK_SELECT || SPI_processed != 1 || SPI_tuptable == NULL)
 		{
 			SPI_finish();

@@ -79,7 +79,8 @@ void destroyPGDDL(PG_DDL * ddlinfo);
 void destroyPGDML(PG_DML * dmlinfo);
 orascn ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 		const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx,
-		bool write_schema_hist, const char * snapshotMode);
+		bool write_schema_hist, const char * snapshotMode,
+		int letter_casing_strategy);
 int ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, orascn * scn_out);
 int dump_schema_history_to_file(const char * connector_name, const char *out_path);
 

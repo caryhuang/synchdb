@@ -52,6 +52,7 @@
 /* global external variables */
 extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
+extern int synchdb_letter_casing_strategy;
 
 /* data transformation related hash tables */
 HTAB * dataCacheHash = NULL;
@@ -749,6 +750,8 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 						if(colNameObjId.data)
 							pfree(colNameObjId.data);
 
+						/* normalize the name if needed */
+						fc_normalize_name(synchdb_letter_casing_strategy, value, strlen(value));
 						if (alter)
 						{
 							if (isinline)
@@ -756,12 +759,12 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 								if (isfirst)
 								{
 									appendStringInfo(strinfo, ", ADD PRIMARY KEY(");
-									appendStringInfo(strinfo, "%s,", value);
+									appendStringInfo(strinfo, "\"%s\",", value);
 									isfirst = false;
 								}
 								else
 								{
-									appendStringInfo(strinfo, "%s,", value);
+									appendStringInfo(strinfo, "\"%s\",", value);
 								}
 							}
 							else
@@ -769,12 +772,12 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 								if (isfirst)
 								{
 									appendStringInfo(strinfo, "PRIMARY KEY(");
-									appendStringInfo(strinfo, "%s,", value);
+									appendStringInfo(strinfo, "\"%s\",", value);
 									isfirst = false;
 								}
 								else
 								{
-									appendStringInfo(strinfo, "%s,", value);
+									appendStringInfo(strinfo, "\"%s\",", value);
 								}
 							}
 						}
@@ -783,12 +786,12 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 							if (isfirst)
 							{
 								appendStringInfo(strinfo, ", PRIMARY KEY(");
-								appendStringInfo(strinfo, "%s,", value);
+								appendStringInfo(strinfo, "\"%s\",", value);
 								isfirst = false;
 							}
 							else
 							{
-								appendStringInfo(strinfo, "%s,", value);
+								appendStringInfo(strinfo, "\"%s\",", value);
 							}
 						}
 						pfree(value);
@@ -1159,7 +1162,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", col->typeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, col->typeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, col->typeName);
 
 					pgcol->atttype = pstrdup(col->typeName);
 				}
@@ -1172,7 +1175,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 					pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 					if (entry->pgsqlTypeLength != -1)
@@ -1189,7 +1192,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				if (datatypeonly)
 					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 				else
-					appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+					appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 				pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 				if (entry->pgsqlTypeLength != -1)
@@ -1264,7 +1267,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", col->typeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, col->typeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, col->typeName);
 
 					pgcol->atttype = pstrdup(col->typeName);
 				}
@@ -1277,7 +1280,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 					pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 					if (entry->pgsqlTypeLength != -1)
@@ -1294,7 +1297,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				if (datatypeonly)
 					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 				else
-					appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+					appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 				pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 				if (entry->pgsqlTypeLength != -1)
@@ -1346,7 +1349,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", col->typeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, col->typeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, col->typeName);
 
 					pgcol->atttype = pstrdup(col->typeName);
 				}
@@ -1359,7 +1362,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 					pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 					if (entry->pgsqlTypeLength != -1)
@@ -1376,7 +1379,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				if (datatypeonly)
 					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 				else
-					appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+					appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 				pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 				if (entry->pgsqlTypeLength != -1)
@@ -1403,7 +1406,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 		default:
 		{
 			/* unknown type, no special handling - may error out later when applying to PostgreSQL */
-			appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+			appendStringInfo(strinfo, " \"%s\" %s ", col->name, col->typeName);
 			break;
 		}
 	}
@@ -1467,7 +1470,7 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 					continue;
 
 				/* check data type */
-				appendStringInfo(&strinfo, "ALTER COLUMN %s SET DATA TYPE",
+				appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DATA TYPE",
 						mappedColumnName);
 				transformDDLColumns(objid, col, type, true, &strinfo, pgcol);
 				if (col->length > 0 && col->scale > 0)
@@ -1502,13 +1505,13 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 					 * synchdb can receive a default expression not supported in postgresql.
 					 * so for now, we always set to default null. todo
 					 */
-					appendStringInfo(&strinfo, "ALTER COLUMN %s SET DEFAULT %s",
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DEFAULT %s",
 							mappedColumnName, "NULL");
 				}
 				else
 				{
 					/* remove default value */
-					appendStringInfo(&strinfo, "ALTER COLUMN %s DROP DEFAULT",
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP DEFAULT",
 							mappedColumnName);
 				}
 
@@ -1517,12 +1520,12 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 				/* check if nullable or not nullable */
 				if (!col->optional)
 				{
-					appendStringInfo(&strinfo, "ALTER COLUMN %s SET NOT NULL",
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET NOT NULL",
 							mappedColumnName);
 				}
 				else
 				{
-					appendStringInfo(&strinfo, "ALTER COLUMN %s DROP NOT NULL",
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP NOT NULL",
 							mappedColumnName);
 				}
 				appendStringInfo(&strinfo, ",");
@@ -3397,12 +3400,12 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 			return;
 		}
 
-		/* convert schema and table name to lowercase letters before lookup */
-		for (j = 0; j < strlen(pgddl->schema); j++)
-			pgddl->schema[j] = (char) pg_tolower((unsigned char) pgddl->schema[j]);
-
-		for (j = 0; j < strlen(pgddl->tbname); j++)
-			pgddl->tbname[j] = (char) pg_tolower((unsigned char) pgddl->tbname[j]);
+//		/* convert schema and table name to lowercase letters before lookup */
+//		for (j = 0; j < strlen(pgddl->schema); j++)
+//			pgddl->schema[j] = (char) pg_tolower((unsigned char) pgddl->schema[j]);
+//
+//		for (j = 0; j < strlen(pgddl->tbname); j++)
+//			pgddl->tbname[j] = (char) pg_tolower((unsigned char) pgddl->tbname[j]);
 
 		schemaoid = get_namespace_oid(pgddl->schema, false);
 		if (!OidIsValid(schemaoid))
@@ -3438,7 +3441,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 			if (pgcol->attname == NULL || pgcol->atttype == NULL)
 				continue;
 
-			appendStringInfo(&strinfo, "(lower('%s'),lower('%s'),%d,%d,'%s','%s','%s'),",
+			appendStringInfo(&strinfo, "('%s',lower('%s'),%d,%d,'%s','%s','%s'),",
 					name,
 					connectorTypeToString(conntype),
 					tableoid,
@@ -3460,9 +3463,9 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 	else if (pgddl->type == DDL_DROP_TABLE)
 	{
 		appendStringInfo(&strinfo, "DELETE FROM %s "
-				"WHERE lower(ext_tbname) = lower('%s') AND "
-				"lower(name) = lower('%s') AND "
-				"lower(type) = lower('%s');",
+				"WHERE ext_tbname = '%s' AND "
+				"name = '%s' AND "
+				"type = '%s';",
 				SYNCHDB_ATTRIBUTE_TABLE,
 				dbzddl->id,
 				name,
@@ -3481,10 +3484,10 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 			appendStringInfo(&strinfo, "UPDATE %s SET "
 					"ext_attname = '........synchdb.dropped.%d........',"
 					"ext_atttypename = null WHERE "
-					"lower(ext_attname) = lower('%s') AND "
-					"lower(name) = lower('%s') AND "
-					"lower(type) = lower('%s') AND "
-					"lower(ext_tbname) = lower('%s');",
+					"ext_attname = '%s' AND "
+					"name = '%s' AND "
+					"type = '%s' AND "
+					"ext_tbname = '%s';",
 					SYNCHDB_ATTRIBUTE_TABLE,
 					pgcol->position,
 					pgcol->attname,
@@ -4221,17 +4224,17 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (schema && table)
 			{
 				/* include create schema clause */
-				appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; ", schema);
+				appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS \"%s\"; ", schema);
 
 				/* table stays as table under the schema */
-				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s.%s (", schema, table);
+				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS \"%s\".\"%s\" (", schema, table);
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
 			else if (!schema && table)
 			{
 				/* table stays as table but no schema */
-				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s (", table);
+				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS \"%s\" (", table);
 				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4490,11 +4493,13 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				elog(ERROR, "%s", msg);
 			}
 
-			for (i = 0; i < strlen(db); i++)
-				db[i] = (char) pg_tolower((unsigned char) db[i]);
-
-			for (i = 0; i < strlen(table); i++)
-				table[i] = (char) pg_tolower((unsigned char) table[i]);
+//			for (i = 0; i < strlen(db); i++)
+//				db[i] = (char) pg_tolower((unsigned char) db[i]);
+//
+//			for (i = 0; i < strlen(table); i++)
+//				table[i] = (char) pg_tolower((unsigned char) table[i]);
+			fc_normalize_name(synchdb_letter_casing_strategy, db, strlen(db));
+			fc_normalize_name(synchdb_letter_casing_strategy, table, strlen(table));
 
 			/* make schema points to db */
 			schema = db;
@@ -4754,7 +4759,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 						pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
 						altered = true;
-						appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS %s,", NameStr(attr->attname));
+						appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS \"%s\",", NameStr(attr->attname));
 						pgcol->attname = pstrdup(NameStr(attr->attname));
 						pgcol->position = attnum;
 						pgddl->columns = lappend(pgddl->columns, pgcol);
@@ -4976,7 +4981,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 							break;
 					}
 
-					appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS %s,", mappedColumnName);
+					appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS \"%s\",", mappedColumnName);
 
 					elog(DEBUG1, "dropping old column %s", mappedColumnName);
 
@@ -5048,7 +5053,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 					/* check data type */
 					elog(DEBUG1, "altering column %s", col->name);
-					appendStringInfo(&strinfo, "ALTER COLUMN %s SET DATA TYPE",
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DATA TYPE",
 							mappedColumnName);
 
 					transformDDLColumns(dbzddl->id, col, type, true, &strinfo, pgcol);
@@ -5084,13 +5089,13 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 						 * synchdb can receive a default expression not supported in postgresql.
 						 * so for now, we always set to default null. todo
 						 */
-						appendStringInfo(&strinfo, "ALTER COLUMN %s SET DEFAULT %s",
+						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DEFAULT %s",
 								mappedColumnName, "NULL");
 					}
 					else
 					{
 						/* remove default value */
-						appendStringInfo(&strinfo, "ALTER COLUMN %s DROP DEFAULT",
+						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP DEFAULT",
 								mappedColumnName);
 					}
 
@@ -5099,12 +5104,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					/* check if nullable or not nullable */
 					if (!col->optional)
 					{
-						appendStringInfo(&strinfo, "ALTER COLUMN %s SET NOT NULL",
+						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET NOT NULL",
 								mappedColumnName);
 					}
 					else
 					{
-						appendStringInfo(&strinfo, "ALTER COLUMN %s DROP NOT NULL",
+						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP NOT NULL",
 								mappedColumnName);
 					}
 
@@ -5130,7 +5135,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				if (pkoid == InvalidOid)
 				{
-					appendStringInfo(&strinfo, "ADD CONSTRAINT %s ", dbzddl->constraintName);
+					appendStringInfo(&strinfo, "ADD CONSTRAINT \"%s\" ", dbzddl->constraintName);
 					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, false);
 				}
 				else
@@ -5143,7 +5148,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			else if (dbzddl->subtype == SUBTYPE_DROP_CONSTRAINT)
 			{
 				if (dbzddl->constraintName)
-					appendStringInfo(&strinfo, "DROP CONSTRAINT %s ", dbzddl->constraintName);
+					appendStringInfo(&strinfo, "DROP CONSTRAINT \"%s\" ", dbzddl->constraintName);
 				else
 				{
 					elog(WARNING, "constaint name to drop is NULL. Skipping...");
@@ -5310,4 +5315,34 @@ fc_translate_datatype(ConnectorType connectorType,
 		return true;
 	}
 	return false;
+}
+
+void
+fc_normalize_name(LetterCasingStrategy strategy, char * name, int len)
+{
+	int i = 0;
+
+	if (!name || len == 0)
+		return;
+
+	switch(strategy)
+	{
+		case LCS_NORMALIZE_LOWERCASE:
+		{
+			for (i = 0; i < len; i++)
+				name[i] = (char) pg_tolower((unsigned char) name[i]);
+			break;
+		}
+		case LCS_NORMALIZE_UPPERCASE:
+		{
+			for (i = 0; i < len; i++)
+				name[i] = (char) pg_toupper((unsigned char) name[i]);
+			break;
+		}
+		default:
+		case LCS_AS_IS:
+		{
+			break;
+		}
+	}
 }
