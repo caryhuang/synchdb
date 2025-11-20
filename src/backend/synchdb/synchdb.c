@@ -4199,7 +4199,7 @@ _PG_init(void)
 							"letter casing strategy to use",
 							 NULL,
 							 &synchdb_letter_casing_strategy,
-							 LCS_AS_IS,
+							 LCS_NORMALIZE_LOWERCASE,
 							 letter_casing_strategies,
 							 PGC_SIGHUP,
 							 0,
