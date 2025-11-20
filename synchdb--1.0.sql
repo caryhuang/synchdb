@@ -2471,12 +2471,7 @@ BEGIN
       AND  c2.relkind = 'r'
   LOOP
     ------------------------------------------------------------------
-    -- CHANGED: error-table identity
-    -- DB and SCHEMA are UPPERCASE, TABLE keeps original case from src_tbl_name.
-    -- So for three FTs you'll get:
-    --   FREE.DBZUSER.test_table
-    --   FREE.DBZUSER.TEST_TABLE
-    --   FREE.DBZUSER.test_TABLE
+    -- Error-table identity: DB/SCHEMA uppercase, table keeps src case
     ------------------------------------------------------------------
     IF p_desired_schema IS NULL OR btrim(p_desired_schema::text) = '' THEN
       v_tbl_display :=
@@ -2487,7 +2482,6 @@ BEGIN
         || upper(p_desired_schema::text) || '.'
         || r.src_tbl_name;
     END IF;
-    ------------------------------------------------------------------
 
     v_any_batch_failed := false;
 
@@ -2560,15 +2554,17 @@ BEGIN
         FROM dst_cols d
       ),
       src_presence AS (
-        -- IMPORTANT: key off the *actual* FT name, not the lower-cased canonical name.
-        -- This prevents multiple case-variants (TEST_TABLE, "test_TABLE", "test_table")
-        -- from being merged and causing duplicate columns.
-        SELECT
-          table_name         AS src_tbl_ident,
-          lower(column_name) AS src_col_canon,
-          column_name        AS src_col_ident
+        ----------------------------------------------------------------
+        -- FIX: collapse duplicate source columns per (table, canon name)
+        -- so "A" and "a" become exactly ONE mapping for canon 'a'
+        ----------------------------------------------------------------
+        SELECT DISTINCT ON (table_name, lower(column_name))
+               table_name         AS src_tbl_ident,
+               lower(column_name) AS src_col_canon,
+               column_name        AS src_col_ident
         FROM information_schema.columns
         WHERE table_schema = p_src_schema
+        ORDER BY table_name, lower(column_name), ordinal_position
       ),
       tmap AS (
         -- Transform rules
@@ -2658,7 +2654,6 @@ BEGIN
                )',
               'public', v_err_tbl_ident, ('uq_'||v_err_tbl_ident)
             );
-            -- after creation, mark both flags
             v_err_tbl_created := true;
             v_err_tbl_exists  := true;
           END IF;
@@ -2715,7 +2710,7 @@ BEGIN
 
       ELSE
         ----------------------------------------------------------------
-        -- Batching path
+        -- Batching path (unchanged)
         ----------------------------------------------------------------
         EXECUTE format(
           'SELECT count(*) FROM (SELECT %s FROM %I.%I) q',
@@ -2878,7 +2873,7 @@ BEGIN
   END IF;
 END;
 $$;
-
+  
 COMMENT ON FUNCTION synchdb_migrate_data_with_transforms(name, name, name, name, numeric, name, boolean, int, boolean, boolean) IS
    'migrate data while applying transform expressions if available - sub-transaction mode';
 
@@ -2930,7 +2925,8 @@ BEGIN
     --   - dst_cols: canonical + actual destination column names
     --   - colmap/tmap: mapping & transforms from synchdb_objmap
     --   - src_presence: canonical + actual source column names,
-    --                   keyed by the *exact* FT name.
+    --                   keyed by the *exact* FT name, with at most
+    --                   one row per (table, lower(column_name)).
     ------------------------------------------------------------------
     WITH dst_cols AS (
       SELECT
@@ -2997,17 +2993,17 @@ BEGIN
     ),
     src_presence AS (
       ----------------------------------------------------------------
-      -- IMPORTANT: key off the *actual* FT name (src_tbl_ident), not
-      -- the lower-cased canonical name. This keeps
-      --   TESTTABLE, "testTABLE", "testtable"
-      -- completely distinct at the metadata level.
+      -- FIX: collapse duplicate source columns per (table, canon name)
+      -- so A/a variants become exactly ONE mapping for canon 'a'.
+      -- Still keyed by *exact* FT name in the join.
       ----------------------------------------------------------------
-      SELECT
-        table_name         AS src_tbl_ident,
-        lower(column_name) AS src_col_canon,
-        column_name        AS src_col_ident
+      SELECT DISTINCT ON (table_name, lower(column_name))
+             table_name         AS src_tbl_ident,
+             lower(column_name) AS src_col_canon,
+             column_name        AS src_col_ident
       FROM information_schema.columns
       WHERE table_schema = p_src_schema
+      ORDER BY table_name, lower(column_name), ordinal_position
     ),
     tmap AS (
       -- Transform rules (canonical src_col but free-form dst expr with %d placeholder)

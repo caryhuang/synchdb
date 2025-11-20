@@ -278,8 +278,10 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 				if (v2)
 				{
 					strncpy(tmprecord.name, v2->val.string.val, v2->val.string.len); /* todo check overflow */
-					for (j = 0; j < strlen(tmprecord.name); j++)
-						tmprecord.name[j] = (char) pg_tolower((unsigned char) tmprecord.name[j]);
+
+					fc_normalize_name(synchdb_letter_casing_strategy, tmprecord.name, strlen(tmprecord.name));
+//					for (j = 0; j < strlen(tmprecord.name); j++)
+//						tmprecord.name[j] = (char) pg_tolower((unsigned char) tmprecord.name[j]);
 				}
 				else
 				{
