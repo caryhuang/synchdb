@@ -308,7 +308,6 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 	JsonbIteratorToken r;
 	char * key = NULL;
 	char * value = NULL;
-	int j = 0;
 
 	DBZ_DDL * ddlinfo = (DBZ_DDL*) palloc0(sizeof(DBZ_DDL));
 	DBZ_DDL_COLUMN * ddlcol = NULL;
@@ -354,10 +353,6 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
     	destroyDBZDDL(ddlinfo);
     	return NULL;
     }
-
-//    /* once we are done checking ddlinfo->id, we turn it to lowercase */
-//	for (j = 0; j < strlen(ddlinfo->id); j++)
-//		ddlinfo->id[j] = (char) pg_tolower((unsigned char) ddlinfo->id[j]);
 
     fc_normalize_name(synchdb_letter_casing_strategy, ddlinfo->id, strlen(ddlinfo->id));
 
@@ -496,10 +491,6 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->name = pstrdup(value);
 
-//						/* convert typeName to lowercase for consistency */
-//						for (j = 0; j < strlen(ddlcol->name); j++)
-//							ddlcol->name[j] = (char) pg_tolower(ddlcol->name[j]);
-
 						fc_normalize_name(synchdb_letter_casing_strategy, ddlcol->name,
 								strlen(ddlcol->name));
 					}
@@ -523,9 +514,6 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->typeName = pstrdup(value);
 
-//						/* convert typeName to lowercase for consistency */
-//						for (j = 0; j < strlen(ddlcol->typeName); j++)
-//							ddlcol->typeName[j] = (char) pg_tolower(ddlcol->typeName[j]);
 						/* data type names always normalized to lower case */
 						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->typeName,
 								strlen(ddlcol->typeName));
@@ -605,7 +593,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	Oid schemaoid;
 	Relation rel;
 	TupleDesc tupdesc;
-	int attnum, j = 0;
+	int attnum = 0;
 	HTAB * typeidhash;
 	HTAB * namejsonposhash;
 	HASHCTL hash_ctl;
@@ -697,10 +685,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 
 	fc_normalize_name(synchdb_letter_casing_strategy, objid.data, objid.len);
 
-//	/* table name transformation and normalized objectid to lower case */
-//	for (j = 0; j < objid.len; j++)
-//		objid.data[j] = (char) pg_tolower((unsigned char) objid.data[j]);
-
 	dbzdml->remoteObjectId = pstrdup(objid.data);
 	dbzdml->mappedObjectId = transform_object_name(dbzdml->remoteObjectId, "table");
 	if (dbzdml->mappedObjectId)
@@ -767,12 +751,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 
 	fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->schema, strlen(dbzdml->schema));
 	fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->table, strlen(dbzdml->table));
-
-//	for (j = 0; j < strlen(dbzdml->schema); j++)
-//		dbzdml->schema[j] = (char) pg_tolower((unsigned char) dbzdml->schema[j]);
-//
-//	for (j = 0; j < strlen(dbzdml->table); j++)
-//		dbzdml->table[j] = (char) pg_tolower((unsigned char) dbzdml->table[j]);
 
 	/* prepare cache key */
 	strlcpy(cachekey.schema, dbzdml->schema, sizeof(cachekey.schema));
@@ -1006,10 +984,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-//						/* convert to lower case column name */
-//						for (j = 0; j < strlen(colval->name); j++)
-//							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
-
 						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
 
 						colval->value = pstrdup(value);
@@ -1171,10 +1145,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
-
-//						/* convert to lower case column name */
-//						for (j = 0; j < strlen(colval->name); j++)
-//							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
 
 						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
 
@@ -1361,10 +1331,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 							colval->name = pstrdup(key);
-
-//							/* convert to lower case column name */
-//							for (j = 0; j < strlen(colval->name); j++)
-//								colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
 
 							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
 

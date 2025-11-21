@@ -3391,7 +3391,6 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 		(pgddl->type == DDL_ALTER_TABLE && pgddl->subtype == SUBTYPE_ADD_COLUMN) ||
 		(pgddl->type == DDL_ALTER_TABLE && pgddl->subtype == SUBTYPE_ALTER_COLUMN))
 	{
-		int j = 0;
 		Oid schemaoid, tableoid;
 
 		if (list_length(dbzddl->columns) <= 0 || list_length(pgddl->columns) <= 0)
@@ -3399,13 +3398,6 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 			elog(WARNING, "Invalid input column lists. Skipping attribute update");
 			return;
 		}
-
-//		/* convert schema and table name to lowercase letters before lookup */
-//		for (j = 0; j < strlen(pgddl->schema); j++)
-//			pgddl->schema[j] = (char) pg_tolower((unsigned char) pgddl->schema[j]);
-//
-//		for (j = 0; j < strlen(pgddl->tbname); j++)
-//			pgddl->tbname[j] = (char) pg_tolower((unsigned char) pgddl->tbname[j]);
 
 		schemaoid = get_namespace_oid(pgddl->schema, false);
 		if (!OidIsValid(schemaoid))
@@ -4426,7 +4418,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 	}
 	else if (dbzddl->type == DDL_ALTER_TABLE)
 	{
-		int i = 0, attnum = 1, newcol = 0;
+		int attnum = 1, newcol = 0;
 		Oid schemaoid = 0;
 		Oid tableoid = 0;
 		Oid pkoid = 0;
@@ -4495,11 +4487,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				elog(ERROR, "%s", msg);
 			}
 
-//			for (i = 0; i < strlen(db); i++)
-//				db[i] = (char) pg_tolower((unsigned char) db[i]);
-//
-//			for (i = 0; i < strlen(table); i++)
-//				table[i] = (char) pg_tolower((unsigned char) table[i]);
 			fc_normalize_name(synchdb_letter_casing_strategy, db, strlen(db));
 			fc_normalize_name(synchdb_letter_casing_strategy, table, strlen(table));
 

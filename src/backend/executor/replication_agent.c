@@ -16,6 +16,7 @@
 #include "fmgr.h"
 #include "executor/replication_agent.h"
 #include "executor/spi.h"
+#include "converter/format_converter.h"
 #include "access/xact.h"
 #include "utils/snapmgr.h"
 #include "access/table.h"
@@ -1389,7 +1390,7 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 		bool write_schema_hist, const char * snapshotMode,
 		int letter_casing_strategy)
 {
-	int ret = -1, i = 0;
+	int ret = -1;
 	bool isnull = false;
 	Datum d;
 	char *s = NULL;
@@ -1429,9 +1430,6 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 	if (IsTransactionOrTransactionBlock())
 		skiptx = true;
 
-//	/* we only work with lower case objects */
-//	for (i = 0; i < strlen(conninfo->srcdb); i++)
-//		dstdb[i] = (char) pg_tolower((unsigned char) conninfo->srcdb[i]);
 	strlcpy(dstdb, conninfo->srcdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
 	fc_normalize_name(letter_casing_strategy, dstdb, strlen(dstdb));
 

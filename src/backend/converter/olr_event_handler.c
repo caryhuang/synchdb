@@ -163,7 +163,7 @@ strip_after_column_def(StringInfoData *sql)
 			paren_level--;
 			if (paren_level == 0)
 			{
-				i++;  // include the closing ')'
+				i++;
 				break;
 			}
 		}
@@ -246,7 +246,7 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 	NameJsonposEntry * entry;
 	NameJsonposEntry tmprecord = {0};
 	bool found = false;
-	int i = 0, j = 0;
+	int i = 0;
 	unsigned int contsize = 0;
 	Datum datum_elems[1] ={CStringGetTextDatum("columns")};
 
@@ -280,8 +280,6 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 					strncpy(tmprecord.name, v2->val.string.val, v2->val.string.len); /* todo check overflow */
 
 					fc_normalize_name(synchdb_letter_casing_strategy, tmprecord.name, strlen(tmprecord.name));
-//					for (j = 0; j < strlen(tmprecord.name); j++)
-//						tmprecord.name[j] = (char) pg_tolower((unsigned char) tmprecord.name[j]);
 				}
 				else
 				{
@@ -406,7 +404,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	StringInfoData sql;
 	List * ptree = NULL;
 	ListCell * cell;
-	int j = 0;
 
 	/* scn - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "scn", strlen("scn"), &vbuf);
@@ -501,7 +498,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	}
 
 	appendBinaryStringInfo(&sql, v->val.string.val, v->val.string.len);
-	//remove_double_quotes(&sql);
 
 	if (!is_whitelist_sql(&sql))
 	{
@@ -1307,9 +1303,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	else
 		olrddl->id = psprintf("%s.%s", db, table);
 
-//	for (j = 0; j < strlen(olrddl->id); j++)
-//		olrddl->id[j] = (char) pg_tolower((unsigned char) olrddl->id[j]);
-
 end:
 
 	return olrddl;
@@ -1335,7 +1328,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	Oid schemaoid;
 	Relation rel;
 	TupleDesc tupdesc;
-	int attnum, j = 0;
+	int attnum;
 	DataCacheKey cachekey = {0};
 	DataCacheEntry * cacheentry;
 	Bitmapset * pkattrs;
@@ -1437,10 +1430,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	appendStringInfo(&objid, "%s", table);
 
-//	/* table name transformation and normalized objectid to lower case */
-//	for (j = 0; j < objid.len; j++)
-//		objid.data[j] = (char) pg_tolower((unsigned char) objid.data[j]);
-
 	fc_normalize_name(synchdb_letter_casing_strategy, objid.data, objid.len);
 
 	olrdml->remoteObjectId = pstrdup(objid.data);
@@ -1488,12 +1477,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	 * created. However, catalog lookups are case sensitive so here we must
 	 * convert db and table to all lower case letters.
 	 */
-//	for (j = 0; j < strlen(olrdml->schema); j++)
-//		olrdml->schema[j] = (char) pg_tolower((unsigned char) olrdml->schema[j]);
-//
-//	for (j = 0; j < strlen(olrdml->table); j++)
-//		olrdml->table[j] = (char) pg_tolower((unsigned char) olrdml->table[j]);
-
 	fc_normalize_name(synchdb_letter_casing_strategy, olrdml->schema, strlen(olrdml->schema));
 	fc_normalize_name(synchdb_letter_casing_strategy, olrdml->table, strlen(olrdml->table));
 
@@ -1711,10 +1694,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-						/* convert to lower case column name */
-//						for (j = 0; j < strlen(colval->name); j++)
-//							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
-
 						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
 
 						colval->value = pstrdup(value);
@@ -1881,10 +1860,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 							colval->name = pstrdup(key);
 
-//							/* convert to lower case column name */
-//							for (j = 0; j < strlen(colval->name); j++)
-//								colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
-
 							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
 
 							colval->value = pstrdup(value);
@@ -2044,10 +2019,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
-
-//						/* convert to lower case column name */
-//						for (j = 0; j < strlen(colval->name); j++)
-//							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
 
 						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
 
