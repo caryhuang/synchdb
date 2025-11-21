@@ -313,10 +313,14 @@ def stop_and_delete_synchdb_connector(cursor, name):
 def drop_default_pg_schema(cursor, vendor):
     if vendor == "mysql":
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS inventory CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"INVENTORY\" CASCADE")
     elif vendor == "sqlserver":
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS testdb CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"TESTDB\" CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"testDB\" CASCADE")
     else:
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS free CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"FREE\" CASCADE")
 
 def update_guc_conf(cursor, key, val, reload_conf=False):
     temp_dir = "synchdb_testdir"

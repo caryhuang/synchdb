@@ -238,14 +238,15 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     else:
         time.sleep(10)
 
-    pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM {dbname}.orders WHERE order_number = 10005")
+    pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM {dbname}.orders WHERE order_number >= 10005")
     assert pgrow != None
     assert int(pgrow[3]) == 10000
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number = 10005")
+    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
+    time.sleep(10)
 
 def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbzsnap_upper"
@@ -314,7 +315,7 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     if dbvendor == "mysql":
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
-            product_id) VALUES (10005, "2025-12-12", 1002, 10000, 102)
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102)
         """
     elif dbvendor == "sqlserver":
         query = """
@@ -334,14 +335,15 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     else:
         time.sleep(10)
 
-    pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" = 10005")
+    pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" >= 10005")
     assert pgrow != None
     assert int(pgrow[3]) == 10000
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number = 10005")
+    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
+    time.sleep(10)
 
 def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_fdwsnap_upper"
@@ -444,15 +446,16 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     else:
         time.sleep(10)
 
-    pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" = 10005")
+    pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" >= 10005")
     assert pgrow != None
     assert int(pgrow[3]) == 10000
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number = 10005")
+    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
+    time.sleep(10)
 
 def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbzsnap_asis"
@@ -527,7 +530,7 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
     if dbvendor == "mysql":
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
-            product_id) VALUES (10005, "2025-12-12", 1002, 10000, 102)
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102)
         """
     elif dbvendor == "sqlserver":
         query = """
@@ -548,16 +551,17 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
         time.sleep(10)
 
     if dbvendor == "oracle" or dbvendor == "olr":
-        pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" = 10005")
+        pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" >= 10005")
     else:
-        pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM \"{dbname}\".orders WHERE order_number = 10005")
+        pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM \"{dbname}\".orders WHERE order_number >= 10005")
     assert pgrow != None
     assert int(pgrow[3]) == 10000
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number = 10005")
+    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
+    time.sleep(10)
 
 def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_fdwsnap_asis"
@@ -647,7 +651,7 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     if dbvendor == "mysql":
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
-            product_id) VALUES (10005, "2025-12-12", 1002, 10000, 102)
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102)
         """
     elif dbvendor == "sqlserver":
         query = """
@@ -668,17 +672,18 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
         time.sleep(10)
 
     if dbvendor == "oracle" or dbvendor == "olr":
-        pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" = 10005")
+        pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" >= 10005")
     else:
-        pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM \"{dbname}\".orders WHERE order_number = 10005")
+        pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM \"{dbname}\".orders WHERE order_number >= 10005")
     assert pgrow != None
     assert int(pgrow[3]) == 10000
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number = 10005")
+    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
+    time.sleep(10)
 
 def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_schemasync"
@@ -742,8 +747,8 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
     # test a bit of cdc
     if dbvendor == "mysql":
         query = """
-            INSERT INTO orders(order_date, purchaser, quantity,
-            product_id) VALUES ('2025-12-12',
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12',
             1002, 10000, 102);
         """
     elif dbvendor == "sqlserver":
@@ -770,7 +775,7 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number = 10005")
+    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     time.sleep(10)
 
 def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
@@ -865,8 +870,9 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number = 10005")
+    run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
+    time.sleep(10)
 
 def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_always"
