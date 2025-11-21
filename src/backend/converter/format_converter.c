@@ -3465,7 +3465,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 		appendStringInfo(&strinfo, "DELETE FROM %s "
 				"WHERE ext_tbname = '%s' AND "
 				"name = '%s' AND "
-				"type = '%s';",
+				"lower(type) = lower('%s');",
 				SYNCHDB_ATTRIBUTE_TABLE,
 				dbzddl->id,
 				name,
@@ -3486,7 +3486,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 					"ext_atttypename = null WHERE "
 					"ext_attname = '%s' AND "
 					"name = '%s' AND "
-					"type = '%s' AND "
+					"lower(type) = lower('%s') AND "
 					"ext_tbname = '%s';",
 					SYNCHDB_ATTRIBUTE_TABLE,
 					pgcol->position,
@@ -3509,6 +3509,8 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 	 */
 	appendStringInfo(&strinfo, "DELETE FROM %s WHERE attrelid NOT IN "
 			"(SELECT oid FROM pg_class);", SYNCHDB_ATTRIBUTE_TABLE);
+
+	elog(DEBUG1,"synchdb attribute update query: %s", strinfo.data);
 
 	/* execute the query using SPI */
 	ra_executeCommand(strinfo.data);
