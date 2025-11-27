@@ -2182,43 +2182,71 @@ dbz_read_snapshot_state(ConnectorType type, const char * offset)
 	if (!offset)
 		return false;
 
+	/* no offset available - assuming snapshot is not done */
+	if (offset && (!strcasecmp(offset, "no offset") ||
+			!strcasecmp(offset, "offset file not flushed yet")))
+	{
+		elog(WARNING, "offset file absent. Assuming snapshot is not done...");
+		return false;
+	}
+
 	switch(type)
 	{
 		case TYPE_ORACLE:
 		{
-			if (offset && (!strcasecmp(offset, "no offset") ||
-					!strcasecmp(offset, "offset file not flushed yet")))
+			/*
+			 * if all 3 of these are present, that means debezium has already
+			 * been in CDC stage, so we can assume that initial snapshot has
+			 * been completed.
+			 */
+			if (strstr(offset, "commit_scn") &&
+				strstr(offset, "snapshot_scn") &&
+				strstr(offset, "scn"))
 			{
-				/* no offset available - assuming snapshot is not done */
-				elog(WARNING, "offset file absent. Assuming snapshot is not done...");
-				return false;
+				return true;
 			}
-			else
-			{
-				/*
-				 * if all 3 of these are present, that means debezium has already
-				 * been in CDC stage, so we can assume that initial snapshot has
-				 * been completed.
-				 */
-				if (strstr(offset, "commit_scn") &&
-					strstr(offset, "snapshot_scn") &&
-					strstr(offset, "scn"))
-				{
-					return true;
-				}
 
-				/*
-				 * snapshot is also considered done if debezium explicitly said
-				 * it is completed
-				 */
-				if (strstr(offset, "\"snapshot_completed\":true"))
-				{
-					return true;
-				}
+			/*
+			 * snapshot is also considered done if debezium explicitly said
+			 * it is completed
+			 */
+			if (strstr(offset, "\"snapshot_completed\":true"))
+			{
+				return true;
 			}
+
 			break;
 		}
 		case TYPE_MYSQL:
+		{
+			/*
+			 * if all 3 of these are present, that means debezium has already
+			 * been in CDC stage, so we can assume that initial snapshot has
+			 * been completed.
+			 */
+			if (strstr(offset, "ts_sec") &&
+				strstr(offset, "file") &&
+				strstr(offset, "pos"))
+			{
+				return true;
+			}
+
+			/*
+			 * snapshot is also considered done if debezium explicitly said
+			 * it is completed
+			 */
+			if (strstr(offset, "\"snapshot_completed\":true"))
+			{
+				return true;
+			}
+			break;
+		}
+		case TYPE_POSTGRES:
+		{
+			/* xxx: todo: */
+			return false;
+			break;
+		}
 		case TYPE_SQLSERVER:
 		case TYPE_OLR:
 		default:
@@ -2281,108 +2309,119 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 					if (((connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE) ||
 						(connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)) &&
 						connInfo->snapengine == ENGINE_FDW &&
-						connectorType == TYPE_ORACLE)
+						connectorType != TYPE_SQLSERVER)
 					{
-						/*
-						 * FDW based snapshot and schema only sync processing logics here.
-						 * Only Oracle connector is supported for now. May extend to support
-						 * other connector types in the future.
-						 */
-						orascn scn_req = 0;
-						orascn scn_res = 0;
-						int ret = -1, ntables = 0;
-						char * tbl_list = NULL;
-
-						dbz_ora_resume_scn = 0;
-						ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &scn_req);
-
-					    if (ntables > 0 && tbl_list != NULL)
-					    {
-					    	elog(WARNING, "Retry on failed snapshot tables %s as of %llu for %s",
-					    			tbl_list, scn_req, connInfo->name);
-					    }
-
-						if (connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE)
+						if (connectorType == TYPE_ORACLE)
 						{
-							if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
-								set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
-						}
-						else
-						{
-							if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
-								set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
-						}
+							/* FDW based snapshot and schema only sync processing logics here. */
+							orascn scn_req = 0;
+							orascn scn_res = 0;
+							int ret = -1, ntables = 0;
+							char * tbl_list = NULL;
 
-						/*
-						 * the fdw initial snapshot scripts are written according to pg parsing
-						 * standard, so we need to temporarily change to pg compatible mode for
-						 * the duration of the fdw snapshot
-						 */
-						if (connInfo->isOraCompat)
-						{
-							SetConfigOption("ivorysql.compatible_mode", "pg", PGC_USERSET, PGC_S_OVERRIDE);
-						}
+							dbz_ora_resume_scn = 0;
+							ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &scn_req);
 
-						/* invoke initial snapshot or schema sync PL/pgSQL workflow with schema history requested */
-					    scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list,
-					    		scn_req, synchdb_fdw_use_subtx, true, snapshotMode, synchdb_letter_casing_strategy);
-
-					    if (connInfo->isOraCompat)
-					    {
-					    	SetConfigOption("ivorysql.compatible_mode", "oracle", PGC_USERSET, PGC_S_OVERRIDE);
-					    }
-
-						if (scn_res > 0)
-						{
-							/* initial snapshot is considered completed */
-							elog(WARNING, "oracle_fdw based snapshot is done with scn %lld", scn_res);
-
-							/* clean tbl_list if needed */
-							if (tbl_list != NULL)
+							if (ntables > 0 && tbl_list != NULL)
 							{
-								pfree(tbl_list);
-								tbl_list = NULL;
+								elog(WARNING, "Retry on failed snapshot tables %s as of %llu for %s",
+										tbl_list, scn_req, connInfo->name);
 							}
 
-							ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &scn_req);
-							if (ret != 0 || ntables == 0 || tbl_list == NULL)
+							if (connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE)
 							{
-								/*
-								 * all tables succeeded! remember the value of scn_res, this value is required to
-								 * build debezium metadata to resume CDC after FDW snapshot has been done.
-								 */
-								dbz_ora_resume_scn = scn_res;
-
-								/* change the state to STATE_SCHEMA_SYNC_DONE to handle the transition */
-								set_shm_connector_state(myConnectorId, STATE_SCHEMA_SYNC_DONE);
+								if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
+									set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
 							}
 							else
 							{
-								/* some tables have failed... */
-								elog(WARNING, "oracle_fdw based snapshot is done with errors: failed tables are: %s",
-										tbl_list);
+								if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+									set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+							}
 
-								set_shm_connector_state(myConnectorId, STATE_PAUSED);
-								set_shm_connector_errmsg(myConnectorId, "some tables have failed the snapshot. "
-										"Check synchdb_fdw_snapshot_errors_x tables for datails. "
-										"Resume connector to try again");
+							/*
+							 * the fdw initial snapshot scripts are written according to pg parsing
+							 * standard, so we need to temporarily change to pg compatible mode for
+							 * the duration of the fdw snapshot
+							 */
+							if (connInfo->isOraCompat)
+							{
+								SetConfigOption("ivorysql.compatible_mode", "pg", PGC_USERSET, PGC_S_OVERRIDE);
+							}
 
+							/* invoke initial snapshot or schema sync PL/pgSQL workflow with schema history requested */
+							scn_res = ra_run_orafdw_initial_snapshot_spi(connInfo, connInfo->flag, tbl_list,
+									scn_req, synchdb_fdw_use_subtx, true, snapshotMode, synchdb_letter_casing_strategy);
+
+							if (connInfo->isOraCompat)
+							{
+								SetConfigOption("ivorysql.compatible_mode", "oracle", PGC_USERSET, PGC_S_OVERRIDE);
+							}
+
+							if (scn_res > 0)
+							{
+								/* initial snapshot is considered completed */
+								elog(WARNING, "oracle_fdw based snapshot is done with scn %lld", scn_res);
+
+								/* clean tbl_list if needed */
+								if (tbl_list != NULL)
+								{
+									pfree(tbl_list);
+									tbl_list = NULL;
+								}
+
+								ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &scn_req);
+								if (ret != 0 || ntables == 0 || tbl_list == NULL)
+								{
+									/*
+									 * all tables succeeded! remember the value of scn_res, this value is required to
+									 * build debezium metadata to resume CDC after FDW snapshot has been done.
+									 */
+									dbz_ora_resume_scn = scn_res;
+
+									/* change the state to STATE_SCHEMA_SYNC_DONE to handle the transition */
+									set_shm_connector_state(myConnectorId, STATE_SCHEMA_SYNC_DONE);
+								}
+								else
+								{
+									/* some tables have failed... */
+									elog(WARNING, "oracle_fdw based snapshot is done with errors: failed tables are: %s",
+											tbl_list);
+
+									set_shm_connector_state(myConnectorId, STATE_PAUSED);
+									set_shm_connector_errmsg(myConnectorId, "some tables have failed the snapshot. "
+											"Check synchdb_fdw_snapshot_errors_x tables for datails. "
+											"Resume connector to try again");
+
+									if (tbl_list != NULL)
+										pfree(tbl_list);
+								}
+							}
+							else
+							{
+								elog(WARNING, "oracle_fdw based snapshot is not successfully done");
+
+								/* clean tbl_list if needed */
 								if (tbl_list != NULL)
 									pfree(tbl_list);
+
+								set_shm_connector_state(myConnectorId, STATE_PAUSED);
+								set_shm_connector_errmsg(myConnectorId, "oracle_fdw based snapshot "
+										"is not successfully done - connector paused for troubleshooting. "
+										"Send resume command to try again");
 							}
+						}
+						else if (connectorType == TYPE_POSTGRES)
+						{
+							/* todo */
+						}
+						else if (connectorType == TYPE_MYSQL)
+						{
+							/* todo */
 						}
 						else
 						{
-							elog(WARNING, "oracle_fdw based snapshot is not successfully done");
-
-							/* clean tbl_list if needed */
-							if (tbl_list != NULL)
-								pfree(tbl_list);
-
-							set_shm_connector_state(myConnectorId, STATE_PAUSED);
-							set_shm_connector_errmsg(myConnectorId, "oracle_fdw based snapshot "
-									"is not successfully done - connector paused for troubleshooting. "
-									"Send resume command to try again");
+							/* todo */
 						}
 					}
 					else
@@ -3100,6 +3139,8 @@ connectorTypeToString(ConnectorType type)
 		return "SQLSERVER";
 	case TYPE_OLR:
 		return "OLR";
+	case TYPE_POSTGRES:
+		return "POSTGRES";
 	default:
 		return "UNKNOWN";
 	}
@@ -3125,6 +3166,8 @@ stringToConnectorType(const char * type)
 		return TYPE_ORACLE;
 	else if(!strcasecmp(type, "olr"))
 		return TYPE_OLR;
+	else if(!strcasecmp(type, "postgres"))
+		return TYPE_POSTGRES;
 	else
 		return TYPE_UNDEF;
 }
@@ -3152,6 +3195,8 @@ get_shm_connector_name(ConnectorType type)
 		return "sqlserver";
 	case TYPE_OLR:
 		return "olr";
+	case TYPE_POSTGRES:
+		return "postgres";
 	/* todo: support more dbz connector types here */
 	default:
 		return "null";
@@ -4313,22 +4358,14 @@ synchdb_engine_main(Datum main_arg)
 		}
 		else if (connInfo.snapengine == ENGINE_FDW)
 		{
-			/*
-			 * Only Oracle and OLR connectors support FDW based snapshot at this
-			 * moment. We may expand to support other connectors in the future.
-			 * The FDW based snapshot is handled entirely by synchdb so we need
-			 * to find out if a snapshot has been done before, either via FDW or
-			 * via Debezium, so we can signal main_loop correctly if FDW snapshot
-			 * is required.
-			 */
-			if (connectorType != TYPE_ORACLE)
+			/* xxx: only sqlserver dont have fdw supported as of now */
+			if (connectorType == TYPE_SQLSERVER)
 			{
-				/* none-Oracle connectors, just start Debezium */
 				start_debezium_engine(connectorType, &connInfo, snapshotMode);
 			}
 			else
 			{
-				/* Oracle connectors with FDW snapshot. Check if it is required. */
+				/* connectors with FDW snapshot. Check if it is required. */
 				const char * curroffset = get_shm_dbz_offset(myConnectorId);
 				bool isSnapshotDone = false;
 				bool snapshot = false, cdc = false;;
@@ -5284,13 +5321,14 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 
 #ifdef WITH_OLR
 	if (strcasecmp(connector, "mysql") && strcasecmp(connector, "sqlserver")
-			&& strcasecmp(connector, "oracle") && strcasecmp(connector, "olr"))
+			&& strcasecmp(connector, "oracle") && strcasecmp(connector, "olr")
+			&& strcasecmp(connector, "postgres"))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unsupported connector")));
 #else
 	if (strcasecmp(connector, "mysql") && strcasecmp(connector, "sqlserver")
-			&& strcasecmp(connector, "oracle"))
+			&& strcasecmp(connector, "oracle" ) && strcasecmp(connector, "postgres"))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unsupported connector")));
@@ -6303,35 +6341,81 @@ synchdb_translate_datatype(PG_FUNCTION_ARGS)
 		PG_RETURN_TEXT_P(cstring_to_text("text"));
 	}
 
-	if (fc_translate_datatype(connectorType, NameStr(*ext_datatype),
-			ext_datatype_len, ext_datatype_scale,
-			&pg_datatype, &pg_datatype_len))
+	if (connectorType == TYPE_POSTGRES)
 	{
-		appendStringInfo(&strinfo, "%s", pg_datatype);
+		/*
+		 * no need to translate for postgres type, just build the
+		 * data type strings based on input data
+		 */
+		appendStringInfo(&strinfo, "%s", NameStr(*ext_datatype));
 
-		/* pg_datatype_len == -1 means to use original length */
-		if (pg_datatype_len == -1)
-			pg_datatype_len = ext_datatype_len;
-
-		if (pg_datatype_len > 0 && ext_datatype_scale > 0)
+		if (ext_datatype_len > 0 && ext_datatype_scale > 0)
 		{
 			appendStringInfo(&strinfo, "(%d, %d)",
-					pg_datatype_len, ext_datatype_scale);
+					ext_datatype_len, ext_datatype_scale);
 			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 		}
 
-		if (pg_datatype_len > 0 && (ext_datatype_scale == 0 || ext_datatype_scale == -1))
+		if (ext_datatype_len > 0 && (ext_datatype_scale == 0 || ext_datatype_scale == -1))
 		{
 			appendStringInfo(&strinfo, "(%d)",
-					pg_datatype_len);
+					ext_datatype_len);
 			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 		}
 
 		PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 	}
+	else
+	{
+		if (fc_translate_datatype(connectorType, NameStr(*ext_datatype),
+				ext_datatype_len, ext_datatype_scale,
+				&pg_datatype, &pg_datatype_len))
+		{
+			appendStringInfo(&strinfo, "%s", pg_datatype);
 
-	/* no mapping available, default to text */
-	PG_RETURN_TEXT_P(cstring_to_text("text"));
+			/* pg_datatype_len == -1 means to use original length */
+			if (pg_datatype_len == -1)
+				pg_datatype_len = ext_datatype_len;
+
+			if (pg_datatype_len > 0 && ext_datatype_scale > 0)
+			{
+				appendStringInfo(&strinfo, "(%d, %d)",
+						pg_datatype_len, ext_datatype_scale);
+				PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
+			}
+
+			if (pg_datatype_len > 0 && (ext_datatype_scale == 0 || ext_datatype_scale == -1))
+			{
+				appendStringInfo(&strinfo, "(%d)",
+						pg_datatype_len);
+				PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
+			}
+
+			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
+		}
+	}
+
+	/*
+	 * control comes here if no default mapping is found in hash lookup, we will leave
+	 * the data type as is plus length and scale parameters if applicable
+	 */
+	appendStringInfo(&strinfo, "%s", NameStr(*ext_datatype));
+
+	if (ext_datatype_len > 0 && ext_datatype_scale > 0)
+	{
+		appendStringInfo(&strinfo, "(%d, %d)",
+				ext_datatype_len, ext_datatype_scale);
+		PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
+	}
+
+	if (ext_datatype_len > 0 && (ext_datatype_scale == 0 || ext_datatype_scale == -1))
+	{
+		appendStringInfo(&strinfo, "(%d)",
+				ext_datatype_len);
+		PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
+	}
+
+	PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 }
 
 Datum

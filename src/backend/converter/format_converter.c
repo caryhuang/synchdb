@@ -3366,6 +3366,8 @@ fc_get_connector_type(const char * connector)
 		return TYPE_SQLSERVER;
 	else if (!strcasecmp(connector, "olr"))
 		return TYPE_OLR;
+	else if (!strcasecmp(connector, "postgres"))
+		return TYPE_POSTGRES;
 	else
 		return TYPE_UNDEF;
 }
@@ -3534,6 +3536,11 @@ fc_initFormatConverter(ConnectorType connectorType)
 			init_sqlserver();
 			break;
 		}
+		case TYPE_POSTGRES:
+		{
+			/* xxx todo */
+			break;
+		}
 		default:
 		{
 			set_shm_connector_errmsg(myConnectorId, "unsupported connector type");
@@ -3571,6 +3578,11 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 		case TYPE_SQLSERVER:
 		{
 			hash_destroy(sqlserverDatatypeHash);
+			break;
+		}
+		case TYPE_POSTGRES:
+		{
+			/* xxx todo */
 			break;
 		}
 		default:
@@ -3645,6 +3657,9 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 			break;
 		case TYPE_SQLSERVER:
 			rulehash = sqlserverDatatypeHash;
+			break;
+		case TYPE_POSTGRES:
+			return true;	/* xxx todo */
 			break;
 		default:
 		{
@@ -5264,6 +5279,7 @@ fc_translate_datatype(ConnectorType connectorType,
 		case TYPE_SQLSERVER:
 			thehash = sqlserverDatatypeHash;
 			break;
+		case TYPE_POSTGRES:
 		default:
 		{
 			elog(WARNING, "unsupported connector type");

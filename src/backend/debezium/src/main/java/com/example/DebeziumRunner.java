@@ -52,6 +52,8 @@ public class DebeziumRunner {
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
 	final int TYPE_OPENLOG_REPLICATOR = 4;
+	final int TYPE_POSTGRESQL = 5;
+
 	final int BATCH_QUEUE_SIZE = 5;
 	
 	final int LOG_LEVEL_UNDEF = 0;
@@ -671,6 +673,28 @@ public class DebeziumRunner {
 				if (myParameters.sslTruststorePass != null)
 					props.setProperty("database.ssl.truststore.password", myParameters.sslTruststorePass);
 				break;
+			}
+			case TYPE_POSTGRESQL:
+			{
+				props.setProperty("connector.class", "io.debezium.connector.postgresql.PostgresConnector");
+				offsetfile = "pg_synchdb/pg_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+                schemahistoryfile = "pg_synchdb/pg_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+                signalfile = "pg_synchdb/pg_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
+
+				props.setProperty("tasks.max", "1");
+				props.setProperty("plugin.name", "pgoutput");
+				props.setProperty("slot.name", "debezium_slot");
+				props.setProperty("publication.autocreate.mode", "all_tables");
+				props.setProperty("database.server.name", "pgserver1");
+				props.setProperty("database.dbname", myParameters.database);
+
+                if (myParameters.database.equals("null"))
+                    logger.warn("database is null - skip setting database.include.list property");
+                else
+                {
+                    props.setProperty("database.dbname", myParameters.database);
+                }
+
 			}
 		}
 		
