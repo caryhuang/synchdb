@@ -322,27 +322,25 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 	 */
 	if (isfirst || islast)
 	{
-		getPathElementString(jb, "payload.ts_ms", &strinfo, true);
-		if (!strcasecmp(strinfo.data, "NULL"))
+		if (getPathElementString(jb, "payload.ts_ms", &strinfo, true))
 			ddlinfo->dbz_ts_ms = 0;
 		else
 			ddlinfo->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
 
-		getPathElementString(jb, "payload.source.ts_ms", &strinfo, true);
-		if (!strcasecmp(strinfo.data, "NULL"))
+		if (getPathElementString(jb, "payload.source.ts_ms", &strinfo, true))
 			ddlinfo->src_ts_ms = 0;
 		else
 			ddlinfo->src_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
 
-    getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true);
-    ddlinfo->id = pstrdup(strinfo.data);
+    if (getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true) == 0)
+    	ddlinfo->id = pstrdup(strinfo.data);
 
-    getPathElementString(jb, "payload.tableChanges.0.table.primaryKeyColumnNames", &strinfo, false);
-    ddlinfo->primaryKeyColumnNames = pstrdup(strinfo.data);
+    if (getPathElementString(jb, "payload.tableChanges.0.table.primaryKeyColumnNames", &strinfo, false) == 0)
+    	ddlinfo->primaryKeyColumnNames = pstrdup(strinfo.data);
 
-    getPathElementString(jb, "payload.tableChanges.0.type", &strinfo, true);
-    ddlinfo->type = name_to_ddltype(strinfo.data);
+    if (getPathElementString(jb, "payload.tableChanges.0.type", &strinfo, true) == 0)
+    	ddlinfo->type = name_to_ddltype(strinfo.data);
 
     /* free the data inside strinfo as we no longer needs it */
     pfree(strinfo.data);
@@ -676,8 +674,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	 */
 	if (isfirst || islast)
 	{
-		getPathElementString(jb, "payload.ts_ms", &strinfo, true);
-		if (!strcasecmp(strinfo.data, "NULL"))
+		if (getPathElementString(jb, "payload.ts_ms", &strinfo, true))
 			dbzdml->dbz_ts_ms = 0;
 		else
 			dbzdml->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
@@ -919,8 +916,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 									int pathsize = strlen("payload.after.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 									snprintf(tmpPath, pathsize, "payload.after.%s", key);
-									getPathElementString(jb, tmpPath, &strinfo, false);
-									value = pstrdup(strinfo.data);
+									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
+										value = pstrdup(strinfo.data);
 									if(tmpPath)
 										pfree(tmpPath);
 								}
@@ -1081,8 +1078,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 									int pathsize = strlen("payload.before.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 									snprintf(tmpPath, pathsize, "payload.before.%s", key);
-									getPathElementString(jb, tmpPath, &strinfo, false);
-									value = pstrdup(strinfo.data);
+									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
+										value = pstrdup(strinfo.data);
 									if(tmpPath)
 										pfree(tmpPath);
 								}
@@ -1267,8 +1264,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 											snprintf(tmpPath, pathsize, "payload.before.%s", key);
 										else
 											snprintf(tmpPath, pathsize, "payload.after.%s", key);
-										getPathElementString(jb, tmpPath, &strinfo, false);
-										value = pstrdup(strinfo.data);
+										if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
+											value = pstrdup(strinfo.data);
 										if(tmpPath)
 											pfree(tmpPath);
 									}
@@ -1657,8 +1654,8 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     }
 
     /* Check if it's a DDL or DML event */
-    getPathElementString(jb, "payload.op", &strinfo, true);
-    if (!strcmp(strinfo.data, "NULL"))
+    ret = getPathElementString(jb, "payload.op", &strinfo, true);
+    if (ret)	/* no op, it is DDL */
     {
         /* Process DDL event */
     	DBZ_DDL * dbzddl = NULL;

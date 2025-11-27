@@ -1630,8 +1630,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 									int pathsize = strlen("after.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 									snprintf(tmpPath, pathsize, "after.%s", key);
-									getPathElementString(payload, tmpPath, &strinfo, false);
-									value = pstrdup(strinfo.data);
+									if (getPathElementString(payload, tmpPath, &strinfo, false) == 0)
+										value = pstrdup(strinfo.data);
 									if(tmpPath)
 										pfree(tmpPath);
 								}
@@ -1796,8 +1796,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 											snprintf(tmpPath, pathsize, "before.%s", key);
 										else
 											snprintf(tmpPath, pathsize, "after.%s", key);
-										getPathElementString(payload, tmpPath, &strinfo, false);
-										value = pstrdup(strinfo.data);
+										if (getPathElementString(payload, tmpPath, &strinfo, false) == 0)
+											value = pstrdup(strinfo.data);
 										if(tmpPath)
 											pfree(tmpPath);
 									}
@@ -1956,8 +1956,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 									int pathsize = strlen("before.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 									snprintf(tmpPath, pathsize, "before.%s", key);
-									getPathElementString(payload, tmpPath, &strinfo, false);
-									value = pstrdup(strinfo.data);
+									if (getPathElementString(payload, tmpPath, &strinfo, false))
+										value = pstrdup(strinfo.data);
 									if(tmpPath)
 										pfree(tmpPath);
 								}

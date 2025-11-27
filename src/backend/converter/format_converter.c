@@ -1614,17 +1614,22 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 				}
 				PG_END_TRY();
 
-				getPathElementString(jb, "scale", &strinfo, true);
-				if (!strcasecmp(strinfo.data, "null"))
+				if (getPathElementString(jb, "scale", &strinfo, true))
 					colval->scale = 0;
 				else
 					colval->scale = atoi(strinfo.data);
 
 				elog(DEBUG1, "colval->scale is set to %d", colval->scale);
-				getPathElementString(jb, "value", &strinfo, true);
-				if (!strcasecmp(strinfo.data, "null"))
+
+				if (getPathElementString(jb, "value", &strinfo, true))
 				{
-					elog(WARNING, "JSON has scale but with no value");
+					elog(WARNING, "JSON has scale but with no value, defaulting to 0...");
+					pfree(colval->value);
+					colval->value = pstrdup("0");
+
+					/* make "in" points to colval->value for subsequent processing */
+					in = colval->value;
+					elog(DEBUG1, "colval->value is set to %s", colval->value);
 				}
 				else
 				{
@@ -2978,14 +2983,12 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			}
 			PG_END_TRY();
 
-			getPathElementString(jb, "wkb", &strinfo, true);
-			if (!strcasecmp(strinfo.data, "null"))
+			if (getPathElementString(jb, "wkb", &strinfo, true))
 				wkb = pstrdup("0");
 			else
 				wkb = pstrdup(strinfo.data);
 
-			getPathElementString(jb, "srid", &strinfo, true);
-			if (!strcasecmp(strinfo.data, "null"))
+			if (getPathElementString(jb, "srid", &strinfo, true))
 				srid = pstrdup("0");
 			else
 				srid = pstrdup(strinfo.data);
@@ -4097,7 +4100,11 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
     if (isnull)
     {
     	resetStringInfo(strinfoout);
-    	appendStringInfoString(strinfoout, "NULL");
+    	pfree(datum_elems);
+    	if (pathcopy != path)
+    		pfree(pathcopy);
+    	return -1;
+//    	appendStringInfoString(strinfoout, "NULL");
     }
     else
     {
