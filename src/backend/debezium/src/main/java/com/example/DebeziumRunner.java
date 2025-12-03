@@ -52,7 +52,7 @@ public class DebeziumRunner {
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
 	final int TYPE_OPENLOG_REPLICATOR = 4;
-	final int TYPE_POSTGRESQL = 5;
+	final int TYPE_POSTGRES = 5;
 
 	final int BATCH_QUEUE_SIZE = 5;
 	
@@ -674,11 +674,11 @@ public class DebeziumRunner {
 					props.setProperty("database.ssl.truststore.password", myParameters.sslTruststorePass);
 				break;
 			}
-			case TYPE_POSTGRESQL:
+			case TYPE_POSTGRES:
 			{
 				props.setProperty("connector.class", "io.debezium.connector.postgresql.PostgresConnector");
-				offsetfile = "pg_synchdb/pg_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
-                schemahistoryfile = "pg_synchdb/pg_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+				offsetfile = "pg_synchdb/postgres_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+                schemahistoryfile = "pg_synchdb/postgres_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
                 signalfile = "pg_synchdb/pg_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
 
 				props.setProperty("tasks.max", "1");
@@ -1130,6 +1130,11 @@ public class DebeziumRunner {
 				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
 				break;
 			}
+			case TYPE_POSTGRES:
+			{
+				inputFile = new File("pg_synchdb/postgres_" + name + "_" + dstdb + "_offsets.dat");
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
+			}
 		}
 
 		if (!inputFile.exists())
@@ -1181,6 +1186,10 @@ public class DebeziumRunner {
 			{
 				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
 				break;
+			}
+			case TYPE_POSTGRES:
+			{
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 			}
 		}
 
@@ -1252,6 +1261,7 @@ public class DebeziumRunner {
 		{
 			case TYPE_MYSQL:
 			case TYPE_ORACLE:
+			case TYPE_POSTGRES:
 				/* Debezium key for mysql/oracle doesn’t include database */
 				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 				break;

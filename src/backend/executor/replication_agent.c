@@ -1384,20 +1384,20 @@ destroyPGDML(PG_DML * dmlinfo)
 	}
 }
 
-orascn
-ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
-		const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx,
-		bool write_schema_hist, const char * snapshotMode,
-		int letter_casing_strategy)
+char *
+ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conninfo,
+		int flag, const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx,
+		bool write_schema_hist, const char * snapshotMode, int letter_casing_strategy)
 {
 	int ret = -1;
 	bool isnull = false;
 	Datum d;
 	char *s = NULL;
-	orascn scn_res = 0;
 	bool skiptx = false;
 	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE] = {0};
 	char scn_buf[64] = {0};
+	MemoryContext oldctx;
+	char * snapshot_str = NULL;
 
 	const char *sql = (flag & CONNFLAG_SCHEMA_SYNC_MODE) ||
 			!strcasecmp(snapshotMode, "no_data")?
@@ -1448,8 +1448,36 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 		values[2]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_obj"));
 		values[3]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_stage"));
 		values[4]  = DirectFunctionCall1(namein,   CStringGetDatum(dstdb));
-		values[5]  = CStringGetTextDatum(conninfo->srcdb);
-		values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->user));
+
+		/* fill lookup db and schema based on connector type for transformations */
+		switch(connType)
+		{
+			case TYPE_ORACLE:
+			case TYPE_OLR:
+			{
+				/* for oracle, schema = username */
+				values[5]  = CStringGetTextDatum(conninfo->srcdb);
+				values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->user));
+				break;
+			}
+			case TYPE_MYSQL:
+			{
+				/* for mysql, schema = db */
+				values[5]  = CStringGetTextDatum(conninfo->srcdb);
+				values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcdb));
+				break;
+			}
+			case TYPE_POSTGRES:
+			case TYPE_SQLSERVER:
+			default:
+			{
+				/* for others, make both equal for now todo */
+				values[5]  = CStringGetTextDatum(conninfo->srcdb);
+				values[6]  =  DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcdb));
+				break;
+			}
+		}
+
 		values[7]  = BoolGetDatum(true);
 		values[8]  = CStringGetTextDatum("replace");
 		values[9]  = DirectFunctionCall3(numeric_in,
@@ -1488,14 +1516,9 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 			elog(ERROR, "snapshot function returned NULL");
 		}
 
-		s = DatumGetCString(DirectFunctionCall1(numeric_out, d));
-		errno = 0;
-		scn_res = strtoull(s, NULL, 10);
-		if (errno != 0)
-		{
-			SPI_finish();
-			elog(ERROR, "failed to parse SCN '%s' as unsigned long long", s);
-		}
+		oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		snapshot_str = TextDatumGetCString(d);
+		MemoryContextSwitchTo(oldctx);
 
 		SPI_finish();
 
@@ -1508,8 +1531,9 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 	}
 	PG_CATCH();
 	{
-		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
-		ErrorData  *errdata = CopyErrorData();
+		ErrorData  *errdata;
+		oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		errdata = CopyErrorData();
 
 		if (errdata)
 			set_shm_connector_errmsg(myConnectorId, errdata->message);
@@ -1517,13 +1541,13 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 		FreeErrorData(errdata);
 		MemoryContextSwitchTo(oldctx);
 		SPI_finish();
-		scn_res = 0;
+		snapshot_str = NULL;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	elog(WARNING, "scn to resume cdc %llu", scn_res);
-	return scn_res;
+	elog(WARNING, "snapshot to resume cdc: %s", snapshot_str ? snapshot_str : "N/A");
+	return snapshot_str;
 }
 
 /*

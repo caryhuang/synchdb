@@ -116,20 +116,20 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	{{"mediumblob", false}, "bytea", 0},
 	{{"longblob", false}, "bytea", 0},
 	{{"tinyblob", false}, "bytea", 0},
-	{{"long varchar", false}, "text", -1},
-	{{"longtext", false}, "text", -1},
-	{{"mediumtext", false}, "text", -1},
-	{{"tinytext", false}, "text", -1},
+	{{"long varchar", false}, "text", 0},
+	{{"longtext", false}, "text", 0},
+	{{"mediumtext", false}, "text", 0},
+	{{"tinytext", false}, "text", 0},
 	{{"json", false}, "jsonb", -1},
-	{{"geometry", false}, "text", -1},
-	{{"geometrycollection", false}, "text", -1},
-	{{"geomcollection", false}, "text", -1},
-	{{"linestring", false}, "text", -1},
-	{{"multilinestring", false}, "text", -1},
-	{{"multipoint", false}, "text", -1},
-	{{"multipolygon", false}, "text", -1},
-	{{"point", false}, "text", -1},
-	{{"polygon", false}, "text", -1}
+	{{"geometry", false}, "text", 0},
+	{{"geometrycollection", false}, "text", 0},
+	{{"geomcollection", false}, "text", 0},
+	{{"linestring", false}, "text", 0},
+	{{"multilinestring", false}, "text", 0},
+	{{"multipoint", false}, "text", 0},
+	{{"multipolygon", false}, "text", 0},
+	{{"point", false}, "text", 0},
+	{{"polygon", false}, "text", 0}
 };
 #define SIZE_MYSQL_DATATYPE_MAPPING (sizeof(mysql_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 

@@ -44,7 +44,8 @@
 #define SYNCHDB_INVALID_BATCH_ID -1
 #define SYNCHDB_MAX_TZ_LEN 16
 #define SYNCHDB_MAX_TIMESTAMP_LEN 64
-
+#define SYNCHDB_MAX_INT32_VAL (2147483647)
+#define SYNCHDB_MIN_INT32_VAL (-2147483647-1)
 #define INFINISPAN_TYPE_SIZE 32
 
 #define SYNCHDB_PG_MAJOR_VERSION  PG_VERSION_NUM / 100
@@ -312,6 +313,30 @@ typedef struct _IspnInfo
 	unsigned int ispn_memory_size;
 } IspnInfo;
 
+typedef struct
+{
+	ConnectorType type;
+	union
+	{
+		struct
+		{
+			char binlog_file[128];
+			unsigned long long binlog_pos;
+			char server_id[128];
+		} mysql;
+
+		struct
+		{
+			orascn oracle_scn;
+		} oracle;
+
+		struct
+		{
+			unsigned long long lsn;
+		} postgres;
+	} data;
+} OffsetData;
+
 /**
  * ConnectionInfo - DBZ Connection info. These are put in shared memory so
  * connector background workers can access when they are spawned.
@@ -335,6 +360,7 @@ typedef struct _ConnectionInfo
     OLRConnectionInfo olr;
     IspnInfo ispn;
     SnapshotEngine snapengine;
+    OffsetData offsetdata;
 } ConnectionInfo;
 
 /**

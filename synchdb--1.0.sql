@@ -244,7 +244,7 @@ CREATE OR REPLACE FUNCTION synchdb_del_infinispan(name) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
-CREATE OR REPLACE FUNCTION synchdb_translate_datatype(name, name, int, int, int) RETURNS text
+CREATE OR REPLACE FUNCTION synchdb_translate_datatype(name, name, bigint, bigint, bigint) RETURNS text
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
@@ -2265,7 +2265,7 @@ CREATE OR REPLACE FUNCTION synchdb_create_ora_stage_fts(
     p_server_name           name DEFAULT 'oracle'::name,  -- oracle_fdw server name
     p_lower_names           boolean DEFAULT true,         -- legacy: lower-case PG table/column names
     p_on_exists             text DEFAULT 'replace',       -- 'replace' | 'drop' | 'skip'
-    p_scn                   numeric DEFAULT 0,            -- >0 => use AS OF SCN subquery
+    p_offset                text DEFAULT NULL,            -- offset like scn, binlog pos..etc
     p_source_schema         name DEFAULT 'ora_obj'::name, -- metadata source schema (…columns)
     p_snapshot_tables       text DEFAULT NULL,            -- CSV of db.schema.table; when set, bypass conninfo
     p_write_dbz_schema_info boolean DEFAULT false,        -- when true, store Debezium schema-history JSON
@@ -2316,13 +2316,19 @@ DECLARE
   v_case_strategy text;
   -- expression used for column name in dynamic SQL (e.g., 'lower(c.column_name)')
   v_colname_expr  text;
+
+  -- possible offsets
+  v_offset_json jsonb;
+  v_scn          numeric;    -- oracle
+  v_binlog_file  text;       -- mysql
+  v_binlog_pos   bigint;     -- mysql
+  v_ts_sec       bigint;     -- mysql
 BEGIN
-  -- Ensure oracle_fdw is available
-  SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='oracle_fdw')
-      OR EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname='oracle_fdw')
-    INTO has_oracle_fdw;
-  IF NOT has_oracle_fdw THEN
-    RAISE EXCEPTION 'oracle_fdw is not installed. Run: CREATE EXTENSION oracle_fdw;';
+
+  IF p_offset IS NOT NULL AND btrim(p_offset) <> '' THEN
+    v_offset_json := p_offset::jsonb;
+  ELSE
+    v_offset_json := NULL;
   END IF;
 
   ----------------------------------------------------------------------
@@ -2517,12 +2523,14 @@ BEGIN
     END IF;
   END IF;
 
+  RAISE NOTICE 'base sql = %', base_sql;
   ----------------------------------------------------------------------
   -- Create (or replace) the stage foreign tables
   ----------------------------------------------------------------------
   FOR r IN EXECUTE base_sql || ' ORDER BY ora_owner, table_name'
   LOOP
-    -- decide PG table name according to case strategy
+
+	-- decide PG table name according to case strategy
     v_tbl_pg := CASE v_case_strategy
                   WHEN 'lower' THEN lower(r.table_name)
                   WHEN 'upper' THEN upper(r.table_name)
@@ -2555,9 +2563,9 @@ BEGIN
       'SELECT string_agg(
                 quote_ident(%s) || '' '' ||
                 synchdb_translate_datatype(%L::name, lower(c.type_name)::name,
-                                           COALESCE(c.length, -1)::int,
-                                           COALESCE(c.scale, -1)::int,
-                                           COALESCE(c.precision, -1)::int) ||
+                                           COALESCE(c.length, -1)::bigint,
+                                           COALESCE(c.scale, -1)::bigint,
+                                           COALESCE(c.precision, -1)::bigint) ||
 									CASE WHEN lower(coalesce(c.nullable::text, '''')) IN (''no'', ''n'', ''0'', ''false'', ''f'') THEN '' NOT NULL'' ELSE '''' END,
                 '', '' ORDER BY c.position)
          FROM %I.columns c
@@ -2576,7 +2584,12 @@ BEGIN
 
     -- Create the staging FT (snapshot or not)
 	IF v_conn_type IN ('oracle','olr') THEN
-		IF p_scn IS NOT NULL AND p_scn > 0 THEN
+		-- derive SCN from position JSON or fallback to 0
+        IF v_offset_json IS NOT NULL AND v_offset_json ? 'scn' THEN
+          v_scn := (v_offset_json->>'scn')::numeric;
+	    END IF;
+
+		IF v_scn IS NOT NULL AND v_scn > 0 THEN
 		  ------------------------------------------------------------------
 		  -- Build Oracle SELECT list: always double-quote column names
 		  -- exactly as in metadata.
@@ -2601,7 +2614,7 @@ BEGIN
 			COALESCE(v_sel_list, '*'),
 			replace(r.ora_owner, '"', '""'),
 			replace(r.table_name, '"', '""'),
-			p_scn::text
+			v_scn::text
 		  );
 
 		  EXECUTE format(
@@ -2610,7 +2623,7 @@ BEGIN
 		  );
 
 		  RAISE NOTICE 'Created FT %.% at SCN % -> %.% on %',
-					   p_stage_schema, v_tbl_pg, p_scn::text, r.ora_owner, r.table_name, p_server_name;
+					   p_stage_schema, v_tbl_pg, v_scn::text, r.ora_owner, r.table_name, p_server_name;
 		ELSE
 		  EXECUTE format(
 			'CREATE FOREIGN TABLE %I.%I (%s) SERVER %I OPTIONS (schema %L, "table" %L)',
@@ -2681,45 +2694,88 @@ BEGIN
     v_tbl_name_l := r.table_name;
 
     -- Refresh synchdb_attribute rows for this table
-    DELETE FROM public.synchdb_attribute
-     WHERE name       = p_connector_name
-       AND type       = COALESCE(v_conn_type, 'oracle'::name)
-       AND ext_tbname = format('%s.%s.%s',
-                               v_ext_db,
-                               r.ora_owner,
-                               v_tbl_name_l)::name;
+	IF v_conn_type IN ('oracle','olr','postgres') THEN
+	   DELETE FROM public.synchdb_attribute
+		 WHERE name       = p_connector_name
+		   AND type       = v_conn_type
+		   AND ext_tbname = format('%s.%s.%s',
+								   v_ext_db,
+								   r.ora_owner,
+								   v_tbl_name_l)::name;
 
-    EXECUTE format($ins$
-      INSERT INTO public.synchdb_attribute
-          (name, type, attrelid, attnum, ext_tbname,    ext_attname,           ext_atttypename)
-      SELECT
-          %L::name,
-          %L::name,
-          %s::oid,
-          c.position::smallint,
-          %L::name,
-          lower(c.column_name)::name,
-          lower(c.type_name)::name
-      FROM %I.columns c
-      WHERE c."schema"   = %L
-        AND c.table_name = %L
-      ORDER BY c.position
-    $ins$, p_connector_name, COALESCE(v_conn_type, 'oracle'::name), v_relid::text,
-          format('%s.%s.%s', v_ext_db, r.ora_owner, v_tbl_name_l),
-          p_source_schema, r.ora_owner, r.table_name);
+		EXECUTE format($ins$
+		  INSERT INTO public.synchdb_attribute
+			  (name, type, attrelid, attnum, ext_tbname,    ext_attname,           ext_atttypename)
+		  SELECT
+			  %L::name,
+			  %L::name,
+			  %s::oid,
+			  c.position::smallint,
+			  %L::name,
+			  lower(c.column_name)::name,
+			  lower(c.type_name)::name
+		  FROM %I.columns c
+		  WHERE c."schema"   = %L
+			AND c.table_name = %L
+		  ORDER BY c.position
+		$ins$, p_connector_name, v_conn_type, v_relid::text,
+			  format('%s.%s.%s', v_ext_db, r.ora_owner, v_tbl_name_l),
+			  p_source_schema, r.ora_owner, r.table_name);
 
-    RAISE NOTICE 'Recorded % columns for %.% into synchdb_attribute (attrelid=%) as %',
-                 (SELECT count(*)
-                    FROM public.synchdb_attribute
-                   WHERE name = p_connector_name
-                     AND type = COALESCE(v_conn_type, 'oracle'::name)
-                     AND ext_tbname = format('%s.%s.%s',
-                                              v_ext_db,
-                                              r.ora_owner,
-                                              v_tbl_name_l)::name),
-                 r.ora_owner, r.table_name, v_relid::text,
-                 format('%s.%s.%s', v_ext_db, r.ora_owner, v_tbl_name_l);
+		RAISE NOTICE 'Recorded % columns for %.% into synchdb_attribute (attrelid=%) as %',
+					 (SELECT count(*)
+						FROM public.synchdb_attribute
+					   WHERE name = p_connector_name
+						 AND type = v_conn_type
+						 AND ext_tbname = format('%s.%s.%s',
+												  v_ext_db,
+												  r.ora_owner,
+												  v_tbl_name_l)::name),
+					 r.ora_owner, r.table_name, v_relid::text,
+					 format('%s.%s.%s', v_ext_db, r.ora_owner, v_tbl_name_l);
+					 
+	 ELSIF v_conn_type = 'mysql' THEN
+	 
+		 DELETE FROM public.synchdb_attribute
+		 WHERE name       = p_connector_name
+		   AND type       = v_conn_type
+		   AND ext_tbname = format('%s.%s',
+								   v_ext_db,
+								   v_tbl_name_l)::name;
 
+		EXECUTE format($ins$
+		  INSERT INTO public.synchdb_attribute
+			  (name, type, attrelid, attnum, ext_tbname,    ext_attname,           ext_atttypename)
+		  SELECT
+			  %L::name,
+			  %L::name,
+			  %s::oid,
+			  c.position::smallint,
+			  %L::name,
+			  lower(c.column_name)::name,
+			  lower(c.type_name)::name
+		  FROM %I.columns c
+		  WHERE c."schema"   = %L
+			AND c.table_name = %L
+		  ORDER BY c.position
+		$ins$, p_connector_name, v_conn_type, v_relid::text,
+			  format('%s.%s', v_ext_db, v_tbl_name_l),
+			  p_source_schema, r.ora_owner, r.table_name);
+
+		RAISE NOTICE 'Recorded % columns for %.% into synchdb_attribute (attrelid=%) as %',
+					 (SELECT count(*)
+						FROM public.synchdb_attribute
+					   WHERE name = p_connector_name
+						 AND type = v_conn_type
+						 AND ext_tbname = format('%s.%s',
+												  v_ext_db,
+												  v_tbl_name_l)::name),
+					 r.ora_owner, r.table_name, v_relid::text,
+					 format('%s.%s', v_ext_db, v_tbl_name_l);
+					 
+	 ELSE
+		RAISE EXCEPTION 'Unsupported connector type: %', v_conn_type;
+	END IF;
     ------------------------------------------------------------------
     -- Build, log, and store Debezium schema-history JSON (if enabled)
     ------------------------------------------------------------------
@@ -2742,11 +2798,16 @@ BEGIN
         SELECT jsonb_agg(
                  jsonb_build_object(
                    'name',            c.column_name,
-                   'jdbcType',        oracle_type_to_jdbc(lower(c.type_name)),
+                   'jdbcType',        synchdb_type_to_jdbc(%4$L::text, lower(c.type_name)),
                    'typeName',        upper(c.type_name),
                    'typeExpression',  upper(c.type_name),
                    'charsetName',     NULL,
-                   'length',          COALESCE(c.length, 0),
+                   'length',          CASE
+                                        WHEN c.precision IS NOT NULL AND c.precision >= 0
+                                        THEN c.precision
+                                      ELSE
+                                        COALESCE(c.length, 0)
+                                      END,
                    'position',        c.position,
                    'optional',        COALESCE(c.nullable, TRUE),
                    'autoIncremented', FALSE,
@@ -2755,44 +2816,91 @@ BEGIN
                    'hasDefaultValue', (c.default_value IS NOT NULL),
                    'enumValues',      '[]'::jsonb
                  )
+                 ||
+                 CASE
+                   WHEN c.scale IS NOT NULL AND c.scale >= 0
+                   THEN jsonb_build_object('scale', c.scale)
+                   ELSE '{}'::jsonb
+                 END
                  ORDER BY c.position
                )
           FROM %1$I.columns c
          WHERE c."schema" = %2$L
            AND c.table_name = %3$L
-      $SQL$, p_source_schema, r.ora_owner, r.table_name)
+      $SQL$, p_source_schema, r.ora_owner, r.table_name, v_conn_type::text)
       INTO v_cols_json;
 
-      v_table_obj := jsonb_build_object(
-        'defaultCharsetName', NULL,
-        'primaryKeyColumnNames', COALESCE(v_pk_json, '[]'::jsonb),
-        'columns', COALESCE(v_cols_json, '[]'::jsonb)
-      );
+	  IF v_conn_type IN ('oracle','olr') THEN
+        v_table_obj := jsonb_build_object(
+          'defaultCharsetName', NULL,
+          'primaryKeyColumnNames', COALESCE(v_pk_json, '[]'::jsonb),
+          'columns', COALESCE(v_cols_json, '[]'::jsonb)
+        );
+		  v_change_obj := jsonb_build_object(
+		  'type', 'CREATE',
+		  'id', format('"%s"."%s"."%s"',
+			  		 p_desired_db::text,
+					 p_desired_schema::text,
+					 r.table_name),
+		  'table', v_table_obj,
+		  'comment', NULL
+	    );
+        v_msg_json := jsonb_build_object(
+          'source',   jsonb_build_object('server', 'synchdb-connector'),
+          'position', jsonb_build_object(
+                         'snapshot_scn',       v_scn::text,
+                         'snapshot',           TRUE,
+                         'scn',                v_scn::text,
+                         'snapshot_completed', TRUE
+                       ),
+          'ts_ms', v_ts_ms,
+          'databaseName', p_desired_db::text,
+		  'schemaName',   p_desired_schema::text,
+          'ddl', '',
+          'tableChanges', jsonb_build_array(v_change_obj)
+        );
+	  ELSIF v_conn_type = 'mysql' THEN 
+        v_table_obj := jsonb_build_object(
+          'defaultCharsetName', 'utf8mb4',
+          'primaryKeyColumnNames', COALESCE(v_pk_json, '[]'::jsonb),
+          'columns', COALESCE(v_cols_json, '[]'::jsonb),
+          'attributes', '[]'::jsonb
+        );
+		IF v_offset_json IS NOT NULL THEN
+		  v_binlog_file := v_offset_json->>'file';
+  		  v_binlog_pos  := (v_offset_json->>'pos')::bigint;
+		  v_ts_sec      := COALESCE((v_offset_json->>'ts_sec')::bigint, 0);
+		ELSE
+	      v_binlog_file := 'n/a';
+		  v_binlog_pos := 0;
+		  v_ts_sec := 0;
+		END IF;
 
-      v_change_obj := jsonb_build_object(
-        'type', 'CREATE',
-        'id', format('"%s"."%s"."%s"',
-                     upper(p_desired_db::text),
-                     upper(p_desired_schema::text),
-                     upper(r.table_name)),
-        'table', v_table_obj,
-        'comment', NULL
-      );
+		v_change_obj := jsonb_build_object(
+		  'type', 'CREATE',
+		  'id', format('"%s"."%s"',
+					 p_desired_db::text,
+					 r.table_name),
+		  'table', v_table_obj,
+		  'comment', NULL
+		);
+        v_msg_json := jsonb_build_object(
+          'source',   jsonb_build_object('server', 'synchdb-connector'),
+          'position', jsonb_build_object(
+                         'ts_sec',       	v_ts_sec,
+                         'file',           	v_binlog_file,
+                         'pos',            	v_binlog_pos,
+                         'snapshot', 		TRUE
+                       ),
+          'ts_ms', v_ts_ms,
+          'databaseName', p_desired_db::text,
+          'ddl', '',
+          'tableChanges', jsonb_build_array(v_change_obj)
+        );
+	  ELSE
+	     RAISE EXCEPTION 'Unsupported connector type: %', v_conn_type;
+	  END IF;
 
-      v_msg_json := jsonb_build_object(
-        'source',   jsonb_build_object('server', 'synchdb-connector'),
-        'position', jsonb_build_object(
-                       'snapshot_scn',       p_scn::text,
-                       'snapshot',           TRUE,
-                       'scn',                p_scn::text,
-                       'snapshot_completed', TRUE
-                     ),
-        'ts_ms', v_ts_ms,
-        'databaseName', upper(p_desired_db::text),
-        'schemaName',   upper(p_desired_schema::text),
-        'ddl', '',
-        'tableChanges', jsonb_build_array(v_change_obj)
-      );
 
       -- store one JSON line per table
       EXECUTE format(
@@ -2849,7 +2957,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, name, name, boolean, text, numeric, name, text, boolean, text) IS
+COMMENT ON FUNCTION synchdb_create_ora_stage_fts(name, name, name, name, name, boolean, text, text, name, text, boolean, text) IS
    'create a staging schema, migrate table schemas with translated data types';
 
 CREATE OR REPLACE FUNCTION synchdb_materialize_schema(
@@ -3688,7 +3796,7 @@ BEGIN
                tbl            text        NOT NULL,
                err_state      text        NOT NULL,
                err_msg        text        NOT NULL,
-               scn            numeric     NOT NULL,
+               scn            numeric,
                ts             timestamptz NOT NULL DEFAULT now(),
                CONSTRAINT %I UNIQUE (connector_name, tbl)
              )',
@@ -4374,7 +4482,7 @@ BEGIN
             v_server_name,
             p_lower_names,
             p_on_exists,
-            v_effective_scn,
+            json_build_object('scn', v_effective_scn)::text,
             v_meta_schema,
             p_snapshot_tables,
             p_write_schema_hist,
@@ -4426,12 +4534,12 @@ BEGIN
         PERFORM synchdb_create_ora_stage_fts(
             p_connector_name,
             p_lookup_db,
-            COALESCE(p_lookup_schema, p_lookup_db),
+            p_lookup_schema,
             p_stage_schema,
             v_server_name,
             p_lower_names,
             p_on_exists,
-            0,               -- SCN not used for MySQL
+            json_build_object('file', v_binlog_file, 'pos', v_binlog_pos, 'ts_sec', floor(extract(epoch from clock_timestamp())))::text,
             v_meta_schema,
             p_snapshot_tables,
             p_write_schema_hist,
@@ -4444,7 +4552,8 @@ BEGIN
         PERFORM synchdb_create_current_lsn_ft(v_meta_schema, v_server_name);
 
         RAISE NOTICE 'Step 3: Reading current lsn value from %.wal_lsn', v_meta_schema;
-        EXECUTE format('SELECT wal_lsn FROM %I.wal_lsn', v_meta_schema)
+        --EXECUTE format('SELECT wal_lsn FROM %I.wal_lsn', v_meta_schema)
+        EXECUTE format('SELECT (wal_lsn::pg_lsn - ''0/0''::pg_lsn)::bigint FROM %I.wal_lsn', v_meta_schema)
            INTO v_lsn;
 
         IF v_lsn IS NULL THEN
@@ -4457,12 +4566,12 @@ BEGIN
         PERFORM synchdb_create_ora_stage_fts(
             p_connector_name,
             p_lookup_db,
-            COALESCE(p_lookup_schema, 'public'),
+            'public',		-- todo: remove hardcode
             p_stage_schema,
             v_server_name,
             p_lower_names,
             p_on_exists,
-            0,               -- SCN not used for Postgres snapshot
+            null,               -- SCN not used for Postgres snapshot
             v_meta_schema,
             p_snapshot_tables,
             p_write_schema_hist,
@@ -4773,6 +4882,188 @@ BEGIN
     ELSE
       RETURN 1111;       -- OTHER (catch-all for unrecognized)
   END CASE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION mysql_type_to_jdbc(mysql_type_text text)
+RETURNS integer
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+  t           text;     -- normalized input
+  base        text;     -- base type token(s) without length/precision
+  m           text[];   -- regex match for (...) args
+  is_unsigned boolean := false;
+BEGIN
+  -- Normalize: trim, compress spaces, uppercase, strip quotes/backticks
+  t := regexp_replace(upper(btrim(mysql_type_text)), '\s+', ' ', 'g');
+  t := replace(replace(t, '"', ''), '''', '');
+  t := replace(t, '`', '');
+
+  -- Detect UNSIGNED flag (doesn't usually affect jdbcType, but matters for BIGINT)
+  IF t LIKE '% UNSIGNED' THEN
+    is_unsigned := true;
+    t := regexp_replace(t, '\s+UNSIGNED$', '');
+  END IF;
+
+  -- Extract base token before any ( ... ) or trailing qualifiers
+  m := regexp_match(t, '^([A-Z0-9_ ]+)\s*\(');
+  IF m IS NOT NULL THEN
+    base := btrim(m[1]);
+  ELSE
+    base := t;
+  END IF;
+
+  /*
+   * Map to java.sql.Types (int) in a Debezium-like way.
+   *
+   * Reference (commonly used values):
+   *   CHAR            -> 1
+   *   VARCHAR/TEXT    -> 12
+   *   BIT             -> -7
+   *   TINYINT/SMALLINT-> 5
+   *   INTEGER         -> 4
+   *   BIGINT          -> -5 (or 3 when UNSIGNED to avoid overflow)
+   *   NUMERIC/DECIMAL -> 3
+   *   REAL/FLOAT      -> 6
+   *   DOUBLE          -> 8
+   *   DATE            -> 91
+   *   TIME            -> 92
+   *   TIMESTAMP       -> 2014 (timestamp with time zone, as in your example)
+   *   BINARY          -> -2
+   *   VARBINARY       -> -3
+   *   BLOB*           -> 2004
+   *   JSON/GEOMETRY   -> 1111 (OTHER)
+   */
+
+  CASE base
+
+    ------------------------------------------------------------------
+    -- Exact numeric / decimal family
+    ------------------------------------------------------------------
+    WHEN 'DECIMAL', 'NUMERIC', 'FIXED' THEN
+      RETURN 3;       -- DECIMAL (signed or unsigned; length/scale handled elsewhere)
+
+    ------------------------------------------------------------------
+    -- Float / double family
+    ------------------------------------------------------------------
+    WHEN 'DOUBLE', 'DOUBLE PRECISION' THEN
+      RETURN 8;       -- DOUBLE
+    WHEN 'REAL', 'FLOAT' THEN
+      RETURN 6;       -- FLOAT
+
+    ------------------------------------------------------------------
+    -- Integer family
+    ------------------------------------------------------------------
+    WHEN 'BIGINT' THEN
+      -- Debezium uses DECIMAL for BIGINT UNSIGNED to avoid overflow.
+      IF is_unsigned THEN
+        RETURN 3;     -- DECIMAL
+      ELSE
+        RETURN -5;    -- BIGINT
+      END IF;
+
+    WHEN 'INT', 'INTEGER', 'MEDIUMINT' THEN
+      RETURN 4;       -- INTEGER
+
+    WHEN 'SMALLINT', 'TINYINT', 'YEAR' THEN
+      -- Your example shows TINYINT and YEAR as int/short-ish types
+      RETURN 5;       -- SMALLINT
+
+    ------------------------------------------------------------------
+    -- Bit / boolean
+    ------------------------------------------------------------------
+    WHEN 'BIT' THEN
+      RETURN -7;      -- BIT
+
+    WHEN 'BOOL', 'BOOLEAN' THEN
+      RETURN 16;      -- BOOLEAN (not from your example, but sane to support)
+
+    ------------------------------------------------------------------
+    -- Character / text
+    ------------------------------------------------------------------
+    WHEN 'CHAR', 'NCHAR' THEN
+      RETURN 1;       -- CHAR
+
+    WHEN 'VARCHAR', 'NVARCHAR',
+         'TINYTEXT', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT',
+         'ENUM', 'SET' THEN
+      -- Debezium maps all these to VARCHAR-ish
+      RETURN 12;      -- VARCHAR
+
+    ------------------------------------------------------------------
+    -- Date / time
+    ------------------------------------------------------------------
+    WHEN 'DATE' THEN
+      RETURN 91;      -- DATE
+
+    WHEN 'TIME' THEN
+      RETURN 92;      -- TIME (with or without fractional seconds; length handled separately)
+
+    WHEN 'DATETIME' THEN
+      RETURN 93;      -- TIMESTAMP
+
+    WHEN 'TIMESTAMP' THEN
+      -- In your example, TIMESTAMP maps to 2014 (TIMESTAMP_WITH_TIMEZONE)
+      RETURN 2014;
+
+    ------------------------------------------------------------------
+    -- Binary / blobs
+    ------------------------------------------------------------------
+    WHEN 'BINARY' THEN
+      RETURN -2;      -- BINARY
+
+    WHEN 'VARBINARY' THEN
+      RETURN -3;      -- VARBINARY
+
+    WHEN 'TINYBLOB', 'BLOB', 'MEDIUMBLOB', 'LONGBLOB' THEN
+      RETURN 2004;    -- BLOB
+
+    ------------------------------------------------------------------
+    -- JSON and spatial types
+    ------------------------------------------------------------------
+    WHEN 'JSON' THEN
+      RETURN 1111;    -- OTHER
+
+    WHEN 'GEOMETRY', 'POINT', 'LINESTRING', 'POLYGON',
+         'MULTIPOINT', 'MULTILINESTRING', 'MULTIPOLYGON',
+         'GEOMETRYCOLLECTION' THEN
+      RETURN 1111;    -- OTHER
+
+    ------------------------------------------------------------------
+    -- Fallback
+    ------------------------------------------------------------------
+    ELSE
+      RETURN 1111;    -- OTHER (catch-all)
+  END CASE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION synchdb_type_to_jdbc(
+    p_connector text,
+    p_type_text text
+)
+RETURNS integer
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    v_conn text := lower(p_connector);
+BEGIN
+    CASE v_conn
+        WHEN 'oracle', 'olr' THEN
+            RETURN oracle_type_to_jdbc(p_type_text);
+
+        WHEN 'mysql' THEN
+            RETURN mysql_type_to_jdbc(p_type_text);
+        ELSE
+            RAISE EXCEPTION
+                'synchdb_type_to_jdbc: unsupported connector type % for type %',
+                p_connector, p_type_text;
+    END CASE;
 END;
 $$;
 

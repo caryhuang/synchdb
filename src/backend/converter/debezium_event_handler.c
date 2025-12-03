@@ -333,24 +333,32 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 			ddlinfo->src_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
 
-    if (getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true) == 0)
+	/*** xxx fixme crash due to ddlinfo->id = NULL fixme xxx ***/
+    if (getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true))
+    {
+    	elog(DEBUG1, "no id parameter in table change data. Stop parsing...");
+		destroyDBZDDL(ddlinfo);
+		return NULL;
+    }
+    else
     	ddlinfo->id = pstrdup(strinfo.data);
 
-    if (getPathElementString(jb, "payload.tableChanges.0.table.primaryKeyColumnNames", &strinfo, false) == 0)
+    if (getPathElementString(jb, "payload.tableChanges.0.table.primaryKeyColumnNames", &strinfo, false))
+    	ddlinfo->primaryKeyColumnNames = NULL;
+    else
     	ddlinfo->primaryKeyColumnNames = pstrdup(strinfo.data);
 
-    if (getPathElementString(jb, "payload.tableChanges.0.type", &strinfo, true) == 0)
+    if (getPathElementString(jb, "payload.tableChanges.0.type", &strinfo, true))
+    {
+    	elog(DEBUG1, "unknown DDL type. Stop parsing...");
+		destroyDBZDDL(ddlinfo);
+		return NULL;
+    }
+    else
     	ddlinfo->type = name_to_ddltype(strinfo.data);
 
     /* free the data inside strinfo as we no longer needs it */
     pfree(strinfo.data);
-
-    if (!strcmp(ddlinfo->id, "NULL") || ddlinfo->type == DDL_UNDEF)
-    {
-    	elog(DEBUG1, "no table change data or unknown DDL type. Stop parsing...");
-    	destroyDBZDDL(ddlinfo);
-    	return NULL;
-    }
 
     fc_normalize_name(synchdb_letter_casing_strategy, ddlinfo->id, strlen(ddlinfo->id));
 
@@ -1452,6 +1460,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
 	oldContext = MemoryContextSwitchTo(tempContext);
 
+	elog(WARNING, "%s", event);
 	initStringInfo(&strinfo);
 
     /* Convert event string to JSONB */

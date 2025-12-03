@@ -66,6 +66,7 @@ function setup_mysql()
 GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'mysqluser'@'%';
 GRANT replication client ON *.* TO 'mysqluser'@'%';
 GRANT replication slave ON *.* TO 'mysqluser'@'%';
+GRANT BACKUP_ADMIN ON *.* TO 'mysqluser'@'%';
 GRANT all privileges on tpcc.* to mysqluser;
 GRANT RELOAD ON *.* TO 'mysqluser'@'%';
 FLUSH PRIVILEGES;
