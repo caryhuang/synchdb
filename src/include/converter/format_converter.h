@@ -211,7 +211,7 @@ PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type);
 void updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype, const char * name);
 PG_DML * convert2PGDML(DBZ_DML * dbzdml, ConnectorType type);
 bool fc_translate_datatype(ConnectorType connectorType,
-		const char * ext_datatype, int ext_length, int ext_scale,
+		const char * ext_datatype, int * ext_length, int * ext_scale,
 		char ** pg_datatype, int * pg_datatype_len);
 void fc_normalize_name(LetterCasingStrategy strategy, char * name, int len);
 

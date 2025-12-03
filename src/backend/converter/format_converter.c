@@ -5266,7 +5266,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 bool
 fc_translate_datatype(ConnectorType connectorType,
-		const char * ext_datatype, int ext_length, int ext_scale,
+		const char * ext_datatype, int * ext_length, int * ext_scale,
 		char ** pg_datatype, int * pg_datatype_len)
 {
 	DatatypeHashEntry * entry;
@@ -5303,18 +5303,45 @@ fc_translate_datatype(ConnectorType connectorType,
 
 	/* handle per-connector special cases */
 	if ((connectorType == TYPE_MYSQL || connectorType == TYPE_SQLSERVER) &&
-			ext_length == 1 && !strcasecmp(ext_datatype, "bit"))
+			*ext_length == 1 && !strcasecmp(ext_datatype, "bit"))
 	{
 		/* special case: bit with length 1 -> include length in lookup key */
 		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
-				ext_datatype, ext_length);
+				ext_datatype, *ext_length);
 	}
-	else if (connectorType == TYPE_ORACLE && ext_scale == 0 &&
-			!strcasecmp(ext_datatype, "number"))
+	else if (connectorType == TYPE_ORACLE)
 	{
-		/* special case: NUMBER with scale 0 -> include both length and scale in lookup key */
-		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d,%d)",
-				ext_datatype, ext_length, ext_scale);
+		bool removed = false;
+		char * type = pstrdup(ext_datatype);
+		/*
+		 * oracle data type may contain length and scale information in the col->typeName,
+		 * but these are also available in col->length and col->scale. We need to remove
+		 * them here to ensure proper data type transforms. Known data type to have this
+		 * addition is INTERVAL DAY(3) TO SECOND(6)
+		 */
+		remove_precision(type, &removed);
+
+		/*
+		 * for INTERVAL DAY TO SECOND or if precision operators have been removed previously,
+		 * we need to make size = scale, and empty the scale to maintain compatibility in
+		 * PostgreSQL.
+		 */
+		if ((!strcasecmp(type, "interval day to second") && *ext_scale > 0) || removed)
+		{
+			*ext_length = *ext_scale;
+			*ext_scale = 0;
+		}
+
+		if (*ext_scale == 0 && !strcasecmp(type, "number"))
+		{
+			/* special case: NUMBER with scale 0 -> include both length and scale in lookup key */
+			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d,%d)",
+					type, *ext_length, *ext_scale);
+		}
+		else
+		{
+			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s", type);
+		}
 	}
 	else
 		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s", ext_datatype);

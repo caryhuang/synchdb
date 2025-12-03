@@ -7069,7 +7069,7 @@ synchdb_translate_datatype(PG_FUNCTION_ARGS)
 	else
 	{
 		if (fc_translate_datatype(connectorType, NameStr(*ext_datatype),
-				len, scale,
+				&len, &scale,
 				&pg_datatype, &pg_datatype_len))
 		{
 			appendStringInfo(&strinfo, "%s", pg_datatype);
