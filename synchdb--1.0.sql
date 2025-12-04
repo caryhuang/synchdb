@@ -754,7 +754,10 @@ DECLARE
       CREATE OR REPLACE VIEW %1$I.columns AS
          SELECT "TABLE_SCHEMA" AS schema, "TABLE_NAME" AS table_name,
             "COLUMN_NAME" AS column_name, "ORDINAL_POSITION" AS position,
-            "DATA_TYPE" AS type_name, "CHARACTER_MAXIMUM_LENGTH" AS length,
+			CASE
+				WHEN "COLUMN_TYPE" ILIKE '%%unsigned%%' THEN "DATA_TYPE" || ' unsigned'
+				ELSE "DATA_TYPE"
+		    END AS type_name, "CHARACTER_MAXIMUM_LENGTH" AS length,
             coalesce("NUMERIC_PRECISION", "DATETIME_PRECISION", null) AS precision,
             "NUMERIC_SCALE" AS scale, "IS_NULLABLE"::boolean AS nullable,
             "COLUMN_DEFAULT" AS default_value

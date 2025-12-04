@@ -4919,6 +4919,7 @@ _PG_init(void)
 	fc_initFormatConverter(TYPE_MYSQL);
 	fc_initFormatConverter(TYPE_SQLSERVER);
 	fc_initFormatConverter(TYPE_ORACLE);
+	fc_initFormatConverter(TYPE_POSTGRES);
 
 	if (process_shared_preload_libraries_in_progress)
 	{
