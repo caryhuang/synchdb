@@ -117,6 +117,8 @@ getTimerepFromString(const char * typestring)
 		return TIME_MICRODURATION;
 	else if (find_exact_string_match(typestring, "io.debezium.data.VariableScaleDecimal"))
 		return DATA_VARIABLE_SCALE;
+	else if (find_exact_string_match(typestring, "org.apache.kafka.connect.data.Decimal"))
+		return DATA_VARIABLE_SCALE;
 	else if (find_exact_string_match(typestring, "io.debezium.data.geometry.Geometry"))
 		return DATA_VARIABLE_SCALE;
 	else if (find_exact_string_match(typestring, "io.debezium.data.Enum"))

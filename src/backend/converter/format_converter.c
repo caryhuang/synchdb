@@ -63,6 +63,7 @@ static HTAB * transformExpressionHash = NULL;
 static HTAB * mysqlDatatypeHash = NULL;
 static HTAB * oracleDatatypeHash = NULL;
 static HTAB * sqlserverDatatypeHash = NULL;
+static HTAB * postgresDatatypeHash = NULL;
 
 DatatypeHashEntry mysql_defaultTypeMappings[] =
 {
@@ -255,6 +256,81 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 };
 
 #define SIZE_SQLSERVER_DATATYPE_MAPPING (sizeof(sqlserver_defaultTypeMappings) / sizeof(DatatypeHashEntry))
+
+DatatypeHashEntry postgres_defaultTypeMappings[] =
+{
+	{{"bigint", false}, "bigint", 0},
+	{{"bigserial", false}, "bigserial", 0},
+	{{"bigserial", true}, "bigserial", 0},
+	{{"bit", false}, "bit", -1},
+	{{"bit varying", false}, "bit varying", -1},
+	{{"bool", false}, "bool", 0},
+	{{"boolean", false}, "boolean", 0},
+	{{"box", false}, "box", 0},
+	{{"bytea", false}, "bytea", 0},
+	{{"char", false}, "char", -1},
+	{{"character", false}, "character", -1},
+	{{"character varying", false}, "character varying", -1},
+	{{"cidr", false}, "cidr", 0},
+	{{"circle", false}, "circle", 0},
+	{{"date", false}, "date", 0},
+	{{"decimal", false}, "dedcimal", -1},
+	{{"double precision", false}, "double precision", 0},
+	{{"float", false}, "float", 0},
+	{{"float4", false}, "float4", 0},
+	{{"float8", false}, "float8", 0},
+	{{"inet", false}, "inet", 0},
+	{{"int", false}, "int", 0},
+	{{"int2", false}, "int2", 0},
+	{{"int4", false}, "int4", 0},
+	{{"int8", false}, "int8", 0},
+	{{"integer", false}, "integer", 0},
+	{{"interval", false}, "interval", -1},
+	{{"json", false}, "json", 0},
+	{{"jsonb", false}, "jsonb", 0},
+	{{"line", false}, "line", 0},
+	{{"lseg", false}, "lseg", 0},
+	{{"macaddr", false}, "macaddr", 0},
+	{{"macaddr8", false}, "macaddr8", 0},
+	{{"money", false}, "money", 0},
+	{{"numeric", false}, "numeric", -1},
+	{{"path", false}, "path", 0},
+	{{"pg_lsn", false}, "pg_lsn", 0},
+	{{"pg_snapshot", false}, "pg_snapshot", 0},
+	{{"point", false}, "point", 0},
+	{{"polygon", false}, "polygon", 0},
+	{{"real", false}, "real", 0},
+	{{"smallint", false}, "smallint", 0},
+	{{"smallserial", false}, "smallserial", 0},
+	{{"smallserial", true}, "smallserial", 0},
+	{{"serial", false}, "serial", 0},
+	{{"serial", true}, "serial", 0},
+	{{"serial2", false}, "serial2", 0},
+	{{"serial2", true}, "serial2", 0},
+	{{"serial4", false}, "serial4", 0},
+	{{"serial4", true}, "serial4", 0},
+	{{"serial8", false}, "serial8", 0},
+	{{"serial8", true}, "serial8", 0},
+	{{"text", false}, "text", 0},
+	{{"time without time zone", false}, "time without time zone", -1},
+	{{"time with time zone", false}, "time with time zone", -1},
+	{{"time", false}, "time", -1},
+	{{"timetz", false}, "timetz", -1},
+	{{"timestamp without time zone", false}, "timestamp without time zone", -1},
+	{{"timestamp with time zone", false}, "timestamp with time zone", -1},
+	{{"timestamp", false}, "timestamp", -1},
+	{{"timestamptz", false}, "timestamptz", -1},
+	{{"tsquery", false}, "tsquery", 0},
+	{{"tsvector", false}, "tsvector", 0},
+	{{"txid_snapshot", false}, "txid_snapshot", 0},
+	{{"uuid", false}, "uuid", 0},
+	{{"varbit", false}, "varbit", -1},
+	{{"varchar", false}, "varchar", -1},
+	{{"xml", false}, "xml", 0},
+	/* ... */
+};
+
+#define SIZE_POSTGRES_DATATYPE_MAPPING (sizeof(postgres_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
 static void remove_precision(char * str, bool * removed);
 static int count_active_columns(TupleDesc tupdesc);
@@ -965,6 +1041,54 @@ init_sqlserver(void)
 	}
 }
 
+/*
+ * init_sqlserver
+ *
+ * initialize data type hash table for sqlserver database
+ */
+static void
+init_postgres(void)
+{
+	HASHCTL	info;
+	int i = 0;
+	DatatypeHashEntry * entry;
+	bool found = 0;
+
+	info.keysize = sizeof(DatatypeHashKey);
+	info.entrysize = sizeof(DatatypeHashEntry);
+	info.hcxt = TopMemoryContext;
+
+	postgresDatatypeHash = hash_create("postgres datatype hash",
+							 256,
+							 &info,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	for (i = 0; i < SIZE_POSTGRES_DATATYPE_MAPPING; i++)
+	{
+		entry = (DatatypeHashEntry *) hash_search(postgresDatatypeHash, &(postgres_defaultTypeMappings[i].key), HASH_ENTER, &found);
+		if (!found)
+		{
+			entry->key.autoIncremented = postgres_defaultTypeMappings[i].key.autoIncremented;
+			memset(entry->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+			strncpy(entry->key.extTypeName,
+					postgres_defaultTypeMappings[i].key.extTypeName,
+					strlen(postgres_defaultTypeMappings[i].key.extTypeName));
+
+			entry->pgsqlTypeLength = postgres_defaultTypeMappings[i].pgsqlTypeLength;
+			memset(entry->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+			strncpy(entry->pgsqlTypeName,
+					postgres_defaultTypeMappings[i].pgsqlTypeName,
+					strlen(postgres_defaultTypeMappings[i].pgsqlTypeName));
+
+			elog(DEBUG1, "Inserted mapping '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+		}
+		else
+		{
+			elog(DEBUG1, "mapping exists '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+		}
+	}
+}
+
 static int
 alter_tbname(const char * from, const char * to)
 {
@@ -1588,6 +1712,7 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 	switch (conntype)
 	{
 		case TYPE_ORACLE:
+		case TYPE_POSTGRES:
 		{
 			/*
 			 * variable scale struct in Oracle looks like:
@@ -1651,8 +1776,8 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 		default:
 		{
 			/* todo */
-			elog(WARNING, "struct expansion for mysql and sqlserver can be added here"
-					"once we come across them");
+			elog(WARNING, "struct expansion for %d can be added here"
+					"once we come across them", conntype);
 			break;
 		}
 	}
@@ -3369,10 +3494,17 @@ fc_get_connector_type(const char * connector)
 		return TYPE_SQLSERVER;
 	else if (!strcasecmp(connector, "olr"))
 		return TYPE_OLR;
-	else if (!strcasecmp(connector, "postgres"))
+	else if (!strcasecmp(connector, "postgres") ||
+			 !strcasecmp(connector, "postgresql"))
 		return TYPE_POSTGRES;
 	else
+	{
+		elog(ERROR, "failed to translate connector %s to a proper internal"
+				" connector type. Does synchdb support this type yet?", connector);
+		set_shm_connector_errmsg(myConnectorId, "failed to translate connector to a proper internal"
+				" connector type. Does synchdb support this type yet?");
 		return TYPE_UNDEF;
+	}
 }
 
 /*
@@ -3542,6 +3674,7 @@ fc_initFormatConverter(ConnectorType connectorType)
 		case TYPE_POSTGRES:
 		{
 			/* xxx todo */
+			init_postgres();
 			break;
 		}
 		default:
@@ -5287,6 +5420,8 @@ fc_translate_datatype(ConnectorType connectorType,
 			thehash = sqlserverDatatypeHash;
 			break;
 		case TYPE_POSTGRES:
+			thehash = postgresDatatypeHash;
+			break;
 		default:
 		{
 			elog(WARNING, "unsupported connector type");

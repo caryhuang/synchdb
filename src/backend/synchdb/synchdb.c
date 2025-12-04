@@ -2356,9 +2356,12 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 							(connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)) &&
 							connInfo->snapengine == ENGINE_FDW)
 						{
-							/* Prepare to launch FDW based snapshot here with schemahistory reqeusted */
-							launch_fdw_based_snapshot(connectorType, connInfo, snapshotMode, true);
-
+							/*
+							 * Prepare to launch FDW based snapshot here and request a schema
+							 * history file to be populated for non-postgres connectors.
+							 */
+							launch_fdw_based_snapshot(connectorType, connInfo, snapshotMode,
+									connectorType == TYPE_POSTGRES ? false: true);
 						}
 						else
 						{
@@ -7031,10 +7034,6 @@ synchdb_translate_datatype(PG_FUNCTION_ARGS)
 	else
 		precision = (int)ext_datatype_precision;
 
-	/* precision shall replace len if valid while len = -1 */
-	if (len <= 0 && precision > 0)
-		len = precision;
-
 	initStringInfo(&strinfo);
 
 	connectorType = stringToConnectorType(NameStr(*type));
@@ -7044,62 +7043,46 @@ synchdb_translate_datatype(PG_FUNCTION_ARGS)
 		PG_RETURN_TEXT_P(cstring_to_text("text"));
 	}
 
-	if (connectorType == TYPE_POSTGRES)
-	{
-		/*
-		 * no need to translate for postgres type, just build the
-		 * data type strings based on input data
-		 */
-		appendStringInfo(&strinfo, "%s", NameStr(*ext_datatype));
+	/*
+	 * precision shall replace len if valid while len = -1 similar
+	 * to debezium's change event representations
+	 */
+	if (len <= 0 && precision > 0)
+		len = precision;
 
-		if (len > 0 && scale > 0)
+	if (fc_translate_datatype(connectorType, NameStr(*ext_datatype),
+			&len, &scale,
+			&pg_datatype, &pg_datatype_len))
+	{
+		appendStringInfo(&strinfo, "%s", pg_datatype);
+
+		/* pg_datatype_len == -1 means to use original length */
+		if (pg_datatype_len == -1)
+			pg_datatype_len = len;
+
+		if (pg_datatype_len > 0 && scale > 0)
 		{
-			appendStringInfo(&strinfo, "(%d, %d)", len, scale);
+			appendStringInfo(&strinfo, "(%d, %d)",
+					pg_datatype_len, scale);
 			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 		}
 
-		if (len > 0 && (scale == 0 || scale == -1))
+		if (pg_datatype_len > 0 && (scale == 0 || scale == -1))
 		{
-			appendStringInfo(&strinfo, "(%d)", len);
+			appendStringInfo(&strinfo, "(%d)",
+					pg_datatype_len);
 			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 		}
 
 		PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
-	}
-	else
-	{
-		if (fc_translate_datatype(connectorType, NameStr(*ext_datatype),
-				&len, &scale,
-				&pg_datatype, &pg_datatype_len))
-		{
-			appendStringInfo(&strinfo, "%s", pg_datatype);
-
-			/* pg_datatype_len == -1 means to use original length */
-			if (pg_datatype_len == -1)
-				pg_datatype_len = len;
-
-			if (pg_datatype_len > 0 && scale > 0)
-			{
-				appendStringInfo(&strinfo, "(%d, %d)",
-						pg_datatype_len, scale);
-				PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
-			}
-
-			if (pg_datatype_len > 0 && (scale == 0 || scale == -1))
-			{
-				appendStringInfo(&strinfo, "(%d)",
-						pg_datatype_len);
-				PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
-			}
-
-			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
-		}
 	}
 
 	/*
 	 * control comes here if no default mapping is found in hash lookup, we will leave
 	 * the data type as is plus length and scale parameters if applicable
 	 */
+	elog(WARNING, "no data type mapping found for %s, returning original data type",
+			NameStr(*ext_datatype));
 	appendStringInfo(&strinfo, "%s", NameStr(*ext_datatype));
 
 	if (len > 0 && scale > 0)
