@@ -2351,7 +2351,7 @@ BEGIN
     );
 
     -- truncate at start so each run produces a clean set
-    EXECUTE format('TRUNCATE TABLE %I.%I', 'public', v_schema_tbl);
+    -- EXECUTE format('TRUNCATE TABLE %I.%I', 'public', v_schema_tbl);
   END IF;
 
   ----------------------------------------------------------------------
@@ -2372,6 +2372,23 @@ BEGIN
   END IF;
 
   ----------------------------------------------------------------------
+  --  figure out v_conn_type
+  ----------------------------------------------------------------------
+  SELECT (data->>'connector')::name,
+         lower(data->>'srcdb'),
+         data->'snapshottable'
+    INTO v_conn_type, v_srcdb, v_snapcfg
+  FROM synchdb_conninfo
+  WHERE name = p_connector_name;
+
+  IF v_conn_type IS NULL OR v_conn_type = ''::name THEN
+    RAISE EXCEPTION 'synchdb_conninfo[%]: data->>connector is missing/empty', p_connector_name;
+  END IF;
+  IF v_srcdb IS NULL OR v_srcdb = '' THEN
+    RAISE EXCEPTION 'synchdb_conninfo[%]: data->>srcdb is missing/empty', p_connector_name;
+  END IF;
+
+  ----------------------------------------------------------------------
   -- Build tmp_snap_list in one of two modes:
   --   A) Explicit list mode (p_snapshot_tables provided)
   --   B) Conninfo+snapshottable mode (legacy/default)
@@ -2386,34 +2403,26 @@ BEGIN
   IF use_explicit THEN
     -- Mode A: parse CSV of db.schema.table triplets (enforce 3-part)
     INSERT INTO tmp_snap_list(db, schem, tbl)
-    SELECT lower(parts[1]) AS db,
-           lower(parts[2]) AS schem,
-           lower(parts[3]) AS tbl
+	SELECT
+      CASE WHEN array_length(parts,1) = 3 THEN parts[1]
+           WHEN array_length(parts,1) = 2 THEN parts[1]  -- treat as db
+      END AS db,
+      CASE WHEN array_length(parts,1) = 3 THEN parts[2]
+           WHEN array_length(parts,1) = 2 THEN NULL             -- schem unknown
+      END AS schem,
+      CASE WHEN array_length(parts,1) = 3 THEN parts[3]
+           WHEN array_length(parts,1) = 2 THEN parts[2]
+      END AS tbl
     FROM (
       SELECT regexp_split_to_array(trim(x), '\.') AS parts
       FROM regexp_split_to_table(p_snapshot_tables, '\s*,\s*') AS t(x)
       WHERE trim(x) <> ''
     ) s
-    WHERE array_length(parts,1) = 3;
+    WHERE array_length(parts,1) IN (2,3);
 
     v_use_filter := EXISTS (SELECT 1 FROM tmp_snap_list);
-
   ELSE
     -- Mode B: legacy behavior using synchdb_conninfo + data->snapshottable
-    SELECT (data->>'connector')::name,
-           lower(data->>'srcdb'),
-           data->'snapshottable'
-      INTO v_conn_type, v_srcdb, v_snapcfg
-    FROM synchdb_conninfo
-    WHERE name = p_connector_name;
-
-    IF v_conn_type IS NULL OR v_conn_type = ''::name THEN
-      RAISE EXCEPTION 'synchdb_conninfo[%]: data->>connector is missing/empty', p_connector_name;
-    END IF;
-    IF v_srcdb IS NULL OR v_srcdb = '' THEN
-      RAISE EXCEPTION 'synchdb_conninfo[%]: data->>srcdb is missing/empty', p_connector_name;
-    END IF;
-
     IF v_snapcfg IS NULL OR v_snapcfg::text = 'null' THEN
       v_use_filter := false;  -- migrate all (but we'll still restrict by p_desired_schema below)
     ELSE
@@ -2507,8 +2516,8 @@ BEGIN
         HAVING EXISTS (
           SELECT 1
             FROM tmp_snap_list f
-           WHERE lower(table_name) = f.tbl
-             AND (f.schem IS NULL OR lower("schema") = f.schem)
+           WHERE lower(table_name) = lower(f.tbl)
+             AND (f.schem IS NULL OR lower("schema") = lower(f.schem))
         )';
     ELSE
       -- Legacy gating: require DB == p_desired_db and (optionally) exact schema match in tmp list
@@ -2916,29 +2925,52 @@ BEGIN
   END LOOP;
 
   ----------------------------------------------------------------------
-  -- Snapshot-retry cleanup (unchanged):
+  -- Snapshot-retry cleanup
   ----------------------------------------------------------------------
   IF use_explicit AND v_err_tbl_exists THEN
     -- requested_full
     CREATE TEMP TABLE IF NOT EXISTS tmp_requested_full(fullname text PRIMARY KEY) ON COMMIT DROP;
     TRUNCATE tmp_requested_full;
-    INSERT INTO tmp_requested_full(fullname)
-    SELECT format('%s.%s.%s', db, schem, tbl)
-    FROM tmp_snap_list;
+
+	IF v_conn_type IN ('oracle','olr','postgres') THEN
+      INSERT INTO tmp_requested_full(fullname)
+      SELECT format('%s.%s.%s', db, schem, tbl)
+      FROM tmp_snap_list;
+	ELSIF v_conn_type = 'mysql' THEN
+      INSERT INTO tmp_requested_full(fullname)
+      SELECT format('%s.%s', db, tbl)
+      FROM tmp_snap_list;
+    ELSE
+      RAISE EXCEPTION 'Unsupported connector type: %', v_conn_type;
+    END IF;
 
     -- existing_full (join requested list to metadata to ensure db token matches)
     CREATE TEMP TABLE IF NOT EXISTS tmp_existing_full(fullname text PRIMARY KEY) ON COMMIT DROP;
     TRUNCATE tmp_existing_full;
 
-    EXECUTE format($SQL$
-      INSERT INTO tmp_existing_full(fullname)
-      SELECT format('%%s.%%s.%%s', f.db, lower(c."schema"), lower(c.table_name))
-        FROM %1$I.columns c
-        JOIN tmp_snap_list f
-          ON lower(c.table_name) = f.tbl
-         AND (f.schem IS NULL OR lower(c."schema") = f.schem)
-      GROUP BY f.db, c."schema", c.table_name
-    $SQL$, p_source_schema);
+	IF v_conn_type IN ('oracle','olr','postgres') THEN
+      EXECUTE format($SQL$
+        INSERT INTO tmp_existing_full(fullname)
+        SELECT format('%%s.%%s.%%s', f.db, c."schema", c.table_name)
+          FROM %1$I.columns c
+          JOIN tmp_snap_list f
+            ON c.table_name = f.tbl
+           AND (f.schem IS NULL OR c."schema" = f.schem)
+        GROUP BY f.db, c."schema", c.table_name
+      $SQL$, p_source_schema);
+    ELSIF v_conn_type = 'mysql' THEN
+      EXECUTE format($SQL$
+        INSERT INTO tmp_existing_full(fullname)
+        SELECT format('%%s.%%s', f.db, c.table_name)
+          FROM %1$I.columns c
+          JOIN tmp_snap_list f
+            ON c.table_name = f.tbl
+           AND (f.schem IS NULL OR c."schema" = f.schem)
+        GROUP BY f.db, c."schema", c.table_name
+      $SQL$, p_source_schema);
+    ELSE
+      RAISE EXCEPTION 'Unsupported connector type: %', v_conn_type;
+    END IF;
 
     -- prune: anything requested but not existing anymore
     EXECUTE format($SQL$
@@ -3380,7 +3412,7 @@ CREATE OR REPLACE FUNCTION synchdb_migrate_data_with_transforms(
     p_connector_name    name,                 -- connector for stats + objmap filter
     p_dst_schema        name,                 -- e.g. 'psql_stage'
     p_desired_db        name,                 -- e.g. 'free'
-    p_scn               numeric,              -- SCN used during this snapshot run
+    p_offset            text,                 -- offset value (lsn, scn, binlog pos..etc)
     p_desired_schema    name DEFAULT NULL,    -- e.g. 'dbzuser'
     p_do_truncate       boolean DEFAULT false,
     p_rows_per_tick     integer DEFAULT 0,    -- 0/NULL = no batching; >0 = stats every N rows
@@ -3413,6 +3445,7 @@ DECLARE
   v_err_count       bigint;     -- summary count at end
 
   v_any_batch_failed boolean;   -- tracks data failures in batching mode
+
 BEGIN
   -- sanitize connector name to identifier suffix
   v_err_tbl_ident :=
@@ -3436,7 +3469,7 @@ BEGIN
   ----------------------------------------------------------------------
   FOR r IN
     SELECT
-      lower(c.relname) AS tbl_canon,    -- canonical name for matching
+      c.relname        AS tbl_canon,    -- canonical name for matching
       c.relname        AS src_tbl_name, -- actual FT name in p_src_schema
       c2.relname       AS dst_tbl_name  -- actual table name in p_dst_schema
     FROM   pg_foreign_table ft
@@ -3449,15 +3482,15 @@ BEGIN
       AND  c2.relkind = 'r'
   LOOP
     ------------------------------------------------------------------
-    -- Error-table identity: DB/SCHEMA uppercase, table keeps src case
+    -- Error-table identity:
     ------------------------------------------------------------------
     IF p_desired_schema IS NULL OR btrim(p_desired_schema::text) = '' THEN
       v_tbl_display :=
-          upper(p_desired_db::text) || '.' || r.src_tbl_name;
+          p_desired_db::text || '.' || r.src_tbl_name;
     ELSE
       v_tbl_display :=
-          upper(p_desired_db::text) || '.'
-        || upper(p_desired_schema::text) || '.'
+          p_desired_db::text || '.'
+        || p_desired_schema::text || '.'
         || r.src_tbl_name;
     END IF;
 
@@ -3468,6 +3501,8 @@ BEGIN
       -- Build column/expr lists, using canonical names for matching and
       -- actual identifiers for SQL and transforms.
       ------------------------------------------------------------------
+      RAISE NOTICE 'Migrating table: v_tbl_display = %', v_tbl_display;
+
       WITH dst_cols AS (
         SELECT
           c.ordinal_position,
@@ -3626,7 +3661,7 @@ BEGIN
                  tbl            text        NOT NULL,
                  err_state      text        NOT NULL,
                  err_msg        text        NOT NULL,
-                 scn            numeric     NOT NULL,
+                 err_offse      text,
                  ts             timestamptz NOT NULL DEFAULT now(),
                  CONSTRAINT %I UNIQUE (connector_name, tbl)
                )',
@@ -3640,16 +3675,16 @@ BEGIN
                                   err_msg   = MESSAGE_TEXT;
 
           EXECUTE format(
-            'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, scn)
+            'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_offset)
              VALUES ($1,$2,$3,$4,$5)
              ON CONFLICT (connector_name, tbl)
              DO UPDATE SET err_state = EXCLUDED.err_state,
                            err_msg   = EXCLUDED.err_msg,
-                           scn       = EXCLUDED.scn,
+                           err_offset= EXCLUDED.err_offset,
                            ts        = now()',
             'public', v_err_tbl_ident
           )
-          USING p_connector_name, v_tbl_display, err_state, err_msg, p_scn;
+          USING p_connector_name, v_tbl_display, err_state, err_msg, p_offset;
 
           IF NOT p_continue_on_error THEN
             RAISE;
@@ -3730,7 +3765,7 @@ BEGIN
                      tbl            text        NOT NULL,
                      err_state      text        NOT NULL,
                      err_msg        text        NOT NULL,
-                     scn            numeric     NOT NULL,
+                     err_offset     text,
                      ts             timestamptz NOT NULL DEFAULT now(),
                      CONSTRAINT %I UNIQUE (connector_name, tbl)
                    )',
@@ -3744,16 +3779,16 @@ BEGIN
                                       err_msg   = MESSAGE_TEXT;
 
               EXECUTE format(
-                'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, scn)
+                'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_offset)
                  VALUES ($1,$2,$3,$4,$5)
                  ON CONFLICT (connector_name, tbl)
                  DO UPDATE SET err_state = EXCLUDED.err_state,
                                err_msg   = EXCLUDED.err_msg,
-                               scn       = EXCLUDED.scn,
+                               err_offset= EXCLUDED.err_offset,
                                ts        = now()',
                 'public', v_err_tbl_ident
               )
-              USING p_connector_name, v_tbl_display, err_state, err_msg, p_scn;
+              USING p_connector_name, v_tbl_display, err_state, err_msg, p_offset;
 
               IF NOT p_continue_on_error THEN
                 RAISE;
@@ -3791,6 +3826,9 @@ BEGIN
 
     EXCEPTION
       WHEN OTHERS THEN
+
+		RAISE WARNING 'an error has occured while migrating a table';
+
         -- record failure (UPSERT) for this table
         IF NOT v_err_tbl_created THEN
           EXECUTE format(
@@ -3799,7 +3837,7 @@ BEGIN
                tbl            text        NOT NULL,
                err_state      text        NOT NULL,
                err_msg        text        NOT NULL,
-               scn            numeric,
+               err_offset     text,
                ts             timestamptz NOT NULL DEFAULT now(),
                CONSTRAINT %I UNIQUE (connector_name, tbl)
              )',
@@ -3813,16 +3851,16 @@ BEGIN
                                 err_msg   = MESSAGE_TEXT;
 
         EXECUTE format(
-          'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, scn)
+          'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_offset)
            VALUES ($1,$2,$3,$4,$5)
            ON CONFLICT (connector_name, tbl)
            DO UPDATE SET err_state = EXCLUDED.err_state,
                          err_msg   = EXCLUDED.err_msg,
-                         scn       = EXCLUDED.scn,
+                         err_offset= EXCLUDED.err_offset,
                          ts        = now()',
           'public', v_err_tbl_ident
         )
-        USING p_connector_name, v_tbl_display, err_state, err_msg, p_scn;
+        USING p_connector_name, v_tbl_display, err_state, err_msg, p_offset;
 
         IF NOT p_continue_on_error THEN
           RAISE;
@@ -3852,7 +3890,7 @@ BEGIN
 END;
 $$;
   
-COMMENT ON FUNCTION synchdb_migrate_data_with_transforms(name, name, name, name, numeric, name, boolean, int, boolean, boolean) IS
+COMMENT ON FUNCTION synchdb_migrate_data_with_transforms(name, name, name, name, text, name, boolean, int, boolean, boolean) IS
    'migrate data while applying transform expressions if available - sub-transaction mode';
 
 CREATE OR REPLACE FUNCTION synchdb_migrate_data_with_transforms_nosubs(
@@ -4574,7 +4612,7 @@ BEGIN
             v_server_name,
             p_lower_names,
             p_on_exists,
-            null,               -- SCN not used for Postgres snapshot
+            json_build_object('lsn', v_lsn)::text,
             v_meta_schema,
             p_snapshot_tables,
             p_write_schema_hist,
@@ -4599,18 +4637,48 @@ BEGIN
                  p_stage_schema, p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
 
     IF p_use_subtx THEN
+
         -- With per-table subtransactions
-        PERFORM synchdb_migrate_data_with_transforms(
-            p_stage_schema,
-            p_connector_name,
-            p_dest_schema,
-            p_lookup_db,
-            v_effective_scn,      -- only meaningful for Oracle/OLR
-            p_lookup_schema,
-            false, 0,
-            true,
-            true
-        );
+        IF v_connector IN ('oracle', 'olr') THEN
+            PERFORM synchdb_migrate_data_with_transforms(
+                p_stage_schema,
+                p_connector_name,
+                p_dest_schema,
+                p_lookup_db,
+                json_build_object('scn', v_effective_scn)::text,
+                p_lookup_schema,
+                false, 0,
+                true,
+                true
+            );
+        ELSIF v_connector = 'mysql' THEN
+            PERFORM synchdb_migrate_data_with_transforms(
+                p_stage_schema,
+                p_connector_name,
+                p_dest_schema,
+                p_lookup_db,
+                json_build_object('file', v_binlog_file, 'pos', v_binlog_pos, 'ts_sec', floor(extract(epoch from clock_timestamp())))::text,
+                null,
+                false, 0,
+                true,
+                true
+            );
+        ELSIF v_connector = 'postgres' THEN
+            PERFORM synchdb_migrate_data_with_transforms(
+                p_stage_schema,
+                p_connector_name,
+                p_dest_schema,
+                p_lookup_db,
+                json_build_object('lsn', v_lsn)::text,
+                p_lookup_schema,
+                false, 0,
+                true,
+                true
+            );
+        ELSE
+            RAISE EXCEPTION 'Unsupported connector type: %', v_connector;
+        END IF;
+
     ELSE
         -- All-or-nothing (no subtransactions)
         PERFORM synchdb_migrate_data_with_transforms_nosubs(

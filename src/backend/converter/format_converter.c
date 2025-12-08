@@ -3673,7 +3673,6 @@ fc_initFormatConverter(ConnectorType connectorType)
 		}
 		case TYPE_POSTGRES:
 		{
-			/* xxx todo */
 			init_postgres();
 			break;
 		}

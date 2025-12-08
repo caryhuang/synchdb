@@ -1557,25 +1557,25 @@ ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conn
  * have failed in previous FDW based initial snapshot.
  */
 int
-ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, orascn *scn_out)
+ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, char **offset_out)
 {
 	int ret = -1;
 	StringInfoData strinfo;
 	char *agg_tbls = NULL;
-	char *scn_txt  = NULL;
+	char *offset_txt  = NULL;
 	bool skiptx = false;
 
 	if (out)
 		*out = NULL;
 	if (numout)
 		*numout = 0;
-	if (scn_out)
-		*scn_out = 0;  /* default if no rows / errors */
+	if (offset_out)
+		*offset_out = NULL;
 
 	initStringInfo(&strinfo);
 	appendStringInfo(&strinfo,
 			"SELECT string_agg(tbl, ',' ORDER BY tbl) AS failed_tables, "
-			"max(scn) AS scn_val "
+			"max(err_offset) AS err_offset "
 			"FROM synchdb_fdw_snapshot_errors_%s "
 			"WHERE connector_name = '%s'",
 			name, name);
@@ -1618,15 +1618,11 @@ ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, or
 			}
 
 			/* col 2: scn_val (numeric -> text) */
-			scn_txt = SPI_getvalue(SPI_tuptable->vals[0],
+			offset_txt = SPI_getvalue(SPI_tuptable->vals[0],
 					   SPI_tuptable->tupdesc, 2);
-			if (scn_txt && scn_out)
+			if (offset_txt != NULL && offset_out)
 			{
-				/* parse as unsigned long long (orascn) */
-				errno = 0;
-				*scn_out = (orascn) strtoull(scn_txt, NULL, 10);
-				if (errno != 0)
-					*scn_out = 0; /* fall back if parse failed */
+				*offset_out = pstrdup(offset_txt);
 			}
 			MemoryContextSwitchTo(oldctx);
 		}

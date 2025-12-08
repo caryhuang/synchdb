@@ -4129,6 +4129,7 @@ launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
 	char * snapshot_str = NULL;
 	int ret = -1, ntables = 0;
 	char * tbl_list = NULL;
+	char * err_offset = NULL;
 
 	/* todo: support sqlserver later */
 	if (connectorType == TYPE_SQLSERVER)
@@ -4137,12 +4138,12 @@ launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
 		return -1;
 	}
 	/* todo: scn_req expand to support mysql pg connector */
-	ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &scn_req);
+	ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &err_offset);
 
-	if (ntables > 0 && tbl_list != NULL)
+	if (ntables > 0 && tbl_list != NULL && err_offset != NULL)
 	{
-		elog(WARNING, "Retry on failed snapshot tables %s as of %llu for %s",
-				tbl_list, scn_req, connInfo->name);
+		elog(WARNING, "Retry on failed snapshot tables %s at offset %s for %s",
+				tbl_list, err_offset, connInfo->name);
 	}
 
 	/* sets the current stage based on request flag */
@@ -4233,14 +4234,21 @@ launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
 			elog(ERROR, "unsupported connector type for fdw based snapshot");
 		}
 
-		/* clean tbl_list if needed */
+		/* clean tbl_list and offset if needed */
 		if (tbl_list != NULL)
 		{
 			pfree(tbl_list);
 			tbl_list = NULL;
 		}
 
-		ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &scn_req);
+		/* clean tbl_list and offset if needed */
+		if (err_offset != NULL)
+		{
+			pfree(err_offset);
+			err_offset = NULL;
+		}
+
+		ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &err_offset);
 		if (ret != 0 || ntables == 0 || tbl_list == NULL)
 		{
 			/* change the state to STATE_SCHEMA_SYNC_DONE to handle the transition */
@@ -4259,6 +4267,9 @@ launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
 
 			if (tbl_list != NULL)
 				pfree(tbl_list);
+
+			if (err_offset != NULL)
+				pfree(err_offset);
 		}
 	}
 	else
