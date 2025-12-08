@@ -78,7 +78,7 @@ int ra_listObjmaps(const char * name, ObjectMap ** out, int * numout);
 void destroyPGDDL(PG_DDL * ddlinfo);
 void destroyPGDML(PG_DML * dmlinfo);
 char * ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conninfo,
-		int flag, const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx,
+		int flag, const char * snapshot_tables, const char * offset, bool fdw_use_subtx,
 		bool write_schema_hist, const char * snapshotMode, int letter_casing_strategy);
 int ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, char **offset_out);
 int dump_schema_history_to_file(const char * connector_name, const char *out_path);

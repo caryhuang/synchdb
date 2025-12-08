@@ -4413,7 +4413,7 @@ CREATE OR REPLACE FUNCTION synchdb_do_initial_snapshot(
     p_lookup_schema   name,               -- e.g. 'dbzuser'
     p_lower_names     boolean DEFAULT true,
     p_on_exists       text    DEFAULT 'replace',  -- 'replace' | 'drop' | 'skip'
-    p_scn             numeric DEFAULT 0,          -- >0 to force a specific SCN; else auto-read
+    p_offset          text    DEFAULT null,          -- >0 to force a specific SCN; else auto-read
     p_snapshot_tables text    DEFAULT null,
     p_use_subtx         boolean DEFAULT true,
     p_write_schema_hist boolean DEFAULT false,
@@ -4425,7 +4425,7 @@ AS $$
 DECLARE
     v_scn           numeric;    -- used by oracle connector
     v_case_json     jsonb;
-    v_effective_scn numeric;
+    v_offset_json   jsonb;
     v_server_name   text;       -- will be set by synchdb_prepare_initial_snapshot()
     v_meta_schema   name;
     v_connector     text;
@@ -4442,6 +4442,13 @@ BEGIN
       INTO v_connector
     FROM synchdb_conninfo
     WHERE name = p_connector_name;
+
+	-- quick check on p_offset and turn it to json
+    IF p_offset IS NOT NULL AND btrim(p_offset) <> '' THEN
+      v_offset_json := p_offset::jsonb;
+    ELSE
+      v_offset_json := NULL;
+    END IF;
 
     IF v_connector IS NULL OR v_connector = '' THEN
         RAISE EXCEPTION 'synchdb_do_initial_snapshot(%): data->>connector is missing/empty in synchdb_conninfo',
@@ -4502,17 +4509,13 @@ BEGIN
         RAISE NOTICE 'Step 3: Reading current SCN value from %.current_scn', v_meta_schema;
         EXECUTE format('SELECT current_scn FROM %I.current_scn', v_meta_schema)
            INTO v_scn;
-
-        IF (p_scn IS NULL OR p_scn <= 0) THEN
-            IF v_scn IS NULL THEN
-                RAISE EXCEPTION 'Unable to read current SCN from %.current_scn', v_meta_schema;
-            END IF;
-            v_effective_scn := v_scn;
-        ELSE
-            v_effective_scn := p_scn;
+        
+        -- overwrite if needed		
+        IF v_offset_json IS NOT NULL AND v_offset_json ? 'scn' THEN
+		  v_scn := (v_offset_json->>'scn')::numeric;
         END IF;
 
-        RAISE NOTICE 'Using SCN value % for snapshot', v_effective_scn;
+        RAISE NOTICE 'Using SCN value % for snapshot', v_scn;
 
         RAISE NOTICE 'Step 4: Creating staging foreign tables in schema "%"', p_stage_schema;
         PERFORM synchdb_create_ora_stage_fts(
@@ -4523,7 +4526,7 @@ BEGIN
             v_server_name,
             p_lower_names,
             p_on_exists,
-            json_build_object('scn', v_effective_scn)::text,
+            json_build_object('scn', v_scn)::text,
             v_meta_schema,
             p_snapshot_tables,
             p_write_schema_hist,
@@ -4568,6 +4571,12 @@ BEGIN
             RAISE EXCEPTION 'Unable to read server_id from %.global_variables', v_meta_schema;
         END IF;
 
+		-- overwrite if needed
+        IF v_offset_json IS NOT NULL THEN
+	      v_binlog_file := v_offset_json->>'file';
+          v_binlog_pos  := (v_offset_json->>'pos')::bigint;
+        END IF;
+
         RAISE NOTICE 'Using binlog file %, pos %, server id % for snapshot',
                      v_binlog_file, v_binlog_pos, v_server_id;
 
@@ -4599,6 +4608,11 @@ BEGIN
 
         IF v_lsn IS NULL THEN
             RAISE EXCEPTION 'Unable to read wal_lsn from %.wal_lsn', v_meta_schema;
+        END IF;
+        
+		-- overwrite if needed
+		IF v_offset_json IS NOT NULL THEN
+          v_lsn  := v_offset_json->>'lsn';
         END IF;
 
         RAISE NOTICE 'Using LSN % for snapshot', v_lsn;
@@ -4645,7 +4659,7 @@ BEGIN
                 p_connector_name,
                 p_dest_schema,
                 p_lookup_db,
-                json_build_object('scn', v_effective_scn)::text,
+                json_build_object('scn', v_scn)::text,
                 p_lookup_schema,
                 false, 0,
                 true,
@@ -4698,8 +4712,8 @@ BEGIN
 
     -- Connector-specific completion notice + return value
     IF v_connector IN ('oracle', 'olr') THEN
-        RAISE NOTICE 'Initial snapshot completed successfully at SCN %', v_effective_scn;
-        v_ret := v_effective_scn::text;
+        RAISE NOTICE 'Initial snapshot completed successfully at SCN %', v_scn;
+        v_ret := v_scn::text;
     ELSIF v_connector = 'mysql' THEN
         RAISE NOTICE 'Initial snapshot completed successfully at binlog %, pos %, server_id %',
                      v_binlog_file, v_binlog_pos, v_server_id;
@@ -4730,7 +4744,7 @@ EXCEPTION
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_do_initial_snapshot(name, text, name, name, name, text, name, boolean, text, numeric, text, boolean, boolean, text) IS
+COMMENT ON FUNCTION synchdb_do_initial_snapshot(name, text, name, name, name, text, name, boolean, text, text, text, boolean, boolean, text) IS
    'perform initial snapshot procedure + data transforms using a oracle_fdw server';
 
 CREATE OR REPLACE FUNCTION synchdb_do_schema_sync(

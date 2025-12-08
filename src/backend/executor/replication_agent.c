@@ -1386,16 +1386,14 @@ destroyPGDML(PG_DML * dmlinfo)
 
 char *
 ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conninfo,
-		int flag, const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx,
+		int flag, const char * snapshot_tables, const char * offset, bool fdw_use_subtx,
 		bool write_schema_hist, const char * snapshotMode, int letter_casing_strategy)
 {
 	int ret = -1;
 	bool isnull = false;
 	Datum d;
-	char *s = NULL;
 	bool skiptx = false;
 	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE] = {0};
-	char scn_buf[64] = {0};
 	MemoryContext oldctx;
 	char * snapshot_str = NULL;
 
@@ -1403,25 +1401,19 @@ ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conn
 			!strcasecmp(snapshotMode, "no_data")?
 			"SELECT synchdb_do_schema_sync("
 			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
-			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"
+			"  $6::text,$7::name,$8::bool,$9::text,$10::text,"
 			"  $11::text,$12::bool,$13::bool,$14::text)" :
 			"SELECT synchdb_do_initial_snapshot("
 			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
-			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"
+			"  $6::text,$7::name,$8::bool,$9::text,$10::text,"
 			"  $11::text,$12::bool,$13::bool,$14::text)";
 	Oid   argtypes[14] = {
 		NAMEOID, TEXTOID, NAMEOID, NAMEOID, NAMEOID,
-		TEXTOID, NAMEOID, BOOLOID, TEXTOID, NUMERICOID,
+		TEXTOID, NAMEOID, BOOLOID, TEXTOID, TEXTOID,
 		TEXTOID, BOOLOID, BOOLOID, TEXTOID
 	};
 	Datum values[14];
 	char  nulls[14] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
-
-	/* compute scn */
-	if (scn_req > 0)
-		snprintf(scn_buf, sizeof(scn_buf), "%llu", scn_req);
-	else
-		snprintf(scn_buf, sizeof(scn_buf), "%s", "0");
 
 	/*
 	 * if we are already in transaction or transaction block, we can skip
@@ -1480,10 +1472,12 @@ ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conn
 
 		values[7]  = BoolGetDatum(true);
 		values[8]  = CStringGetTextDatum("replace");
-		values[9]  = DirectFunctionCall3(numeric_in,
-										 CStringGetDatum(scn_buf),
-										 ObjectIdGetDatum(InvalidOid),
-										 Int32GetDatum(-1));
+
+		if (offset)
+			values[9] = CStringGetTextDatum(offset);
+		else
+			nulls[9] = 'n';
+
 		if (snapshot_tables)
 			values[10] = CStringGetTextDatum(snapshot_tables);
 		else
@@ -1617,7 +1611,7 @@ ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, ch
 				if (numout) *numout = 1; /* you treat it as a single CSV string */
 			}
 
-			/* col 2: scn_val (numeric -> text) */
+			/* col 2: err_offset (text) */
 			offset_txt = SPI_getvalue(SPI_tuptable->vals[0],
 					   SPI_tuptable->tupdesc, 2);
 			if (offset_txt != NULL && offset_out)

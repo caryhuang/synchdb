@@ -4125,7 +4125,6 @@ static int
 launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode, bool schemahistory)
 {
 	/* FDW based snapshot and schema only sync processing logics here. */
-	orascn scn_req = 0;
 	char * snapshot_str = NULL;
 	int ret = -1, ntables = 0;
 	char * tbl_list = NULL;
@@ -4137,7 +4136,7 @@ launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
 		elog(WARNING, "FDW based snapshot is not supported on SQLSERVER");
 		return -1;
 	}
-	/* todo: scn_req expand to support mysql pg connector */
+
 	ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &err_offset);
 
 	if (ntables > 0 && tbl_list != NULL && err_offset != NULL)
@@ -4170,7 +4169,7 @@ launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
 
 	/* invoke initial snapshot or schema sync PL/pgSQL workflow */
 	snapshot_str = ra_run_orafdw_initial_snapshot_spi(connectorType, connInfo, connInfo->flag, tbl_list,
-			scn_req, synchdb_fdw_use_subtx, schemahistory, snapshotMode, synchdb_letter_casing_strategy);
+			err_offset, synchdb_fdw_use_subtx, schemahistory, snapshotMode, synchdb_letter_casing_strategy);
 
 	if (connInfo->isOraCompat)
 	{
