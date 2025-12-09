@@ -1463,9 +1463,9 @@ ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conn
 			case TYPE_SQLSERVER:
 			default:
 			{
-				/* for others, make both equal for now todo */
+				/* for others, make schema public for now todo */
 				values[5]  = CStringGetTextDatum(conninfo->srcdb);
-				values[6]  =  DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcdb));
+				values[6]  =  DirectFunctionCall1(namein, CStringGetDatum("public"));
 				break;
 			}
 		}

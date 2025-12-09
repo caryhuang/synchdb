@@ -3557,7 +3557,7 @@ BEGIN
       WITH dst_cols AS (
         SELECT
           c.ordinal_position,
-          lower(c.column_name) AS dst_col_canon,
+          c.column_name AS dst_col_canon,
           c.column_name        AS dst_col_ident
         FROM information_schema.columns c
         WHERE c.table_schema = p_dst_schema
@@ -3566,15 +3566,15 @@ BEGIN
       colmap AS (
         -- A) schema-qualified rules: p_src_schema.table.column -> <dst column>
         SELECT
-          lower(split_part(m.srcobj,'.',2)) AS tbl,
-          lower(split_part(m.srcobj,'.',3)) AS src_col,
-          (regexp_split_to_array(lower(m.dstobj), '\.'))[
-            array_length(regexp_split_to_array(lower(m.dstobj), '\.'),1)
+          split_part(m.srcobj,'.',2) AS tbl,
+          split_part(m.srcobj,'.',3) AS src_col,
+          (regexp_split_to_array(m.dstobj, '\.'))[
+            array_length(regexp_split_to_array(m.dstobj, '\.'),1)
           ] AS dst_col
         FROM synchdb_objmap AS m
         WHERE m.objtype='column' AND m.enabled
           AND m.name = p_connector_name
-          AND lower(split_part(m.srcobj,'.',1)) = lower(p_src_schema)
+          AND split_part(m.srcobj,'.',1) = p_src_schema
           AND m.dstobj IS NOT NULL AND btrim(m.dstobj) <> ''
 
         UNION ALL
@@ -3584,21 +3584,21 @@ BEGIN
           CASE WHEN array_length(arr,1)=4 THEN arr[3]
                WHEN array_length(arr,1)=3 THEN arr[2] END AS tbl,
           arr[array_length(arr,1)]                        AS src_col,
-          (regexp_split_to_array(lower(m2.dstobj), '\.'))[
-            array_length(regexp_split_to_array(lower(m2.dstobj), '\.'),1)
+          (regexp_split_to_array(m2.dstobj, '\.'))[
+            array_length(regexp_split_to_array(m2.dstobj, '\.'),1)
           ] AS dst_col
         FROM (
-          SELECT regexp_split_to_array(lower(srcobj), '\.') AS arr, dstobj
+          SELECT regexp_split_to_array(srcobj, '\.') AS arr, dstobj
           FROM synchdb_objmap
           WHERE objtype='column' AND enabled
             AND name = p_connector_name
             AND dstobj IS NOT NULL AND btrim(dstobj) <> ''
         ) m2
-        WHERE arr[1] = lower(p_desired_db)
+        WHERE arr[1] = p_desired_db
           AND (
             p_desired_schema IS NULL OR p_desired_schema = ''
             OR array_length(arr,1)=3
-            OR arr[2] = lower(p_desired_schema)
+            OR arr[2] = p_desired_schema
           )
       ),
       col_map AS (
@@ -3622,25 +3622,25 @@ BEGIN
         -- FIX: collapse duplicate source columns per (table, canon name)
         -- so "A" and "a" become exactly ONE mapping for canon 'a'
         ----------------------------------------------------------------
-        SELECT DISTINCT ON (table_name, lower(column_name))
+        SELECT DISTINCT ON (table_name, column_name)
                table_name         AS src_tbl_ident,
-               lower(column_name) AS src_col_canon,
+               column_name AS src_col_canon,
                column_name        AS src_col_ident
         FROM information_schema.columns
         WHERE table_schema = p_src_schema
-        ORDER BY table_name, lower(column_name), ordinal_position
+        ORDER BY table_name, column_name, ordinal_position
       ),
       tmap AS (
         -- Transform rules
         -- A) schema-qualified
         SELECT
-          lower(split_part(mt.srcobj,'.',2)) AS tbl,
-          lower(split_part(mt.srcobj,'.',3)) AS src_col,
+          split_part(mt.srcobj,'.',2) AS tbl,
+          split_part(mt.srcobj,'.',3) AS src_col,
           mt.dstobj                          AS expr
         FROM synchdb_objmap AS mt
         WHERE mt.objtype='transform' AND mt.enabled
           AND mt.name = p_connector_name
-          AND lower(split_part(mt.srcobj,'.',1)) = lower(p_src_schema)
+          AND split_part(mt.srcobj,'.',1) = p_src_schema
 
         UNION ALL
 
@@ -3651,17 +3651,17 @@ BEGIN
           arr[array_length(arr,1)]                        AS src_col,
           t.dstobj                                        AS expr
         FROM (
-          SELECT regexp_split_to_array(lower(srcobj), '\.') AS arr, dstobj
+          SELECT regexp_split_to_array(srcobj, '\.') AS arr, dstobj
           FROM synchdb_objmap
           WHERE objtype='transform' AND enabled
             AND name = p_connector_name
             AND dstobj IS NOT NULL AND btrim(dstobj) <> ''
         ) t
-        WHERE arr[1] = lower(p_desired_db)
+        WHERE arr[1] = p_desired_db
           AND (
             p_desired_schema IS NULL OR p_desired_schema = ''
             OR array_length(arr,1)=3
-            OR arr[2] = lower(p_desired_schema)
+            OR arr[2] = p_desired_schema
           )
       ),
       exprs AS (
@@ -4681,7 +4681,7 @@ BEGIN
         PERFORM synchdb_create_ora_stage_fts(
             p_connector_name,
             p_lookup_db,
-            'public',		-- todo: remove hardcode
+            p_lookup_schema,
             p_stage_schema,
             v_server_name,
             p_lower_names,
