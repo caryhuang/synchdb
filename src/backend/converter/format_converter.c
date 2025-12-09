@@ -3769,7 +3769,7 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 	ObjectMap * objs = NULL;
 	int numobjs = 0;
 	int ret = -1;
-	int i = 0;
+	int i = 0, j = 0;
 	bool found = false;
 	ObjMapHashEntry objmapentry = {0};
 	ObjMapHashEntry * objmaplookup;
@@ -3981,6 +3981,18 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 				continue;
 			}
 			memset(&hashentry, 0, sizeof(DatatypeHashEntry));
+
+			/*
+			 * special case: if srcobj is just a data type (ex. NUMBER - no dots) rather than
+			 * a fully qualified column identifier (ex. database.schema.table.column - with dots),
+			 * then we need to always convert srcobj to lowercase because all of our internal data
+			 * type lookup uses lowercase identifier
+			 */
+			if (!strstr(srccopy, "."))
+			{
+				for (j = 0; j < strlen(srccopy); j++)
+					srccopy[j] = (char) pg_tolower((unsigned char) srccopy[j]);
+			}
 
 			strlcpy(hashentry.key.extTypeName, strtok(srccopy, "|"), SYNCHDB_DATATYPE_NAME_SIZE);
 

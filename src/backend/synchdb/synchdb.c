@@ -6236,7 +6236,7 @@ synchdb_add_objmap(PG_FUNCTION_ARGS)
 				 errmsg("unsupported object type %s", NameStr(*objtype))));
 	}
 	appendStringInfo(&strinfo, "INSERT INTO %s (name, objtype, enabled, srcobj, dstobj)"
-			" VALUES (trim(lower('%s')), trim(lower('%s')), true, trim(lower('%s')), '%s')",
+			" VALUES (trim(lower('%s')), trim(lower('%s')), true, trim('%s'), '%s')",
 			SYNCHDB_OBJECT_MAPPING_TABLE,
 			NameStr(*name),
 			NameStr(*objtype),
@@ -7075,6 +7075,7 @@ synchdb_translate_datatype(PG_FUNCTION_ARGS)
 		{
 			appendStringInfo(&strinfo, "(%d, %d)",
 					pg_datatype_len, scale);
+			elog(DEBUG1, "%s translates to %s", NameStr(*ext_datatype), strinfo.data);
 			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 		}
 
@@ -7082,9 +7083,10 @@ synchdb_translate_datatype(PG_FUNCTION_ARGS)
 		{
 			appendStringInfo(&strinfo, "(%d)",
 					pg_datatype_len);
+			elog(DEBUG1, "%s translates to %s", NameStr(*ext_datatype), strinfo.data);
 			PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 		}
-
+		elog(DEBUG1, "%s translates to %s", NameStr(*ext_datatype), strinfo.data);
 		PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 	}
 
@@ -7099,14 +7101,17 @@ synchdb_translate_datatype(PG_FUNCTION_ARGS)
 	if (len > 0 && scale > 0)
 	{
 		appendStringInfo(&strinfo, "(%d, %d)", len, scale);
+		elog(DEBUG1, "%s translates to %s", NameStr(*ext_datatype), strinfo.data);
 		PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 	}
 
 	if (len > 0 && (scale == 0 || scale == -1))
 	{
 		appendStringInfo(&strinfo, "(%d)", len);
+		elog(DEBUG1, "%s translates to %s", NameStr(*ext_datatype), strinfo.data);
 		PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 	}
+	elog(DEBUG1, "%s translates to %s", NameStr(*ext_datatype), strinfo.data);
 	PG_RETURN_TEXT_P(cstring_to_text(strinfo.data));
 }
 

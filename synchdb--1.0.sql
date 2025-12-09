@@ -2314,6 +2314,11 @@ DECLARE
   -- error table vars (existence check only)
   v_err_tbl_ident  text;
   v_err_tbl_exists boolean := false;
+  v_tbl_display text;
+  err_state         text;
+  err_msg           text;
+  err_detail        text;
+  err_context       text;
 
   -- case strategy: 'lower' | 'upper' | 'asis'
   v_case_strategy text;
@@ -2542,6 +2547,7 @@ BEGIN
   FOR r IN EXECUTE base_sql || ' ORDER BY ora_owner, table_name'
   LOOP
 
+  BEGIN
 	-- decide PG table name according to case strategy
     v_tbl_pg := CASE v_case_strategy
                   WHEN 'lower' THEN lower(r.table_name)
@@ -2921,7 +2927,51 @@ BEGIN
       )
       USING v_msg_json::text;
     END IF;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'an error has occured while creating a table schema';
+    EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS %I.%I (
+               connector_name name        NOT NULL,
+               tbl            text        NOT NULL,
+               err_state      text        NOT NULL,
+               err_msg        text        NOT NULL,
+               err_detail     text,
+               err_offset     text,
+               ts             timestamptz NOT NULL DEFAULT now(),
+               CONSTRAINT %I UNIQUE (connector_name, tbl)
+             )',
+            'public', v_err_tbl_ident, ('uq_'||v_err_tbl_ident)
+          );
 
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE,
+                            err_msg   = MESSAGE_TEXT,
+                            err_detail = PG_EXCEPTION_DETAIL,
+							err_context= PG_EXCEPTION_CONTEXT;
+    
+	IF p_desired_schema IS NULL OR btrim(p_desired_schema::text) = '' THEN
+      v_tbl_display :=
+          p_desired_db::text || '.' || v_tbl_pg;
+    ELSE
+      v_tbl_display :=
+          p_desired_db::text || '.'
+        || p_desired_schema::text || '.'
+        || v_tbl_pg;
+    END IF;
+    
+	RAISE WARNING 'error context = %', err_context;
+	EXECUTE format(
+          'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_detail, err_offset)
+           VALUES ($1,$2,$3,$4,$5,$6)
+           ON CONFLICT (connector_name, tbl)
+           DO UPDATE SET err_state = EXCLUDED.err_state,
+                         err_msg   = EXCLUDED.err_msg,
+                         err_detail= EXCLUDED.err_detail,
+                         err_offset= EXCLUDED.err_offset,
+                         ts        = now()',
+          'public', v_err_tbl_ident
+        )
+    USING p_connector_name, v_tbl_display, err_state, err_msg, err_detail, p_offset;
+  END;
   END LOOP;
 
   ----------------------------------------------------------------------
@@ -3248,7 +3298,7 @@ BEGIN
       AND m.name = p_connector_name
       AND m.dstobj IS NOT NULL AND btrim(m.dstobj) <> ''
   LOOP
-    parts := regexp_split_to_array(lower(r.srcobj), '\.');
+    parts := regexp_split_to_array(r.srcobj, '\.');
     s_db := NULL; s_schema := NULL; s_table := NULL; s_col := NULL;
 
     IF array_length(parts,1) = 4 THEN
@@ -3259,17 +3309,17 @@ BEGIN
       CONTINUE;
     END IF;
 
-    IF p_desired_db IS NOT NULL AND s_db IS DISTINCT FROM lower(p_desired_db) THEN
+    IF p_desired_db IS NOT NULL AND s_db IS DISTINCT FROM p_desired_db THEN
       CONTINUE;
     END IF;
 
     IF p_desired_schema IS NOT NULL
        AND s_schema IS NOT NULL
-       AND s_schema <> lower(p_desired_schema) THEN
+       AND s_schema <> p_desired_schema THEN
       CONTINUE;
     END IF;
 
-    dst_parts := regexp_split_to_array(lower(r.dstobj), '\.');
+    dst_parts := regexp_split_to_array(r.dstobj, '\.');
     d_col := dst_parts[array_length(dst_parts,1)];
 
     IF NOT EXISTS (
@@ -3314,7 +3364,7 @@ BEGIN
       AND m.dstobj IS NOT NULL AND btrim(m.dstobj) <> ''
   LOOP
     -- Parse srcobj => db(.schema).table.column
-    dt_parts := regexp_split_to_array(lower(rdt.srcobj), '\.');
+    dt_parts := regexp_split_to_array(rdt.srcobj, '\.');
     dt_db := NULL; dt_schema := NULL; dt_table := NULL; dt_col := NULL;
 
     IF array_length(dt_parts,1) = 4 THEN
@@ -3325,13 +3375,13 @@ BEGIN
       CONTINUE;
     END IF;
 
-    IF p_desired_db IS NOT NULL AND dt_db IS DISTINCT FROM lower(p_desired_db) THEN
+    IF p_desired_db IS NOT NULL AND dt_db IS DISTINCT FROM p_desired_db THEN
       CONTINUE;
     END IF;
 
     IF p_desired_schema IS NOT NULL
        AND dt_schema IS NOT NULL
-       AND dt_schema <> lower(p_desired_schema) THEN
+       AND dt_schema <> p_desired_schema THEN
       CONTINUE;
     END IF;
 
@@ -3432,6 +3482,7 @@ DECLARE
 
   err_state         text;
   err_msg           text;
+  err_detail        text;
 
   v_started_at      timestamptz := now();
 
@@ -3661,7 +3712,8 @@ BEGIN
                  tbl            text        NOT NULL,
                  err_state      text        NOT NULL,
                  err_msg        text        NOT NULL,
-                 err_offse      text,
+                 err_detail     text,
+                 err_offset     text,
                  ts             timestamptz NOT NULL DEFAULT now(),
                  CONSTRAINT %I UNIQUE (connector_name, tbl)
                )',
@@ -3672,19 +3724,21 @@ BEGIN
           END IF;
 
           GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE,
-                                  err_msg   = MESSAGE_TEXT;
+                                  err_msg   = MESSAGE_TEXT,
+								  err_detail = PG_EXCEPTION_DETAIL;
 
           EXECUTE format(
-            'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_offset)
-             VALUES ($1,$2,$3,$4,$5)
+            'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_detail, err_offset)
+             VALUES ($1,$2,$3,$4,$5,$6)
              ON CONFLICT (connector_name, tbl)
              DO UPDATE SET err_state = EXCLUDED.err_state,
                            err_msg   = EXCLUDED.err_msg,
+                           err_detail= EXCLUDED.err_detail,
                            err_offset= EXCLUDED.err_offset,
                            ts        = now()',
             'public', v_err_tbl_ident
           )
-          USING p_connector_name, v_tbl_display, err_state, err_msg, p_offset;
+          USING p_connector_name, v_tbl_display, err_state, err_msg, err_detail, p_offset;
 
           IF NOT p_continue_on_error THEN
             RAISE;
@@ -3765,6 +3819,7 @@ BEGIN
                      tbl            text        NOT NULL,
                      err_state      text        NOT NULL,
                      err_msg        text        NOT NULL,
+                     err_detail     text,
                      err_offset     text,
                      ts             timestamptz NOT NULL DEFAULT now(),
                      CONSTRAINT %I UNIQUE (connector_name, tbl)
@@ -3776,19 +3831,21 @@ BEGIN
               END IF;
 
               GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE,
-                                      err_msg   = MESSAGE_TEXT;
+                                      err_msg   = MESSAGE_TEXT,
+									  err_detail = PG_EXCEPTION_DETAIL;
 
               EXECUTE format(
-                'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_offset)
-                 VALUES ($1,$2,$3,$4,$5)
+                'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_detail, err_offset)
+                 VALUES ($1,$2,$3,$4,$5,$6)
                  ON CONFLICT (connector_name, tbl)
                  DO UPDATE SET err_state = EXCLUDED.err_state,
                                err_msg   = EXCLUDED.err_msg,
+                               err_detail= EXCLUDED.err_detail,
                                err_offset= EXCLUDED.err_offset,
                                ts        = now()',
                 'public', v_err_tbl_ident
               )
-              USING p_connector_name, v_tbl_display, err_state, err_msg, p_offset;
+              USING p_connector_name, v_tbl_display, err_state, err_msg, err_detail, p_offset;
 
               IF NOT p_continue_on_error THEN
                 RAISE;
@@ -3837,6 +3894,7 @@ BEGIN
                tbl            text        NOT NULL,
                err_state      text        NOT NULL,
                err_msg        text        NOT NULL,
+               err_detail     text,
                err_offset     text,
                ts             timestamptz NOT NULL DEFAULT now(),
                CONSTRAINT %I UNIQUE (connector_name, tbl)
@@ -3848,19 +3906,21 @@ BEGIN
         END IF;
 
         GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE,
-                                err_msg   = MESSAGE_TEXT;
+                                err_msg   = MESSAGE_TEXT,
+								err_detail = PG_EXCEPTION_DETAIL;
 
         EXECUTE format(
-          'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_offset)
-           VALUES ($1,$2,$3,$4,$5)
+          'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_detail, err_offset)
+           VALUES ($1,$2,$3,$4,$5,$6)
            ON CONFLICT (connector_name, tbl)
            DO UPDATE SET err_state = EXCLUDED.err_state,
                          err_msg   = EXCLUDED.err_msg,
+						 err_detail= EXCLUDED.err_detail,
                          err_offset= EXCLUDED.err_offset,
                          ts        = now()',
           'public', v_err_tbl_ident
         )
-        USING p_connector_name, v_tbl_display, err_state, err_msg, p_offset;
+        USING p_connector_name, v_tbl_display, err_state, err_msg, err_detail, p_offset;
 
         IF NOT p_continue_on_error THEN
           RAISE;
@@ -4192,7 +4252,7 @@ BEGIN
       AND  m.dstobj IS NOT NULL AND btrim(m.dstobj) <> ''
   LOOP
     -- Parse srcobj as db(.schema).table
-    parts := regexp_split_to_array(lower(r.srcobj), '\.');
+    parts := regexp_split_to_array(r.srcobj, '\.');
     s_db := NULL; s_schema := NULL; s_table := NULL;
 
     IF array_length(parts,1) = 3 THEN
@@ -4204,24 +4264,24 @@ BEGIN
     END IF;
 
     -- Require matching database
-    IF p_desired_db IS NOT NULL AND s_db IS DISTINCT FROM lower(p_desired_db) THEN
+    IF p_desired_db IS NOT NULL AND s_db IS DISTINCT FROM p_desired_db THEN
       CONTINUE;
     END IF;
 
     -- Only enforce desired schema if a schema segment exists in srcobj
     IF p_desired_schema IS NOT NULL
        AND s_schema IS NOT NULL
-       AND s_schema <> lower(p_desired_schema) THEN
+       AND s_schema <> p_desired_schema THEN
       CONTINUE;
     END IF;
 
     -- Parse destination: "schema.table" or just "table" (defaults to public)
     IF strpos(r.dstobj, '.') > 0 THEN
-      d_schema := lower(split_part(r.dstobj, '.', 1));
-      d_table  := lower(split_part(r.dstobj, '.', 2));
+      d_schema := split_part(r.dstobj, '.', 1);
+      d_table  := split_part(r.dstobj, '.', 2);
     ELSE
       d_schema := 'public';
-      d_table  := lower(r.dstobj);
+      d_table  := r.dstobj;
     END IF;
 
     -- Only act if the source table exists in p_src_schema
@@ -4231,7 +4291,7 @@ BEGIN
       JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = p_src_schema
         AND c.relkind = 'r'
-        AND lower(c.relname) = s_table
+        AND c.relname = s_table
     ) THEN
       CONTINUE;
     END IF;
@@ -4246,7 +4306,7 @@ BEGIN
       JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = d_schema
         AND c.relkind = 'r'
-        AND lower(c.relname) = d_table
+        AND c.relname = d_table
     ) THEN
       RAISE NOTICE 'Skipping % -> %.%: destination exists', s_table, d_schema, d_table;
       CONTINUE;
