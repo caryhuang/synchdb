@@ -2451,10 +2451,10 @@ BEGIN
       -- Parse CSV into tmp_snap_list allowing "db.tbl" or "db.schema.tbl"
       INSERT INTO tmp_snap_list(db, schem, tbl)
       SELECT
-        lower((parts)[1]) AS db,
-        CASE WHEN array_length(parts,1) = 3 THEN lower((parts)[2]) ELSE NULL END AS schem,
-        CASE WHEN array_length(parts,1) = 3 THEN lower((parts)[3])
-             WHEN array_length(parts,1) = 2 THEN lower((parts)[2])
+        (parts)[1] AS db,
+        CASE WHEN array_length(parts,1) = 3 THEN (parts)[2] ELSE NULL END AS schem,
+        CASE WHEN array_length(parts,1) = 3 THEN (parts)[3]
+             WHEN array_length(parts,1) = 2 THEN (parts)[2]
              ELSE NULL END AS tbl
       FROM (
         SELECT regexp_split_to_array(trim(x), '\.') AS parts
@@ -2464,7 +2464,7 @@ BEGIN
       WHERE array_length(parts,1) IN (2,3);
 
       -- Keep only rows that match desired DB (legacy behavior)
-      DELETE FROM tmp_snap_list WHERE db <> lower(p_desired_db);
+      DELETE FROM tmp_snap_list WHERE db <> p_desired_db;
 
       v_use_filter := EXISTS (SELECT 1 FROM tmp_snap_list);
     END IF;

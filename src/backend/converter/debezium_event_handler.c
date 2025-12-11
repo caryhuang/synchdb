@@ -619,6 +619,15 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	initStringInfo(&objid);
 	dbzdml = (DBZ_DML *) palloc0(sizeof(DBZ_DML));
 
+	/* special logical replication message from postgres connector - todo */
+	if (op == 'm' && type == TYPE_POSTGRES)
+	{
+		elog(WARNING, "special logical replication message for postgres connector ");
+		if (g_eventStr)
+			elog(WARNING,"%s", g_eventStr);
+		return NULL;
+	}
+
 	if (source)
 	{
 		JsonbValue * v = NULL;
@@ -842,7 +851,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 				entry->position = attnum;
 				entry->typemod = attr->atttypmod;
 				if (pkattrs && bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
-					entry->ispk =true;
+					entry->ispk = true;
+				else
+					entry->ispk = false;
 				get_type_category_preferred(entry->oid, &entry->typcategory, &entry->typispreferred);
 				strlcpy(entry->typname, format_type_be(attr->atttypid), NAMEDATALEN);
 			}
@@ -1236,6 +1247,13 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			int i = 0;
 			for (i = 0; i < 2; i++)
 			{
+				/*
+				 * always initialize key, value to NULL before doing anything in case "before" at i = 0
+				 * is given as null in the case of postgres connector with replica identity = default
+				 */
+				key = NULL;
+				value = NULL;
+
 				/* need to parse before and after */
 				if (i == 0)
 				{

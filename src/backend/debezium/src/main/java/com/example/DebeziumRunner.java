@@ -110,9 +110,10 @@ public class DebeziumRunner {
 		private int ispnMemorySize;
 		private String logminerStreamMode;
 		private int cdcDelay;
+		private String srcschema;
 
 		/* constructor requires all required parameters for a connector to work */
-		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb)
+		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb, String srcschema)
 		{
 			this.connectorName = connectorName;
 			this.connectorType = connectorType;
@@ -125,6 +126,7 @@ public class DebeziumRunner {
 			this.snapshottable = snapshottable;
 			this.snapshotMode = snapshotMode;
 			this.dstdb = dstdb;
+			this.srcschema = srcschema;
 		}
 		public MyParameters setBatchSize(int batchSize)
 		{
@@ -253,6 +255,7 @@ public class DebeziumRunner {
 			logger.warn("table = " + this.table);
 			logger.warn("snapshotMode = " + this.snapshotMode);
 			logger.warn("dstdb = " + this.dstdb);
+			logger.warn("srcschema = " + this.srcschema);
 
 			logger.warn("batchSize = " + this.batchSize);
 			logger.warn("queueSize = " + this.queueSize);
@@ -495,7 +498,7 @@ public class DebeziumRunner {
                     props.setProperty("database.dbname", myParameters.database);
                 }
 				/* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
-				props.setProperty("schema.include.list", myParameters.user);
+				props.setProperty("schema.include.list", myParameters.srcschema);
 				props.setProperty("lob.enabled", "true");
 				props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
 
@@ -639,7 +642,7 @@ public class DebeziumRunner {
                     props.setProperty("database.dbname", myParameters.database);
                 }
                 /* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
-                props.setProperty("schema.include.list", myParameters.user);
+                props.setProperty("schema.include.list", myParameters.srcschema);
                 props.setProperty("lob.enabled", "true");
                 props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
                 break;
@@ -672,6 +675,8 @@ public class DebeziumRunner {
 					props.setProperty("database.ssl.truststore", myParameters.sslTruststore);
 				if (myParameters.sslTruststorePass != null)
 					props.setProperty("database.ssl.truststore.password", myParameters.sslTruststorePass);
+                
+				props.setProperty("schema.include.list", myParameters.srcschema);
 				break;
 			}
 			case TYPE_POSTGRES:
@@ -683,10 +688,19 @@ public class DebeziumRunner {
 
 				props.setProperty("tasks.max", "1");
 				props.setProperty("plugin.name", "pgoutput");
-				props.setProperty("slot.name", "debezium_slot");
-				props.setProperty("publication.autocreate.mode", "all_tables");
+				props.setProperty("slot.name", myParameters.connectorName + "_" + myParameters.dstdb + "_" + "synchdb_slot");
+				props.setProperty("publication.name", myParameters.connectorName + "_" + myParameters.dstdb + "_" + "synchdb_pub");
+	
+				if (myParameters.table.equals("null"))
+					props.setProperty("publication.autocreate.mode", "all_tables");
+				else
+					props.setProperty("publication.autocreate.mode", "filtered");
 				props.setProperty("database.server.name", "pgserver1");
 				props.setProperty("database.dbname", myParameters.database);
+				props.setProperty("schema.include.list", myParameters.srcschema);
+				
+				/* we only work with replica identity = FULL*/
+				props.setProperty("replica.identity.autoset.values", myParameters.srcschema + ".*:DEFAULT");
 
                 if (myParameters.database.equals("null"))
                     logger.warn("database is null - skip setting database.include.list property");

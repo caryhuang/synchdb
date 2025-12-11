@@ -349,6 +349,7 @@ typedef struct _ConnectionInfo
     char user[SYNCHDB_CONNINFO_USERNAME_SIZE];
     char pwd[SYNCHDB_CONNINFO_PASSWORD_SIZE];
 	char srcdb[SYNCHDB_CONNINFO_DB_NAME_SIZE];
+	char srcschema[SYNCHDB_CONNINFO_DB_NAME_SIZE];
 	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE];
     char table[SYNCHDB_CONNINFO_TABLELIST_SIZE];
     char snapshottable[SYNCHDB_CONNINFO_TABLELIST_SIZE];

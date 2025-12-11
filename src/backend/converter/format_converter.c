@@ -2764,14 +2764,15 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 	char * in = colval->value;
 	char * transformExpression = NULL;
 
-	if (!in || strlen(in) == 0)
-		return NULL;
-
-	if (!strcasecmp(in, "NULL"))
-		return NULL;
-
 	elog(DEBUG1, "%s: col %s typoid %d timerep %d dbztype %d category %c",__FUNCTION__,
 			colval->name, colval->datatype, colval->timerep, colval->dbztype, colval->typcategory);
+
+	if (!in || strlen(in) == 0 || !strcasecmp(in, "NULL"))
+	{
+		elog(DEBUG1,"NULL input value, returning NULL");
+		return NULL;
+	}
+
 	switch(colval->datatype)
 	{
 		case BOOLOID:
@@ -3421,40 +3422,107 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 			}
 			else
 			{
-				/* --- Convert to use Heap AM to handler DML --- */
-				forboth(cell, dbzdml->columnValuesAfter, cell2, dbzdml->columnValuesBefore)
+				/*
+				 * special case: when running in postgres connector with replica identity =
+				 * DEFAULT. columnValuesBefore will be NULL, causing the forboth below to
+				 * not run at all, so we need to handle it separately by extracting all
+				 * primary key values from columnValuesAfter and put them in columnValuesBefore
+				 */
+				if (dbzdml->columnValuesAfter && !dbzdml->columnValuesBefore)
 				{
-					DBZ_DML_COLUMN_VALUE * colval_after = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
-					DBZ_DML_COLUMN_VALUE * colval_before = (DBZ_DML_COLUMN_VALUE *) lfirst(cell2);
-					PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
-					PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
-
-					char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId, type);
-
-					if (data != NULL)
+					/* build pgcolval_before from dbzdml->columnValuesAfter */
+					foreach(cell, dbzdml->columnValuesAfter)
 					{
-						pgcolval_after->value = pstrdup(data);
-						pfree(data);
+						DBZ_DML_COLUMN_VALUE * colval_after = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+						PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+
+						if (colval_after->ispk)
+						{
+							/* this is a primary key, process its value */
+							char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId, type);
+
+							if (data != NULL)
+							{
+								pgcolval_before->value = pstrdup(data);
+								pfree(data);
+							}
+							else
+								pgcolval_before->value = pstrdup("NULL");
+
+							elog(WARNING, "processed a PK");
+							pgcolval_before->datatype = colval_after->datatype;
+							pgcolval_before->position = colval_after->position;
+							pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval_before);
+						}
+						else
+						{
+							/* non-primary key, just put NULL */
+							elog(WARNING, "put a NULL");
+							pgcolval_before->value = pstrdup("NULL");
+							pgcolval_before->datatype = colval_after->datatype;
+							pgcolval_before->position = colval_after->position;
+							pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval_before);
+						}
 					}
-					else
-						pgcolval_after->value = pstrdup("NULL");
 
-					pgcolval_after->datatype = colval_after->datatype;
-					pgcolval_after->position = colval_after->position;
-					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
-
-					data = processDataByType(colval_before, false, dbzdml->remoteObjectId, type);
-					if (data != NULL)
+					/* build pgcolval_after from dbzdml->columnValuesAfter */
+					foreach(cell, dbzdml->columnValuesAfter)
 					{
-						pgcolval_before->value = pstrdup(data);
-						pfree(data);
-					}
-					else
-						pgcolval_before->value = pstrdup("NULL");
+						DBZ_DML_COLUMN_VALUE * colval_after = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+						PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					pgcolval_before->datatype = colval_before->datatype;
-					pgcolval_before->position = colval_before->position;
-					pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval_before);
+						char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId, type);
+
+						if (data != NULL)
+						{
+							pgcolval_after->value = pstrdup(data);
+							pfree(data);
+						}
+						else
+							pgcolval_after->value = pstrdup("NULL");
+
+						pgcolval_after->datatype = colval_after->datatype;
+						pgcolval_after->position = colval_after->position;
+						pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
+					}
+				}
+				else
+				{
+					/* --- Convert to use Heap AM to handler DML --- */
+					forboth(cell, dbzdml->columnValuesAfter, cell2, dbzdml->columnValuesBefore)
+					{
+						DBZ_DML_COLUMN_VALUE * colval_after = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+						DBZ_DML_COLUMN_VALUE * colval_before = (DBZ_DML_COLUMN_VALUE *) lfirst(cell2);
+						PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+						PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+
+						char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId, type);
+
+						if (data != NULL)
+						{
+							pgcolval_after->value = pstrdup(data);
+							pfree(data);
+						}
+						else
+							pgcolval_after->value = pstrdup("NULL");
+
+						pgcolval_after->datatype = colval_after->datatype;
+						pgcolval_after->position = colval_after->position;
+						pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
+
+						data = processDataByType(colval_before, false, dbzdml->remoteObjectId, type);
+						if (data != NULL)
+						{
+							pgcolval_before->value = pstrdup(data);
+							pfree(data);
+						}
+						else
+							pgcolval_before->value = pstrdup("NULL");
+
+						pgcolval_before->datatype = colval_before->datatype;
+						pgcolval_before->position = colval_before->position;
+						pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval_before);
+					}
 				}
 			}
 			break;

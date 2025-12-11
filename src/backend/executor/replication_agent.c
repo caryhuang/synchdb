@@ -951,7 +951,8 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"coalesce(data->>'olr_source', 'null'), "
 			"coalesce(data->>'ispn_cache_type', 'null'), "
 			"coalesce(data->>'ispn_memory_type', 'null'), "
-			"coalesce(data->>'ispn_memory_size', 'null') "
+			"coalesce(data->>'ispn_memory_size', 'null'), "
+			"coalesce(data->>'srcschema', 'null') "
 			"FROM "
 			"synchdb_conninfo WHERE name = '%s'",
 			SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, name);
@@ -1000,8 +1001,9 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	strlcpy(conninfo->ispn.ispn_cache_type, TextDatumGetCString(res[33]), INFINISPAN_TYPE_SIZE);
 	strlcpy(conninfo->ispn.ispn_memory_type, TextDatumGetCString(res[34]), INFINISPAN_TYPE_SIZE);
 	conninfo->ispn.ispn_memory_size = atoi(TextDatumGetCString(res[35]));
+	strlcpy(conninfo->srcschema, TextDatumGetCString(res[36]), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 
-	elog(LOG, "name=%s hostname=%s, port=%d, user=%s pwd=%s srcdb=%s "
+	elog(LOG, "name=%s hostname=%s, port=%d, user=%s pwd=%s srcdb=%s srcschema=%s"
 			"dstdb=%s table=%s snapshottable=%s connector=%s extras(ssl_mode=%s ssl_keystore=%s "
 			"ssl_keystore_pass=%s ssl_truststore=%s ssl_truststore_pass=%s) "
 			"jmx(jmx_listenaddr=%s jmx_port=%d jmx_rmiserveraddr=%s jmx_rmiport=%d "
@@ -1012,7 +1014,7 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"olr(olr_host=%s olr_port=%d olr_source=%s) "
 			"ispn(ispn_cache_type='%s' ispn_memory_type='%s' ispn_memory_size=%u)",
 			conninfo->name, conninfo->hostname, conninfo->port,
-			conninfo->user, conninfo->pwd, conninfo->srcdb,
+			conninfo->user, conninfo->pwd, conninfo->srcdb, conninfo->srcschema,
 			conninfo->dstdb, conninfo->table, conninfo->snapshottable, *connector,
 			conninfo->extra.ssl_mode, conninfo->extra.ssl_keystore, conninfo->extra.ssl_keystore_pass,
 			conninfo->extra.ssl_truststore, conninfo->extra.ssl_truststore_pass,
@@ -1440,36 +1442,8 @@ ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conn
 		values[2]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_obj"));
 		values[3]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_stage"));
 		values[4]  = DirectFunctionCall1(namein,   CStringGetDatum(dstdb));
-
-		/* fill lookup db and schema based on connector type for transformations */
-		switch(connType)
-		{
-			case TYPE_ORACLE:
-			case TYPE_OLR:
-			{
-				/* for oracle, schema = username */
-				values[5]  = CStringGetTextDatum(conninfo->srcdb);
-				values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->user));
-				break;
-			}
-			case TYPE_MYSQL:
-			{
-				/* for mysql, schema = db */
-				values[5]  = CStringGetTextDatum(conninfo->srcdb);
-				values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcdb));
-				break;
-			}
-			case TYPE_POSTGRES:
-			case TYPE_SQLSERVER:
-			default:
-			{
-				/* for others, make schema public for now todo */
-				values[5]  = CStringGetTextDatum(conninfo->srcdb);
-				values[6]  =  DirectFunctionCall1(namein, CStringGetDatum("public"));
-				break;
-			}
-		}
-
+		values[5]  = CStringGetTextDatum(conninfo->srcdb);
+		values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcschema));
 		values[7]  = BoolGetDatum(true);
 		values[8]  = CStringGetTextDatum("replace");
 
