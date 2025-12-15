@@ -21,6 +21,8 @@
 #include "synchdb/synchdb.h"
 #include "converter/debezium_event_handler.h"
 #include "converter/format_converter.h"
+#include "common/base64.h"
+#include "port/pg_bswap.h"
 #ifdef WITH_OLR
 #include "olr/olr_client.h"
 #endif
@@ -38,20 +40,21 @@ static TimeRep getTimerepFromString(const char * typestring);
 static HTAB * build_schema_jsonpos_hash(Jsonb * jb);
 static void destroyDBZDDL(DBZ_DDL * ddlinfo);
 static void destroyDBZDML(DBZ_DML * dmlinfo);
-static DBZ_DDL * parseDBZDDL(Jsonb * jb, bool isfirst, bool islast);
+static DBZ_DDL * parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg);
 static DBZ_DML * parseDBZDML(Jsonb * jb, char op, ConnectorType type,
 		Jsonb * source, bool isfirst, bool islast);
+static int deriveLogicalMessage(Jsonb ** jb);
 
 static bool isInSnapshot = false;
 
 static DdlType
 name_to_ddltype(const char * name)
 {
-	if (!strcasecmp(name, "CREATE"))
+	if (!strcasecmp(name, "CREATE") || !strcasecmp(name, "CREATE TABLE"))
 		return DDL_CREATE_TABLE;
-	else if (!strcasecmp(name, "ALTER"))
+	else if (!strcasecmp(name, "ALTER") || !strcasecmp(name, "ALTER TABLE"))
 		return DDL_ALTER_TABLE;
-	else if (!strcasecmp(name, "DROP"))
+	else if (!strcasecmp(name, "DROP") || !strcasecmp(name, "DROP TABLE"))
 		return DDL_DROP_TABLE;
 	else
 		return DDL_UNDEF;
@@ -294,6 +297,81 @@ destroyDBZDML(DBZ_DML * dmlinfo)
 	}
 }
 
+static int
+deriveLogicalMessage(Jsonb ** jb)
+{
+	int tmpoutlen = 0;
+	unsigned char * tmpout = NULL;
+	StringInfoData strinfo;
+	Jsonb * tableChanges = NULL;
+	Jsonb * ddl_jb = NULL;
+    JsonbParseState *state = NULL;
+    JsonbValue * out;
+    JsonbValue v;
+    ArrayType * path = NULL;
+    Datum elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges") };
+    Datum newjb_d;
+
+	initStringInfo(&strinfo);
+
+	elog(WARNING, "deriving ddl message");
+    if (!getPathElementString(*jb, "payload.message.prefix", &strinfo, true))
+    {
+    	elog(WARNING, "message prefix %s", strinfo.data);
+    }
+    if (!getPathElementString(*jb, "payload.message.content", &strinfo, true))
+    {
+    	elog(WARNING, "message content %s", strinfo.data);
+    }
+    tmpoutlen = pg_b64_dec_len(strlen(strinfo.data));
+	tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
+
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(strinfo.data, strinfo.len, tmpout, tmpoutlen);
+#else
+	tmpoutlen = pg_b64_decode(strinfo.data, strinfo.len, (char *)tmpout, tmpoutlen);
+#endif
+	elog(WARNING, "decoded message %s", tmpout);
+	PG_TRY();
+	{
+		ddl_jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum((char *) tmpout)));
+	}
+	PG_CATCH();
+	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		ErrorData *edata;
+		edata = CopyErrorData();
+		FlushErrorState();
+		elog(WARNING, "decoded DDL message is not valid JSON: %s", edata->message);
+		FreeErrorData(edata);
+		MemoryContextSwitchTo(oldctx);
+		return -1;
+	}
+	PG_END_TRY();
+
+	/* turn this ddl_jb to tableChanges array with just one value */
+	out = pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+	v.type = jbvBinary;
+	v.val.binary.data = &ddl_jb->root;
+	v.val.binary.len  = VARSIZE_ANY_EXHDR(ddl_jb);  /* payload size, excluding varlena header */
+	out = pushJsonbValue(&state, WJB_ELEM, &v);
+	out = pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+	tableChanges = JsonbValueToJsonb(out);
+
+	/* put tableChange array to original jb */
+	path = construct_array(elems, 2, TEXTOID, -1, false, TYPALIGN_INT);
+	newjb_d = DirectFunctionCall4
+	(
+		jsonb_set,
+		JsonbPGetDatum(*jb),            /* original Jsonb */
+		PointerGetDatum(path),         /* text[] path */
+		JsonbPGetDatum(tableChanges),  /* new value */
+		BoolGetDatum(true)             /* create_missing */
+	);
+	*jb = DatumGetJsonbP(newjb_d);
+	return 0;
+}
+
 /*
  * parseDBZDDL
  *
@@ -302,7 +380,7 @@ destroyDBZDML(DBZ_DML * dmlinfo)
  * @return DBZ_DDL structure
  */
 static DBZ_DDL *
-parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
+parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg)
 {
 	Jsonb * ddlpayload = NULL;
 	JsonbIterator *it;
@@ -335,7 +413,17 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 			ddlinfo->src_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
 
-	/*** xxx fixme crash due to ddlinfo->id = NULL fixme xxx ***/
+	if (deriveMsg)
+	{
+		if (deriveLogicalMessage(&jb))
+		{
+			elog(WARNING, "failed to derive logical message. Skipping this event...");
+			destroyDBZDDL(ddlinfo);
+			return NULL;
+		}
+		elog(WARNING, "logical message derived");
+	}
+
     if (getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true))
     {
     	elog(DEBUG1, "no id parameter in table change data. Stop parsing...");
@@ -544,7 +632,7 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 					if (!strcmp(key, "defaultValueExpression"))
 					{
 						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->defaultValueExpression = pstrdup(value);
+						ddlcol->defaultValueExpression = strcmp(value, "NULL") == 0 ? NULL : pstrdup(value);
 					}
 					if (!strcmp(key, "scale"))
 					{
@@ -618,15 +706,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	initStringInfo(&strinfo);
 	initStringInfo(&objid);
 	dbzdml = (DBZ_DML *) palloc0(sizeof(DBZ_DML));
-
-	/* special logical replication message from postgres connector - todo */
-	if (op == 'm' && type == TYPE_POSTGRES)
-	{
-		elog(WARNING, "special logical replication message for postgres connector ");
-		if (g_eventStr)
-			elog(WARNING,"%s", g_eventStr);
-		return NULL;
-	}
 
 	if (source)
 	{
@@ -1684,15 +1763,26 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
     /* Check if it's a DDL or DML event */
     ret = getPathElementString(jb, "payload.op", &strinfo, true);
-    if (ret)	/* no op, it is DDL */
+    /*
+     * if payload.op exists and value equals 'm' or the entire payload.op missing,
+     * then it is about DDL.
+     */
+    if ((!ret && strinfo.data && strinfo.data[0] == 'm') || ret)
     {
         /* Process DDL event */
     	DBZ_DDL * dbzddl = NULL;
     	PG_DDL * pgddl = NULL;
+    	bool deriveMsg = false;
+
+    	if (strinfo.data && strinfo.data[0] == 'm')
+    	{
+        	elog(WARNING, "postgres connector's op = m");
+        	deriveMsg = true;
+    	}
 
     	/* (1) parse */
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
-    	dbzddl = parseDBZDDL(jb, isfirst, islast);
+    	dbzddl = parseDBZDDL(jb, isfirst, islast, deriveMsg);
     	if (!dbzddl)
     	{
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);

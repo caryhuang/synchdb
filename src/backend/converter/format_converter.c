@@ -1527,6 +1527,78 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 			}
 			break;
 		}
+		case TYPE_POSTGRES:
+		{
+			DatatypeHashEntry * entry;
+			DatatypeHashKey key = {0};
+			bool found = 0;
+
+			/*
+			 * check if there is a translation rule applied specifically for this column using
+			 * key format: [column object id]
+			 */
+			key.autoIncremented = col->autoIncremented;
+			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s", colNameObjId.data);
+
+			entry = (DatatypeHashEntry *) hash_search(postgresDatatypeHash, &key, HASH_FIND, &found);
+			if (!found)
+			{
+				/*
+				 * no mapping found, so no data type translation for this particular column.
+				 * Now, check if there is a global data type translation rule
+				 */
+				memset(&key, 0, sizeof(DatatypeHashKey));
+				key.autoIncremented = col->autoIncremented;
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s",
+						col->typeName);
+
+				entry = (DatatypeHashEntry *) hash_search(postgresDatatypeHash, &key, HASH_FIND, &found);
+				if (!found)
+				{
+					/* no mapping found, so no transformation done */
+					elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
+							key.extTypeName, key.autoIncremented);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", col->typeName);
+					else
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, col->typeName);
+
+					pgcol->atttype = pstrdup(col->typeName);
+				}
+				else
+				{
+					/* use the mapped values and sizes */
+					elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
+							key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+							entry->pgsqlTypeLength);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+					else
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
+
+					pgcol->atttype = pstrdup(entry->pgsqlTypeName);
+					if (entry->pgsqlTypeLength != -1)
+						col->length = entry->pgsqlTypeLength;
+				}
+			}
+			else
+			{
+				/* use the mapped values and sizes */
+				elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
+						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+						entry->pgsqlTypeLength);
+
+				if (datatypeonly)
+					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+				else
+					appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
+
+				pgcol->atttype = pstrdup(entry->pgsqlTypeName);
+				if (entry->pgsqlTypeLength != -1)
+					col->length = entry->pgsqlTypeLength;
+			}
+			break;
+		}
 		default:
 		{
 			/* unknown type, no special handling - may error out later when applying to PostgreSQL */
@@ -3862,7 +3934,7 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 			rulehash = sqlserverDatatypeHash;
 			break;
 		case TYPE_POSTGRES:
-			return true;	/* xxx todo */
+			rulehash = postgresDatatypeHash;
 			break;
 		default:
 		{
@@ -4316,7 +4388,6 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
     	if (pathcopy != path)
     		pfree(pathcopy);
     	return -1;
-//    	appendStringInfoString(strinfoout, "NULL");
     }
     else
     {
