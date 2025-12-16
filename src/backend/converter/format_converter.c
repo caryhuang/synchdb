@@ -4961,9 +4961,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 					if(mappedColumnName)
 						pfree(mappedColumnName);
-
-					if (colNameObjId.data)
-						pfree(colNameObjId.data);
 				}
 
 				if (altered)
@@ -5043,9 +5040,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 						}
 						if (mappedColumnName)
 							pfree(mappedColumnName);
-
-						if (colNameObjId.data)
-							pfree(colNameObjId.data);
 					}
 					if (!found)
 					{
@@ -5199,9 +5193,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 					if(mappedColumnName)
 						pfree(mappedColumnName);
-
-					if (colNameObjId.data)
-						pfree(colNameObjId.data);
 				}
 
 				if (altered)
@@ -5288,9 +5279,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 					if (mappedColumnName)
 						pfree(mappedColumnName);
-
-					if (colNameObjId.data)
-						pfree(colNameObjId.data);
 				}
 				if(altered)
 				{
