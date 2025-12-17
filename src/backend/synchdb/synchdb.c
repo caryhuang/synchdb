@@ -2326,6 +2326,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 	SynchdbStatistics myBatchStats = {0};
 
 	elog(LOG, "Main LOOP ENTER ");
+
 	while (!ShutdownRequestPending)
 	{
 		if (ConfigReloadPending)

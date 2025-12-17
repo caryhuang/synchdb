@@ -104,6 +104,8 @@ getTimerepFromString(const char * typestring)
 		return TIME_DATE;
 	else if (find_exact_string_match(typestring, "io.debezium.time.Time"))
 		return TIME_TIME;
+	else if (find_exact_string_match(typestring, "io.debezium.time.ZonedTime"))
+		return TIME_ZONEDTIME;
 	else if (find_exact_string_match(typestring, "io.debezium.time.MicroTime"))
 		return TIME_MICROTIME;
 	else if (find_exact_string_match(typestring, "io.debezium.time.NanoTime"))
@@ -126,6 +128,16 @@ getTimerepFromString(const char * typestring)
 		return DATA_VARIABLE_SCALE;
 	else if (find_exact_string_match(typestring, "io.debezium.data.Enum"))
 		return DATA_ENUM;
+	else if (find_exact_string_match(typestring, "io.debezium.data.Uuid"))
+		return DATA_UUID;
+	else if (find_exact_string_match(typestring, "io.debezium.data.Json"))
+		return DATA_JSON;
+	else if (find_exact_string_match(typestring, "io.debezium.data.Xml"))
+		return DATA_XML;
+	else if (find_exact_string_match(typestring, "io.debezium.data.Bits"))
+		return DATA_BITS;
+	else if (find_exact_string_match(typestring, "io.debezium.data.geometry.Point"))
+		return DATA_POINT;
 
 	elog(DEBUG1, "unhandled dbz type %s", typestring);
 	return TIME_UNDEF;
@@ -1029,13 +1041,27 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 								pfree(key);
 								key = NULL;
 							}
+							if (value)
+							{
+								pfree(value);
+								value = NULL;
+							}
 							break;
 						case WJB_END_ARRAY:
 							break;
 						case WJB_KEY:
 							if (pause)
 								break;
-
+							if (key)
+							{
+								pfree(key);
+								key = NULL;
+							}
+							if (value)
+							{
+								pfree(value);
+								value = NULL;
+							}
 							key = pnstrdup(v.val.string.val, v.val.string.len);
 							break;
 						case WJB_VALUE:
@@ -1077,6 +1103,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						char * mappedColumnName = NULL;
 						char * colname_lower = NULL;
 						StringInfoData colNameObjId;
+
+						elog(WARNING, "raw parsed value: %s: %s", key, value);
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
@@ -1191,13 +1219,27 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 								pfree(key);
 								key = NULL;
 							}
+							if (value)
+							{
+								pfree(value);
+								value = NULL;
+							}
 							break;
 						case WJB_END_ARRAY:
 							break;
 						case WJB_KEY:
 							if (pause)
 								break;
-
+							if (key)
+							{
+								pfree(key);
+								key = NULL;
+							}
+							if (value)
+							{
+								pfree(value);
+								value = NULL;
+							}
 							key = pnstrdup(v.val.string.val, v.val.string.len);
 							break;
 						case WJB_VALUE:
@@ -1384,13 +1426,27 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 									pfree(key);
 									key = NULL;
 								}
+								if (value)
+								{
+									pfree(value);
+									value = NULL;
+								}
 								break;
 							case WJB_END_ARRAY:
 								break;
 							case WJB_KEY:
 								if (pause)
 									break;
-
+								if (key)
+								{
+									pfree(key);
+									key = NULL;
+								}
+								if (value)
+								{
+									pfree(value);
+									value = NULL;
+								}
 								key = pnstrdup(v.val.string.val, v.val.string.len);
 								break;
 							case WJB_VALUE:

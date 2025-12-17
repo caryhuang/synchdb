@@ -1841,6 +1841,80 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 				if(strinfo.data)
 					pfree(strinfo.data);
 			}
+			else if (colval->timerep == DATA_POINT)
+			{
+				/*
+				 * POINT struct in postgresql looks like:
+				 *	{
+				 *		"x": 1.0,
+				 *		"y": 2.0,
+				 *		"wkb": "AQEAAAAAAAAAAADwPwAAAAAAAABA",
+				 *		"srid": null
+				 *	}
+				 */
+				StringInfoData xinfo;
+				StringInfoData yinfo;
+
+				initStringInfo(&strinfo);
+				initStringInfo(&xinfo);
+				initStringInfo(&yinfo);
+
+				PG_TRY();
+				{
+					jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
+					jb = DatumGetJsonbP(jsonb_datum);
+				}
+				PG_CATCH();
+				{
+					FlushErrorState();
+					elog(WARNING, "bad json struct to expand: %s", in);
+					return;
+				}
+				PG_END_TRY();
+
+				/*
+				 * todo: should have a default transform for complex data types
+				 * like point, line, geometry...etc. It makes more sense to just
+				 * call function point(x,y) to produce a proper point representation.
+				 * But for now, we will just manually build x and y into (x,y).
+				 */
+				if (getPathElementString(jb, "x", &xinfo, true))
+				{
+					elog(WARNING, "missing x value in point data: %s. Defaulting to 0", in);
+					appendStringInfo(&strinfo, "(0,");
+				}
+				else
+				{
+					elog(DEBUG1, "x value = %s", xinfo.data);
+					appendStringInfo(&strinfo, "(%s,", xinfo.data);
+				}
+
+				if (getPathElementString(jb, "y", &yinfo, true))
+				{
+					elog(WARNING, "missing y value in point data: %s. Defaulting to 0", in);
+					appendStringInfo(&strinfo, "0)");
+				}
+				else
+				{
+					elog(DEBUG1, "y value = %s", yinfo.data);
+					appendStringInfo(&strinfo, "%s)", yinfo.data);
+				}
+
+				/* replace colval->value */
+				pfree(colval->value);
+				colval->value = pstrdup(strinfo.data);
+
+				/* make "in" points to colval->value for subsequent processing */
+				in = colval->value;
+				elog(DEBUG1, "colval->value is set to %s", colval->value);
+
+				if (xinfo.data)
+					pfree(xinfo.data);
+				if (yinfo.data)
+					pfree(yinfo.data);
+				if(strinfo.data)
+					pfree(strinfo.data);
+			}
 			break;
 		}
 		case TYPE_MYSQL:
@@ -2496,11 +2570,11 @@ construct_intervalstr(long long input, bool addquote, int timerep, int typemod)
 					(int) seconds / SECS_PER_DAY);
 			break;
 		case INTERVAL_MASK(HOUR):	/* hour */
-			snprintf(inter, sizeof(inter), "%d days",
+			snprintf(inter, sizeof(inter), "%d hours",
 					(int) seconds / SECS_PER_HOUR);
 			break;
 		case INTERVAL_MASK(MINUTE):	/* minute */
-			snprintf(inter, sizeof(inter), "%d days",
+			snprintf(inter, sizeof(inter), "%d minutes",
 					(int) seconds / SECS_PER_MINUTE);
 			break;
 		case INTERVAL_MASK(SECOND):	/* second */
@@ -2550,7 +2624,7 @@ construct_intervalstr(long long input, bool addquote, int timerep, int typemod)
 					(int) remains);
 			break;
 		case INTERVAL_FULL_RANGE:	/* full range */
-			snprintf(inter, sizeof(inter), "%d years %d months % days %02d:%02d:%02d.%06d",
+			snprintf(inter, sizeof(inter), "%d years %d months %d days %02d:%02d:%02d.%06d",
 					(int) seconds / SECS_PER_YEAR,
 					(int) (seconds / (SECS_PER_DAY * DAYS_PER_MONTH)) % MONTHS_PER_YEAR,
 					(int) (seconds / SECS_PER_DAY) % (SECS_PER_DAY * DAYS_PER_MONTH),
@@ -2857,7 +2931,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		case MONEYOID:
 		{
 			/* special handling for MONEYOID to use scale 4 to account for cents */
-			if (colval->datatype == MONEYOID)
+			if (colval->datatype == MONEYOID && type != TYPE_POSTGRES)
 				colval->scale = 4;
 
 			switch (colval->dbztype)
@@ -2896,6 +2970,16 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		case CSTRINGOID:
 		case JSONBOID:
 		case UUIDOID:
+		case INETOID:
+		case CIDROID:
+		case MACADDROID:
+		case MACADDR8OID:
+		case INT4RANGEOID:
+		case INT8RANGEOID:
+		case NUMRANGEOID:
+		case DATERANGEOID:
+		case TSRANGEOID:
+		case TSTZRANGEOID:
 		{
 			if (addquote)
 				out = escapeSingleQuote(in, addquote);
@@ -3118,6 +3202,39 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 				default:
 				{
 					out = handle_numeric_to_interval(in, addquote, colval->timerep, colval->typemod);
+					break;
+				}
+			}
+			break;
+		}
+		case POINTOID:
+		{
+			switch (colval->dbztype)
+			{
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, type);
+					out = pstrdup(colval->value);
+					break;
+				}
+				case DBZTYPE_BYTES:
+				{
+					/* xxx: binary to point */
+					elog(ERROR," binary to point not supported");
+					break;
+				}
+				case DBZTYPE_STRING:
+				{
+					out = pstrdup(colval->value);
+					break;
+				}
+#ifdef WITH_OLR
+				case OLRTYPE_STRING:
+				case OLRTYPE_NUMBER:
+#endif
+				default:
+				{
+					elog(ERROR, "cannot convert source type %d to POINT type", colval->dbztype);
 					break;
 				}
 			}

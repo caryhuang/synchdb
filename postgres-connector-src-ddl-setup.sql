@@ -193,9 +193,6 @@ BEGIN
 END;
 $$;
 
-DROP EVENT TRIGGER IF EXISTS synchdb_ddl_log_ddl;
-DROP EVENT TRIGGER IF EXISTS synchdb_ddl_log_drop;
-
 CREATE EVENT TRIGGER synchdb_ddl_log_ddl
 ON ddl_command_end
 EXECUTE FUNCTION synchdb_ddl_log();
