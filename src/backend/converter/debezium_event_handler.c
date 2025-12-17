@@ -1104,8 +1104,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						char * colname_lower = NULL;
 						StringInfoData colNameObjId;
 
-						elog(WARNING, "raw parsed value: %s: %s", key, value);
-
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 

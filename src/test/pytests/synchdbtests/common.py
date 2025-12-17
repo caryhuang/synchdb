@@ -38,12 +38,14 @@ SQLSERVER_PORT=1433
 SQLSERVER_USER="sa"
 SQLSERVER_PASS="Password!"
 SQLSERVER_DB="testDB"
+SQLSERVER_SCHEMA="dbo"
 
 ORACLE_HOST=get_container_ip(name="ora19c")
 ORACLE_PORT=1521
 ORACLE_USER="DBZUSER"
 ORACLE_PASS="dbz"
 ORACLE_DB="FREE"
+ORACLE_SCHEMA="DBZUSER"
 
 # ora19c and olr are put to a dedicated docker network called synchdb to test
 # so we need to resolve their container UPs
@@ -52,6 +54,7 @@ ORA19C_PORT=1521
 ORA19C_USER="DBZUSER"
 ORA19C_PASS="dbz"
 ORA19C_DB="FREE"
+ORA19C_SCHEMA="DBZUSER"
 
 OLR_HOST=get_container_ip(name="OpenLogReplicator")
 OLR_PORT="7070"
@@ -251,19 +254,26 @@ def run_remote_query(where, query, srcdb=None):
     
     return rows
 
-def create_synchdb_connector(cursor, vendor, name, srcdb=None):
+def create_synchdb_connector(cursor, vendor, name, srcdb=None, srcschema=None):
     db = srcdb or {
         "mysql": MYSQL_DB,
         "sqlserver": SQLSERVER_DB,
         "oracle": ORACLE_DB,
         "olr": ORA19C_DB
     }[vendor]
+    
+    schema = srcschema or {
+        "mysql": "null",
+        "sqlserver": SQLSERVER_SCHEMA,
+        "oracle": ORACLE_SCHEMA,
+        "olr": ORA19C_SCHEMA
+    }[vendor]
 
     if vendor == "mysql":
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{MYSQL_HOST}', {MYSQL_PORT}, '{MYSQL_USER}', '{MYSQL_PASS}', '{db}', 'postgres', 'null', 'null', 'mysql');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{MYSQL_HOST}', {MYSQL_PORT}, '{MYSQL_USER}', '{MYSQL_PASS}', '{db}', '{schema}', 'null', 'null', 'mysql');")
 
     elif vendor == "sqlserver":
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{SQLSERVER_HOST}', {SQLSERVER_PORT}, '{SQLSERVER_USER}', '{SQLSERVER_PASS}', '{db}', 'postgres', 'null', 'null', 'sqlserver');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{SQLSERVER_HOST}', {SQLSERVER_PORT}, '{SQLSERVER_USER}', '{SQLSERVER_PASS}', '{db}', '{schema}', 'null', 'null', 'sqlserver');")
 
     elif vendor == "oracle":
         global ORACLE_HOST
@@ -276,7 +286,7 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None):
             time.sleep(1)
 
         assert ORACLE_HOST != None
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', 'postgres', 'null', 'null', 'oracle');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', 'schema', 'null', 'null', 'oracle');")
     else:
         global ORA19C_HOST
         global OLR_HOST
@@ -295,7 +305,7 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None):
             time.sleep(1)
         
         assert ORA19C_HOST != None and OLR_HOST != None
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORA19C_HOST}', {ORA19C_PORT}, '{ORA19C_USER}', '{ORA19C_PASS}', '{db}', 'postgres', 'null', 'null', 'olr');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORA19C_HOST}', {ORA19C_PORT}, '{ORA19C_USER}', '{ORA19C_PASS}', '{db}', '{schema}', 'null', 'null', 'olr');")
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_olr_conninfo('{name}','{OLR_HOST}', {OLR_PORT}, '{OLR_SERVICE}');")
 
     return result

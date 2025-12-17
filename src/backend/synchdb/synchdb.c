@@ -2585,11 +2585,14 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 								elog(WARNING, "failed to stop dbz engine...");
 							}
 
-							/*
-							 * if this round of schema sync is done via the FDW, we need to populate
-							 * the metadata for debezium to resume CDC todo:
-							 */
-							populate_debezium_metadata(connInfo, connectorType, connInfo->dstdb, connInfo->srcdb);
+							if (connInfo->snapengine == ENGINE_FDW)
+							{
+								/*
+								 * if this round of schema sync is done via the FDW, we need to populate
+								 * the metadata for debezium to resume CDC todo:
+								 */
+								populate_debezium_metadata(connInfo, connectorType, connInfo->dstdb, connInfo->srcdb);
+							}
 						}
 						else
 						{
@@ -2599,8 +2602,11 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 								connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
 								set_shm_connector_state(myConnectorId, STATE_SYNCING);
 
-								/* post fdw-snapshot: populate metadata for debezium to resume CDC todo */
-								populate_debezium_metadata(connInfo, connectorType, connInfo->dstdb, connInfo->srcdb);
+								if (connInfo->snapengine == ENGINE_FDW)
+								{
+									/* post fdw-snapshot: populate metadata for debezium to resume CDC todo */
+									populate_debezium_metadata(connInfo, connectorType, connInfo->dstdb, connInfo->srcdb);
+								}
 
 								/* change snapshot mode back to normal */
 								if (snapshotMode)
