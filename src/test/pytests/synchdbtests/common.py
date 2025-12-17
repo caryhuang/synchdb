@@ -286,7 +286,7 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None, srcschema=None):
             time.sleep(1)
 
         assert ORACLE_HOST != None
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', 'schema', 'null', 'null', 'oracle');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', '{schema}', 'null', 'null', 'oracle');")
     else:
         global ORA19C_HOST
         global OLR_HOST
