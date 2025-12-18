@@ -124,6 +124,7 @@ jobs:
         JDK_LIB_PATH=${JDK_HOME_PATH}/lib
         echo $JDK_LIB_PATH | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
         echo $JDK_LIB_PATH/server | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        echo "/mnt/usr/local/lib" | sudo tee /etc/ld.so.conf.d/synchdb-mnt.conf
         sudo ldconfig
     - name: Install Base PG and SynchDB
       run: |
