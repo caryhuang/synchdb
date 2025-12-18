@@ -591,7 +591,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		}
 		else
 		{
-			elog(ERROR, "tuple to update not found");
+			elog(WARNING, "tuple to update not found");
 		}
 
 		/* increment command ID */
@@ -756,7 +756,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 		}
 		else
 		{
-			elog(ERROR, "tuple to delete not found");
+			elog(WARNING, "tuple to delete not found");
 		}
 
 		/* increment command ID */

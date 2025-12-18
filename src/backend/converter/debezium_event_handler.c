@@ -1469,9 +1469,13 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 									if (key)
 									{
 										int j = 0;
-										int pathsize = strlen("payload.after.") + strlen(key) + 1;
+										int pathsize = (i == 0 ? strlen("payload.before.") + strlen(key) + 1 :
+												strlen("payload.after.") + strlen(key) + 1);
 										char * tmpPath = (char *) palloc0 (pathsize);
-										snprintf(tmpPath, pathsize, "payload.after.%s", key);
+										if (i == 0)
+											snprintf(tmpPath, pathsize, "payload.before.%s", key);
+										else
+											snprintf(tmpPath, pathsize, "payload.after.%s", key);
 										if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
 										{
 											for (j = 0; j < strinfo.len; j++)
