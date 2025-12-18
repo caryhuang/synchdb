@@ -96,6 +96,14 @@ jobs:
         docker builder prune -af || true
         docker volume prune -af || true
         echo "After cleanup:" && df -h
+    - name: Move docker root to save space
+      run: |
+        sudo systemctl stop docker
+        sudo mkdir -p /mnt/docker
+        sudo mv /var/lib/docker/* /mnt/docker/ || true
+        sudo rm -rf /var/lib/docker
+        sudo ln -s /mnt/docker /var/lib/docker
+        sudo systemctl start docker
     - uses: actions/checkout@v2
     - uses: actions/download-artifact@v4
       with:
