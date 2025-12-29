@@ -1694,15 +1694,15 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-
-						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
 						colval->remoteColumnName = pstrdup(colval->name);
 
+						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+						colval->value = pstrdup(value);
+
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 						mappedColumnName = transform_object_name(colNameObjId.data, "column");
 						if (mappedColumnName)
 						{
@@ -1860,15 +1860,15 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 							colval->name = pstrdup(key);
 
-							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-
-							colval->value = pstrdup(value);
 							/* a copy of original column name for expression rule lookup at later stage */
 							colval->remoteColumnName = pstrdup(colval->name);
 
+							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+							colval->value = pstrdup(value);
+
 							/* transform the column name if needed */
 							initStringInfo(&colNameObjId);
-							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 							mappedColumnName = transform_object_name(colNameObjId.data, "column");
 							if (mappedColumnName)
 							{
@@ -2020,15 +2020,15 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-
-						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
 						colval->remoteColumnName = pstrdup(colval->name);
 
+						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+						colval->value = pstrdup(value);
+
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 						mappedColumnName = transform_object_name(colNameObjId.data, "column");
 						if (mappedColumnName)
 						{

@@ -1238,7 +1238,12 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 		pgcol->attname = pstrdup(mappedColumnName);
 	}
 	else
+	{
 		pgcol->attname = pstrdup(col->name);
+
+		/* we want to normalize according to letter casing strategy here */
+		fc_normalize_name(synchdb_letter_casing_strategy, pgcol->attname, strlen(pgcol->attname));
+	}
 
 	switch (conntype)
 	{
@@ -1645,7 +1650,12 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 
 		/* use the name as it came if no column name mapping found */
 		if (!mappedColumnName)
+		{
 			mappedColumnName = pstrdup(col->name);
+
+			/* we want to normalize according to letter casing strategy here */
+			fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+		}
 
 		found = false;
 		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
@@ -1657,7 +1667,7 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 				continue;
 
 			/* found a matching column, build the alter column clauses */
-			if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+			if (!strcmp(mappedColumnName, NameStr(attr->attname)))
 			{
 				found = true;
 
@@ -3870,7 +3880,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 			appendStringInfo(&strinfo, "UPDATE %s SET "
 					"ext_attname = '........synchdb.dropped.%d........',"
 					"ext_atttypename = null WHERE "
-					"ext_attname = '%s' AND "
+					"lower(ext_attname) = lower('%s') AND "
 					"name = '%s' AND "
 					"lower(type) = lower('%s') AND "
 					"ext_tbname = '%s';",
@@ -4431,6 +4441,11 @@ transform_object_name(const char * objid, const char * objtype)
 	if (found)
 	{
 		res = pstrdup(entry->pgsqlObjName);
+		elog(DEBUG1, "transform object %s to %s", objid, res);
+	}
+	else
+	{
+		elog(DEBUG1, "no object transformation done for %s", objid);
 	}
 	return res;
 }
@@ -4670,6 +4685,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			 * 	- table name stays
 			 */
 			char * idcopy = pstrdup(dbzddl->id);
+
+			/* we want to normalize according to letter casing strategy here */
+			fc_normalize_name(synchdb_letter_casing_strategy, idcopy, strlen(idcopy));
+
 			splitIdString(idcopy, &db, &schema, &table, true);
 
 			/* database and table must be present. schema is optional */
@@ -4808,6 +4827,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		else
 		{
 			char * idcopy = pstrdup(dbzddl->id);
+
+			/* we want to normalize according to letter casing strategy here */
+			fc_normalize_name(synchdb_letter_casing_strategy, idcopy, strlen(idcopy));
+
 			splitIdString(idcopy, &db, &schema, &table, true);
 
 			/* database and table must be present. schema is optional */
@@ -4894,6 +4917,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		{
 			/* by default, remote's db is mapped to schema in pg */
 			char * idcopy = pstrdup(dbzddl->id);
+
+			/* we want to normalize according to letter casing strategy here */
+			fc_normalize_name(synchdb_letter_casing_strategy, idcopy, strlen(idcopy));
+
 			splitIdString(idcopy, &db, &schema, &table, true);
 
 			/* database and table must be present. schema is optional */
@@ -4909,8 +4936,8 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				elog(ERROR, "%s", msg);
 			}
 
-			fc_normalize_name(synchdb_letter_casing_strategy, db, strlen(db));
-			fc_normalize_name(synchdb_letter_casing_strategy, table, strlen(table));
+//			fc_normalize_name(synchdb_letter_casing_strategy, db, strlen(db));
+//			fc_normalize_name(synchdb_letter_casing_strategy, table, strlen(table));
 
 			/* make schema points to db */
 			schema = db;
@@ -4993,7 +5020,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 								colNameObjId.data, mappedColumnName);
 					}
 					else
+					{
 						mappedColumnName = pstrdup(col->name);
+
+						/* we want to normalize according to letter casing strategy here */
+						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+					}
 
 					found = false;
 					for (attnum = 1; attnum <= tupdesc->natts; attnum++)
@@ -5004,7 +5036,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 						if (strstr(NameStr(attr->attname), "pg.dropped"))
 							continue;
 
-						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
 						{
 							found = true;
 							break;
@@ -5142,9 +5174,14 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 									colNameObjId.data, mappedColumnName);
 						}
 						else
+						{
 							mappedColumnName = pstrdup(col->name);
 
-						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+							/* we want to normalize according to letter casing strategy here */
+							fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+						}
+
+						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
 						{
 							found = true;
 							if (mappedColumnName)
@@ -5255,7 +5292,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 								colNameObjId.data, mappedColumnName);
 					}
 					else
+					{
 						mappedColumnName = pstrdup(col->name);
+
+						/* we want to normalize according to letter casing strategy here */
+						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+					}
 
 					elog(DEBUG1, "adding new column %s", mappedColumnName);
 					altered = true;
@@ -5365,7 +5407,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 								colNameObjId.data, mappedColumnName);
 					}
 					else
+					{
 						mappedColumnName = pstrdup(col->name);
+
+						/* we want to normalize according to letter casing strategy here */
+						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+					}
 
 					/*
 					 * in order to update synchdb_attribute table correctly, we need to find
@@ -5379,7 +5426,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 						if (strstr(NameStr(attr->attname), "pg.dropped"))
 							continue;
 
-						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
 							break;
 					}
 
@@ -5432,7 +5479,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 								colNameObjId.data, mappedColumnName);
 					}
 					else
+					{
 						mappedColumnName = pstrdup(col->name);
+
+						/* we want to normalize according to letter casing strategy here */
+						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+					}
 
 					/*
 					 * in order to update synchdb_attribute table correctly, we need to find
@@ -5446,7 +5498,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 						if (strstr(NameStr(attr->attname), "pg.dropped"))
 							continue;
 
-						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
 							break;
 					}
 
@@ -5614,6 +5666,9 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		{
 			char * idcopy = pstrdup(dbzddl->id);
 			splitIdString(idcopy, &db, &schema, &table, true);
+
+			/* we want to normalize according to letter casing strategy here */
+			fc_normalize_name(synchdb_letter_casing_strategy, idcopy, strlen(idcopy));
 
 			/* database and table must be present. schema is optional */
 			if (!db || !table)

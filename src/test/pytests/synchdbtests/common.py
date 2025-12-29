@@ -85,11 +85,11 @@ def getSchema(dbvendor):
     if dbvendor == "mysql":
         return None
     elif dbvendor == "sqlserver":
-        return "dbo"
+        return SQLSERVER_SCHEMA
     elif dbvendor == "oracle":
-        return ORACLE_USER
+        return ORACLE_SCHEMA
     else:
-        return ORA19C_USER
+        return ORA19C_SCHEMA
 
 def run_pg_query(cursor, query):
     cursor.execute(query)

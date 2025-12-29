@@ -462,7 +462,7 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg)
     /* free the data inside strinfo as we no longer needs it */
     pfree(strinfo.data);
 
-    fc_normalize_name(synchdb_letter_casing_strategy, ddlinfo->id, strlen(ddlinfo->id));
+//    fc_normalize_name(synchdb_letter_casing_strategy, ddlinfo->id, strlen(ddlinfo->id));
 
     if (ddlinfo->type == DDL_CREATE_TABLE || ddlinfo->type == DDL_ALTER_TABLE)
     {
@@ -599,8 +599,8 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg)
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->name = pstrdup(value);
 
-						fc_normalize_name(synchdb_letter_casing_strategy, ddlcol->name,
-								strlen(ddlcol->name));
+//						fc_normalize_name(synchdb_letter_casing_strategy, ddlcol->name,
+//								strlen(ddlcol->name));
 					}
 					if (!strcmp(key, "length"))
 					{
@@ -790,7 +790,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			dbzdml->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
 
-	fc_normalize_name(synchdb_letter_casing_strategy, objid.data, objid.len);
+//	fc_normalize_name(synchdb_letter_casing_strategy, objid.data, objid.len);
 
 	dbzdml->remoteObjectId = pstrdup(objid.data);
 	dbzdml->mappedObjectId = transform_object_name(dbzdml->remoteObjectId, "table");
@@ -825,6 +825,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 		dbzdml->schema = pstrdup(db);
 		dbzdml->table = pstrdup(table);
 
+		fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->schema, strlen(dbzdml->schema));
+		fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->table, strlen(dbzdml->table));
+
 		resetStringInfo(&strinfo);
 		appendStringInfo(&strinfo, "%s.%s", dbzdml->schema, dbzdml->table);
 		dbzdml->mappedObjectId = pstrdup(strinfo.data);
@@ -856,8 +859,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	 * convert db and table to all lower case letters.
 	 */
 
-	fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->schema, strlen(dbzdml->schema));
-	fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->table, strlen(dbzdml->table));
+//	fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->schema, strlen(dbzdml->schema));
+//	fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->table, strlen(dbzdml->table));
 
 	/* prepare cache key */
 	strlcpy(cachekey.schema, dbzdml->schema, sizeof(cachekey.schema));
@@ -1126,15 +1129,15 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
+						/* a copy of original column name for expression rule lookup at later stage */
+						colval->remoteColumnName = pstrdup(colval->name);
 						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
 
 						colval->value = pstrdup(value);
-						/* a copy of original column name for expression rule lookup at later stage */
-						colval->remoteColumnName = pstrdup(colval->name);
 
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 						mappedColumnName = transform_object_name(colNameObjId.data, "column");
 						if (mappedColumnName)
 						{
@@ -1321,17 +1324,17 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-
-						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
 						colval->remoteColumnName = pstrdup(colval->name);
 
+						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+
+						colval->value = pstrdup(value);
+
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 						mappedColumnName = transform_object_name(colNameObjId.data, "column");
-
 						if (mappedColumnName)
 						{
 							/* replace the column name with looked up value here */
@@ -1551,15 +1554,16 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 							colval->name = pstrdup(key);
 
-							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-
-							colval->value = pstrdup(value);
 							/* a copy of original column name for expression rule lookup at later stage */
 							colval->remoteColumnName = pstrdup(colval->name);
 
+							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+
+							colval->value = pstrdup(value);
+
 							/* transform the column name if needed */
 							initStringInfo(&colNameObjId);
-							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 							mappedColumnName = transform_object_name(colNameObjId.data, "column");
 							if (mappedColumnName)
 							{

@@ -118,15 +118,15 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
     for row in rows:
         id = row[0].split(".")
         if len(id) == 3:
-            assert id[0] + "." + id[2] == row[1]
+            assert id[0].lower() + "." + id[2].lower() == row[1]
         else:
-            assert row[0] == row[1]
+            assert row[0].lower() == row[1]
     
     # check attname mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
-        assert row[0] == row[1]
+        assert row[0].lower() == row[1]
 
     # check data type mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
@@ -283,15 +283,15 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     for row in rows:
         id = row[0].split(".")
         if len(id) == 3:
-            assert id[0] + "." + id[2] == row[1]
+            assert id[0].upper() + "." + id[2].upper() == row[1]
         else:
-            assert row[0] == row[1]
+            assert row[0].upper() == row[1]
 
     # check attname mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
-        assert row[0] == row[1]
+        assert row[0].upper() == row[1]
 
     # check data type mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
@@ -713,15 +713,15 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
     for row in rows:
         id = row[0].split(".")
         if len(id) == 3:
-            assert id[0] + "." + id[2] == row[1]
+            assert id[0].lower() + "." + id[2].lower() == row[1]
         else:
-            assert row[0] == row[1]
+            assert row[0].lower() == row[1]
 
     # check attname mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
-        assert row[0] == row[1]
+        assert row[0].lower() == row[1]
 
     # check data type mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
@@ -902,15 +902,15 @@ def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
     for row in rows:
         id = row[0].split(".")
         if len(id) == 3:
-            assert id[0] + "." + id[2] == row[1]
+            assert id[0].lower() + "." + id[2].lower() == row[1]
         else:
-            assert row[0] == row[1]
+            assert row[0].lower() == row[1]
 
     # check attname mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
-        assert row[0] == row[1]
+        assert row[0].lower() == row[1]
 
     # check data type mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
@@ -1036,15 +1036,15 @@ def test_ConnectorStartNodataModeDBZ(pg_cursor, dbvendor):
     for row in rows:
         id = row[0].split(".")
         if len(id) == 3:
-            assert id[0] + "." + id[2] == row[1]
+            assert id[0].lower() + "." + id[2].lower() == row[1]
         else:
-            assert row[0] == row[1]
+            assert row[0].lower() == row[1]
 
     # check attname mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
-        assert row[0] == row[1]
+        assert row[0].lower() == row[1]
 
     # check data type mappings
     rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
