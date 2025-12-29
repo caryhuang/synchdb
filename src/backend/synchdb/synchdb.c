@@ -2656,6 +2656,10 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 							/* set the stage to change data capture */
 							set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 						}
+						/* update and write resume SCN */
+						olr_client_set_scns(connInfo->offsetdata.data.oracle.oracle_scn,
+								connInfo->offsetdata.data.oracle.oracle_scn, 0);
+						olr_client_write_scn_state(TYPE_OLR, connInfo->name, connInfo->dstdb, true);
 
 						/* update schema history metadata file to indicate we have completed a snapshot */
 						if (!olr_client_write_snapshot_state(connectorType, connInfo->name,

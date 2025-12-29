@@ -514,7 +514,7 @@ def test_TableNameMapping(pg_cursor, dbvendor):
         assert rows[0] == 0
 
     else:
-        rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.objmap_srctable1', '{dbname}.objmap_dsttable1')")
+        rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.objmap_srctable1', '{dbname.lower()}.objmap_dsttable1')")
         assert rows[0] == 0
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.objmap_srctable2', 'objmap_dsttable2')")
         assert rows[0] == 0
@@ -560,7 +560,7 @@ def test_TableNameMapping(pg_cursor, dbvendor):
         assert rows != None and len(rows) > 0 and rows[0] == f'someschema.objmap_dsttable3'
     else:
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmap_srctable1' LIMIT 1")
-        assert rows != None and len(rows) > 0 and rows[0] == f'{dbname}.objmap_dsttable1'
+        assert rows != None and len(rows) > 0 and rows[0] == f'{dbname.lower()}.objmap_dsttable1'
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmap_srctable2' LIMIT 1")
         assert rows != None and len(rows) > 0 and rows[0] == f'public.objmap_dsttable2'
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmap_srctable3' LIMIT 1")
@@ -774,7 +774,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
         assert rows[0] == 0
     else:
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' LIMIT 1")
-        assert rows[0] == f"{dbname}.orders"
+        assert rows[0] == f"{dbname.lower()}.orders"
 
         # column names shall be defaults too
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname ='order_number'")
@@ -794,7 +794,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname ='order_date'")
         assert rows[0] == "date" or rows[0] == "timestamp without time zone"
 
-        rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.orders', '{dbname}.invoices')")
+        rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.orders', '{dbname.lower()}.invoices')")
         assert rows[0] == 0
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', '{exttable_prefix}.orders.order_number', 'the_number')")
         assert rows[0] == 0
@@ -835,7 +835,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
         assert rows[0] == f"%d + 1000000"
     else:
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' LIMIT 1")
-        assert rows[0] == f"{dbname}.invoices"
+        assert rows[0] == f"{dbname.lower()}.invoices"
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname ='order_number'")
         assert rows[0] == f"the_number"
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'order_date'")
@@ -851,7 +851,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
         rows = run_pg_query_one(pg_cursor, f"SELECT transform FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'order_number'")
         assert rows[0] == f"%d + 1000000"
 
-    rows = run_pg_query(pg_cursor, f"SELECT the_number, the_date, quantity FROM {dbname}.invoices")
+    rows = run_pg_query(pg_cursor, f"SELECT the_number, the_date, quantity FROM {dbname.lower()}.invoices")
     assert len(rows) > 0
     for row in rows:
         assert row[0] < 1000000
