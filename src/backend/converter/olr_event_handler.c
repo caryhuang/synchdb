@@ -278,8 +278,7 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 				if (v2)
 				{
 					strncpy(tmprecord.name, v2->val.string.val, v2->val.string.len); /* todo check overflow */
-
-					fc_normalize_name(synchdb_letter_casing_strategy, tmprecord.name, strlen(tmprecord.name));
+					fc_normalize_name(LCS_NORMALIZE_LOWERCASE, tmprecord.name, strlen(tmprecord.name));
 				}
 				else
 				{
@@ -1689,6 +1688,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 					if (key != NULL && value != NULL)
 					{
 						char * mappedColumnName = NULL;
+						char * colname_lower = NULL;
 						StringInfoData colNameObjId;
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
@@ -1728,7 +1728,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+						colname_lower = pstrdup(colval->remoteColumnName);
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 						if (found)
 						{
 							colval->dbztype = entry2->dbztype;
@@ -1737,7 +1739,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						}
 						else
 							elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
-									colval->name, colval->remoteColumnName);
+									colval->name, colname_lower);
+						pfree(colname_lower);
 
 						olrdml->columnValuesAfter = lappend(olrdml->columnValuesAfter, colval);
 						pfree(key);
@@ -1855,6 +1858,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						if (key != NULL && value != NULL)
 						{
 							char * mappedColumnName = NULL;
+							char * colname_lower = NULL;
 							StringInfoData colNameObjId;
 
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
@@ -1894,7 +1898,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							else
 								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+							colname_lower = pstrdup(colval->remoteColumnName);
+							fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 							if (found)
 							{
 								colval->dbztype = entry2->dbztype;
@@ -1903,7 +1909,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							}
 							else
 								elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
-										colval->name, colval->remoteColumnName);
+										colval->name, colname_lower);
+							pfree(colname_lower);
 
 							if (i == 0)
 								olrdml->columnValuesBefore = lappend(olrdml->columnValuesBefore, colval);
@@ -2015,6 +2022,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 					if (key != NULL && value != NULL)
 					{
 						char * mappedColumnName = NULL;
+						char * colname_lower = NULL;
 						StringInfoData colNameObjId;
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
@@ -2054,7 +2062,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+						colname_lower = pstrdup(colval->remoteColumnName);
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 						if (found)
 						{
 							colval->dbztype = entry2->dbztype;
@@ -2064,6 +2074,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						else
 							elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
 									colval->name, colval->remoteColumnName);
+						pfree(colname_lower);
 
 						olrdml->columnValuesBefore = lappend(olrdml->columnValuesBefore, colval);
 						pfree(key);

@@ -153,7 +153,7 @@ build_schema_jsonpos_hash(Jsonb * jb)
 	NameJsonposEntry * entry;
 	NameJsonposEntry tmprecord = {0};
 	bool found = false;
-	int i = 0, j = 0;
+	int i = 0;
 	unsigned int contsize = 0;
 	Datum datum_elems[4] ={CStringGetTextDatum("schema"), CStringGetTextDatum("fields"),
 			CStringGetTextDatum("0"), CStringGetTextDatum("fields")};
@@ -186,8 +186,7 @@ build_schema_jsonpos_hash(Jsonb * jb)
 				if (v2)
 				{
 					strncpy(tmprecord.name, v2->val.string.val, v2->val.string.len); /* todo check overflow */
-					for (j = 0; j < strlen(tmprecord.name); j++)
-						tmprecord.name[j] = (char) pg_tolower((unsigned char) tmprecord.name[j]);
+					fc_normalize_name(LCS_NORMALIZE_LOWERCASE, tmprecord.name, strlen(tmprecord.name));
 				}
 				else
 				{
