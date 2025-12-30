@@ -4936,9 +4936,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				elog(ERROR, "%s", msg);
 			}
 
-//			fc_normalize_name(synchdb_letter_casing_strategy, db, strlen(db));
-//			fc_normalize_name(synchdb_letter_casing_strategy, table, strlen(table));
-
 			/* make schema points to db */
 			schema = db;
 			appendStringInfo(&strinfo, "ALTER TABLE \"%s\".\"%s\" ", schema, table);
