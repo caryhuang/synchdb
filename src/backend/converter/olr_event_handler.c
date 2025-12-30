@@ -1429,7 +1429,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	appendStringInfo(&objid, "%s", table);
 
-	fc_normalize_name(synchdb_letter_casing_strategy, objid.data, objid.len);
+//	fc_normalize_name(synchdb_letter_casing_strategy, objid.data, objid.len);
 
 	olrdml->remoteObjectId = pstrdup(objid.data);
 	olrdml->mappedObjectId = transform_object_name(olrdml->remoteObjectId, "table");
@@ -1464,6 +1464,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 		olrdml->schema = pstrdup(db);
 		olrdml->table = pstrdup(table);
 
+		fc_normalize_name(synchdb_letter_casing_strategy, olrdml->schema, strlen(olrdml->schema));
+		fc_normalize_name(synchdb_letter_casing_strategy, olrdml->table, strlen(olrdml->table));
+
 		resetStringInfo(&strinfo);
 		appendStringInfo(&strinfo, "%s.%s", olrdml->schema, olrdml->table);
 		olrdml->mappedObjectId = pstrdup(strinfo.data);
@@ -1476,8 +1479,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	 * created. However, catalog lookups are case sensitive so here we must
 	 * convert db and table to all lower case letters.
 	 */
-	fc_normalize_name(synchdb_letter_casing_strategy, olrdml->schema, strlen(olrdml->schema));
-	fc_normalize_name(synchdb_letter_casing_strategy, olrdml->table, strlen(olrdml->table));
+//	fc_normalize_name(synchdb_letter_casing_strategy, olrdml->schema, strlen(olrdml->schema));
+//	fc_normalize_name(synchdb_letter_casing_strategy, olrdml->table, strlen(olrdml->table));
 
 	/* prepare cache key */
 	strlcpy(cachekey.schema, olrdml->schema, sizeof(cachekey.schema));
