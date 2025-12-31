@@ -51,6 +51,8 @@ jobs:
         echo "OCI_INC_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9/sdk/include" >> $GITHUB_ENV
         echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/oci/instantclient_23_9:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
         echo "$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_PATH
+        rm -f instantclient-basic-linux.x64-23.9.0.25.07.zip
+        rm -f instantclient-sdk-linux.x64-23.9.0.25.07.zip
     - name: Install Protobuf
       run: |
         sudo apt-get update
@@ -94,6 +96,14 @@ jobs:
         docker builder prune -af || true
         docker volume prune -af || true
         echo "After cleanup:" && df -h
+    - name: Move docker root to save space
+      run: |
+        sudo systemctl stop docker
+        sudo mkdir -p /mnt/docker
+        sudo mv /var/lib/docker/* /mnt/docker/ || true
+        sudo rm -rf /var/lib/docker
+        sudo ln -s /mnt/docker /var/lib/docker
+        sudo systemctl start docker
     - uses: actions/checkout@v2
     - uses: actions/download-artifact@v4
       with:
@@ -122,10 +132,11 @@ jobs:
         JDK_LIB_PATH=${JDK_HOME_PATH}/lib
         echo $JDK_LIB_PATH | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
         echo $JDK_LIB_PATH/server | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        echo "/mnt/usr/local/lib" | sudo tee /etc/ld.so.conf.d/synchdb-mnt.conf
         sudo ldconfig
     - name: Install Base PG and SynchDB
       run: |
-        sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
+        sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /mnt
         sudo apt-get install -y docker-compose
         docker-compose --version
     - name: Setup Oracle Instant Client v23.9
@@ -140,6 +151,8 @@ jobs:
         echo "OCI_INC_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9/sdk/include" >> $GITHUB_ENV
         echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/oci/instantclient_23_9:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
         echo "$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_PATH
+        rm -f instantclient-basic-linux.x64-23.9.0.25.07.zip
+        rm -f instantclient-sdk-linux.x64-23.9.0.25.07.zip
     - name: Install Protobuf
       run: |
         sudo apt-get update
@@ -149,7 +162,7 @@ jobs:
       shell: bash
     - name: synchdb test
       run: |
-        export PATH=$PATH:/usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/bin
+        export PATH=$PATH:/mnt/usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/bin
         mkdir -p /var/run/postgresql
         sudo chown -R $(whoami) /var/run/postgresql
         make USE_PGXS=1 ${{ matrix.dbtypes }}check

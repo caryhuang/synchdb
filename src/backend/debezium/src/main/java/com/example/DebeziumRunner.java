@@ -52,6 +52,8 @@ public class DebeziumRunner {
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
 	final int TYPE_OPENLOG_REPLICATOR = 4;
+	final int TYPE_POSTGRES = 5;
+
 	final int BATCH_QUEUE_SIZE = 5;
 	
 	final int LOG_LEVEL_UNDEF = 0;
@@ -108,9 +110,10 @@ public class DebeziumRunner {
 		private int ispnMemorySize;
 		private String logminerStreamMode;
 		private int cdcDelay;
+		private String srcschema;
 
 		/* constructor requires all required parameters for a connector to work */
-		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb)
+		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb, String srcschema)
 		{
 			this.connectorName = connectorName;
 			this.connectorType = connectorType;
@@ -123,6 +126,7 @@ public class DebeziumRunner {
 			this.snapshottable = snapshottable;
 			this.snapshotMode = snapshotMode;
 			this.dstdb = dstdb;
+			this.srcschema = srcschema;
 		}
 		public MyParameters setBatchSize(int batchSize)
 		{
@@ -251,6 +255,7 @@ public class DebeziumRunner {
 			logger.warn("table = " + this.table);
 			logger.warn("snapshotMode = " + this.snapshotMode);
 			logger.warn("dstdb = " + this.dstdb);
+			logger.warn("srcschema = " + this.srcschema);
 
 			logger.warn("batchSize = " + this.batchSize);
 			logger.warn("queueSize = " + this.queueSize);
@@ -493,7 +498,7 @@ public class DebeziumRunner {
                     props.setProperty("database.dbname", myParameters.database);
                 }
 				/* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
-				props.setProperty("schema.include.list", myParameters.user);
+				props.setProperty("schema.include.list", myParameters.srcschema);
 				props.setProperty("lob.enabled", "true");
 				props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
 
@@ -637,7 +642,7 @@ public class DebeziumRunner {
                     props.setProperty("database.dbname", myParameters.database);
                 }
                 /* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
-                props.setProperty("schema.include.list", myParameters.user);
+                props.setProperty("schema.include.list", myParameters.srcschema);
                 props.setProperty("lob.enabled", "true");
                 props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
                 break;
@@ -670,7 +675,39 @@ public class DebeziumRunner {
 					props.setProperty("database.ssl.truststore", myParameters.sslTruststore);
 				if (myParameters.sslTruststorePass != null)
 					props.setProperty("database.ssl.truststore.password", myParameters.sslTruststorePass);
+                
+				props.setProperty("schema.include.list", myParameters.srcschema);
 				break;
+			}
+			case TYPE_POSTGRES:
+			{
+				props.setProperty("connector.class", "io.debezium.connector.postgresql.PostgresConnector");
+				offsetfile = "pg_synchdb/postgres_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+                schemahistoryfile = "pg_synchdb/postgres_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+                signalfile = "pg_synchdb/pg_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
+
+				props.setProperty("tasks.max", "1");
+				props.setProperty("plugin.name", "pgoutput");
+				props.setProperty("slot.name", myParameters.connectorName + "_" + myParameters.dstdb + "_" + "synchdb_slot");
+				props.setProperty("publication.name", myParameters.connectorName + "_" + myParameters.dstdb + "_" + "synchdb_pub");
+	
+				if (myParameters.table.equals("null"))
+					props.setProperty("publication.autocreate.mode", "all_tables");
+				else
+					props.setProperty("publication.autocreate.mode", "filtered");
+				props.setProperty("database.dbname", myParameters.database);
+				props.setProperty("schema.include.list", myParameters.srcschema);
+				
+				/* we only work with replica identity = FULL*/
+				props.setProperty("replica.identity.autoset.values", myParameters.srcschema + ".*:DEFAULT");
+
+                if (myParameters.database.equals("null"))
+                    logger.warn("database is null - skip setting database.include.list property");
+                else
+                {
+                    props.setProperty("database.dbname", myParameters.database);
+                }
+
 			}
 		}
 		
@@ -1106,6 +1143,11 @@ public class DebeziumRunner {
 				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
 				break;
 			}
+			case TYPE_POSTGRES:
+			{
+				inputFile = new File("pg_synchdb/postgres_" + name + "_" + dstdb + "_offsets.dat");
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
+			}
 		}
 
 		if (!inputFile.exists())
@@ -1157,6 +1199,10 @@ public class DebeziumRunner {
 			{
 				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
 				break;
+			}
+			case TYPE_POSTGRES:
+			{
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 			}
 		}
 
@@ -1228,6 +1274,7 @@ public class DebeziumRunner {
 		{
 			case TYPE_MYSQL:
 			case TYPE_ORACLE:
+			case TYPE_POSTGRES:
 				/* Debezium key for mysql/oracle doesn’t include database */
 				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 				break;

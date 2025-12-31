@@ -16,6 +16,7 @@
 #include "fmgr.h"
 #include "executor/replication_agent.h"
 #include "executor/spi.h"
+#include "converter/format_converter.h"
 #include "access/xact.h"
 #include "utils/snapmgr.h"
 #include "access/table.h"
@@ -590,7 +591,7 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 		}
 		else
 		{
-			elog(ERROR, "tuple to update not found");
+			elog(WARNING, "tuple to update not found");
 		}
 
 		/* increment command ID */
@@ -755,7 +756,7 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
 		}
 		else
 		{
-			elog(ERROR, "tuple to delete not found");
+			elog(WARNING, "tuple to delete not found");
 		}
 
 		/* increment command ID */
@@ -950,7 +951,8 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"coalesce(data->>'olr_source', 'null'), "
 			"coalesce(data->>'ispn_cache_type', 'null'), "
 			"coalesce(data->>'ispn_memory_type', 'null'), "
-			"coalesce(data->>'ispn_memory_size', 'null') "
+			"coalesce(data->>'ispn_memory_size', 'null'), "
+			"coalesce(data->>'srcschema', 'null') "
 			"FROM "
 			"synchdb_conninfo WHERE name = '%s'",
 			SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, name);
@@ -999,8 +1001,9 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	strlcpy(conninfo->ispn.ispn_cache_type, TextDatumGetCString(res[33]), INFINISPAN_TYPE_SIZE);
 	strlcpy(conninfo->ispn.ispn_memory_type, TextDatumGetCString(res[34]), INFINISPAN_TYPE_SIZE);
 	conninfo->ispn.ispn_memory_size = atoi(TextDatumGetCString(res[35]));
+	strlcpy(conninfo->srcschema, TextDatumGetCString(res[36]), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 
-	elog(LOG, "name=%s hostname=%s, port=%d, user=%s pwd=%s srcdb=%s "
+	elog(LOG, "name=%s hostname=%s, port=%d, user=%s srcdb=%s srcschema=%s"
 			"dstdb=%s table=%s snapshottable=%s connector=%s extras(ssl_mode=%s ssl_keystore=%s "
 			"ssl_keystore_pass=%s ssl_truststore=%s ssl_truststore_pass=%s) "
 			"jmx(jmx_listenaddr=%s jmx_port=%d jmx_rmiserveraddr=%s jmx_rmiport=%d "
@@ -1011,7 +1014,7 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"olr(olr_host=%s olr_port=%d olr_source=%s) "
 			"ispn(ispn_cache_type='%s' ispn_memory_type='%s' ispn_memory_size=%u)",
 			conninfo->name, conninfo->hostname, conninfo->port,
-			conninfo->user, conninfo->pwd, conninfo->srcdb,
+			conninfo->user, conninfo->srcdb, conninfo->srcschema,
 			conninfo->dstdb, conninfo->table, conninfo->snapshottable, *connector,
 			conninfo->extra.ssl_mode, conninfo->extra.ssl_keystore, conninfo->extra.ssl_keystore_pass,
 			conninfo->extra.ssl_truststore, conninfo->extra.ssl_truststore_pass,
@@ -1383,43 +1386,36 @@ destroyPGDML(PG_DML * dmlinfo)
 	}
 }
 
-orascn
-ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
-		const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx,
-		bool write_schema_hist, const char * snapshotMode)
+char *
+ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conninfo,
+		int flag, const char * snapshot_tables, const char * offset, bool fdw_use_subtx,
+		bool write_schema_hist, const char * snapshotMode, int letter_casing_strategy)
 {
-	int ret = -1, i = 0;
+	int ret = -1;
 	bool isnull = false;
 	Datum d;
-	char *s = NULL;
-	orascn scn_res = 0;
 	bool skiptx = false;
 	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE] = {0};
-	char scn_buf[64] = {0};
+	MemoryContext oldctx;
+	char * snapshot_str = NULL;
 
 	const char *sql = (flag & CONNFLAG_SCHEMA_SYNC_MODE) ||
 			!strcasecmp(snapshotMode, "no_data")?
 			"SELECT synchdb_do_schema_sync("
 			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
-			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"
-			"  $11::text,$12::bool,$13::bool)" :
+			"  $6::text,$7::name,$8::bool,$9::text,$10::text,"
+			"  $11::text,$12::bool,$13::bool,$14::text)" :
 			"SELECT synchdb_do_initial_snapshot("
 			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
-			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"
-			"  $11::text,$12::bool,$13::bool)";
-	Oid   argtypes[13] = {
+			"  $6::text,$7::name,$8::bool,$9::text,$10::text,"
+			"  $11::text,$12::bool,$13::bool,$14::text)";
+	Oid   argtypes[14] = {
 		NAMEOID, TEXTOID, NAMEOID, NAMEOID, NAMEOID,
-		TEXTOID, NAMEOID, BOOLOID, TEXTOID, NUMERICOID,
-		TEXTOID, BOOLOID, BOOLOID
+		TEXTOID, NAMEOID, BOOLOID, TEXTOID, TEXTOID,
+		TEXTOID, BOOLOID, BOOLOID, TEXTOID
 	};
-	Datum values[13];
-	char  nulls[13] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
-
-	/* compute scn */
-	if (scn_req > 0)
-		snprintf(scn_buf, sizeof(scn_buf), "%llu", scn_req);
-	else
-		snprintf(scn_buf, sizeof(scn_buf), "%s", "0");
+	Datum values[14];
+	char  nulls[14] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
 
 	/*
 	 * if we are already in transaction or transaction block, we can skip
@@ -1428,9 +1424,8 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 	if (IsTransactionOrTransactionBlock())
 		skiptx = true;
 
-	/* we only work with lower case objects */
-	for (i = 0; i < strlen(conninfo->srcdb); i++)
-		dstdb[i] = (char) pg_tolower((unsigned char) conninfo->srcdb[i]);
+	strlcpy(dstdb, conninfo->srcdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+	fc_normalize_name(letter_casing_strategy, dstdb, strlen(dstdb));
 
 	PG_TRY();
 	{
@@ -1448,13 +1443,15 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 		values[3]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_stage"));
 		values[4]  = DirectFunctionCall1(namein,   CStringGetDatum(dstdb));
 		values[5]  = CStringGetTextDatum(conninfo->srcdb);
-		values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->user));
+		values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcschema));
 		values[7]  = BoolGetDatum(true);
 		values[8]  = CStringGetTextDatum("replace");
-		values[9]  = DirectFunctionCall3(numeric_in,
-										 CStringGetDatum(scn_buf),
-										 ObjectIdGetDatum(InvalidOid),
-										 Int32GetDatum(-1));
+
+		if (offset)
+			values[9] = CStringGetTextDatum(offset);
+		else
+			nulls[9] = 'n';
+
 		if (snapshot_tables)
 			values[10] = CStringGetTextDatum(snapshot_tables);
 		else
@@ -1463,10 +1460,17 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 		values[11] = BoolGetDatum(fdw_use_subtx);
 		values[12] = BoolGetDatum(write_schema_hist);
 
+		if (letter_casing_strategy == LCS_NORMALIZE_LOWERCASE)
+			values[13] = CStringGetTextDatum("lower");
+		else if (letter_casing_strategy == LCS_NORMALIZE_UPPERCASE)
+			values[13] = CStringGetTextDatum("upper");
+		else
+			values[13] = CStringGetTextDatum("asis");
+
 		if (SPI_connect() != SPI_OK_CONNECT)
 			elog(ERROR, "SPI_connect failed");
 
-		ret = SPI_execute_with_args(sql, 13, argtypes, values, nulls, false, 1);
+		ret = SPI_execute_with_args(sql, 14, argtypes, values, nulls, false, 1);
 		if (ret != SPI_OK_SELECT || SPI_processed != 1 || SPI_tuptable == NULL)
 		{
 			SPI_finish();
@@ -1480,14 +1484,9 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 			elog(ERROR, "snapshot function returned NULL");
 		}
 
-		s = DatumGetCString(DirectFunctionCall1(numeric_out, d));
-		errno = 0;
-		scn_res = strtoull(s, NULL, 10);
-		if (errno != 0)
-		{
-			SPI_finish();
-			elog(ERROR, "failed to parse SCN '%s' as unsigned long long", s);
-		}
+		oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		snapshot_str = TextDatumGetCString(d);
+		MemoryContextSwitchTo(oldctx);
 
 		SPI_finish();
 
@@ -1500,8 +1499,9 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 	}
 	PG_CATCH();
 	{
-		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
-		ErrorData  *errdata = CopyErrorData();
+		ErrorData  *errdata;
+		oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		errdata = CopyErrorData();
 
 		if (errdata)
 			set_shm_connector_errmsg(myConnectorId, errdata->message);
@@ -1509,13 +1509,13 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
 		FreeErrorData(errdata);
 		MemoryContextSwitchTo(oldctx);
 		SPI_finish();
-		scn_res = 0;
+		snapshot_str = NULL;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	elog(WARNING, "scn to resume cdc %llu", scn_res);
-	return scn_res;
+	elog(WARNING, "snapshot to resume cdc: %s", snapshot_str ? snapshot_str : "N/A");
+	return snapshot_str;
 }
 
 /*
@@ -1525,25 +1525,25 @@ ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
  * have failed in previous FDW based initial snapshot.
  */
 int
-ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, orascn *scn_out)
+ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, char **offset_out)
 {
 	int ret = -1;
 	StringInfoData strinfo;
 	char *agg_tbls = NULL;
-	char *scn_txt  = NULL;
+	char *offset_txt  = NULL;
 	bool skiptx = false;
 
 	if (out)
 		*out = NULL;
 	if (numout)
 		*numout = 0;
-	if (scn_out)
-		*scn_out = 0;  /* default if no rows / errors */
+	if (offset_out)
+		*offset_out = NULL;
 
 	initStringInfo(&strinfo);
 	appendStringInfo(&strinfo,
 			"SELECT string_agg(tbl, ',' ORDER BY tbl) AS failed_tables, "
-			"max(scn) AS scn_val "
+			"max(err_offset) AS err_offset "
 			"FROM synchdb_fdw_snapshot_errors_%s "
 			"WHERE connector_name = '%s'",
 			name, name);
@@ -1585,16 +1585,12 @@ ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, or
 				if (numout) *numout = 1; /* you treat it as a single CSV string */
 			}
 
-			/* col 2: scn_val (numeric -> text) */
-			scn_txt = SPI_getvalue(SPI_tuptable->vals[0],
+			/* col 2: err_offset (text) */
+			offset_txt = SPI_getvalue(SPI_tuptable->vals[0],
 					   SPI_tuptable->tupdesc, 2);
-			if (scn_txt && scn_out)
+			if (offset_txt != NULL && offset_out)
 			{
-				/* parse as unsigned long long (orascn) */
-				errno = 0;
-				*scn_out = (orascn) strtoull(scn_txt, NULL, 10);
-				if (errno != 0)
-					*scn_out = 0; /* fall back if parse failed */
+				*offset_out = pstrdup(offset_txt);
 			}
 			MemoryContextSwitchTo(oldctx);
 		}
