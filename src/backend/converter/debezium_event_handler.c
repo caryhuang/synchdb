@@ -1049,20 +1049,17 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 								pause = 0;
 								if (key)
 								{
-									int i = 0;
 									int pathsize = strlen("payload.after.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 									snprintf(tmpPath, pathsize, "payload.after.%s", key);
 									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
 									{
-										for (i = 0; i < strinfo.len; i++)
-										{
-											/* postgres array is wrapped with curly brackets instead */
-											if (strinfo.data[i] == '[')
-												strinfo.data[i] = '{';
-											if (strinfo.data[i] == ']')
-												strinfo.data[i] = '}';
-										}
+										/* postgres array is wrapped with curly brackets instead */
+										if (strinfo.data[0] == '[')
+											strinfo.data[0] = '{';
+										if (strinfo.data[strinfo.len - 1] == ']')
+											strinfo.data[strinfo.len -1] = '}';
+
 										value = pstrdup(strinfo.data);
 									}
 									if(tmpPath)
@@ -1244,20 +1241,17 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 								pause = 0;
 								if (key)
 								{
-									int i = 0;
 									int pathsize = strlen("payload.after.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 									snprintf(tmpPath, pathsize, "payload.after.%s", key);
 									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
 									{
-										for (i = 0; i < strinfo.len; i++)
-										{
-											/* postgres array is wrapped with curly brackets instead */
-											if (strinfo.data[i] == '[')
-												strinfo.data[i] = '{';
-											if (strinfo.data[i] == ']')
-												strinfo.data[i] = '}';
-										}
+										/* postgres array is wrapped with curly brackets instead */
+										if (strinfo.data[0] == '[')
+											strinfo.data[0] = '{';
+										if (strinfo.data[strinfo.len - 1] == ']')
+											strinfo.data[strinfo.len -1] = '}';
+
 										value = pstrdup(strinfo.data);
 									}
 									if(tmpPath)
@@ -1470,7 +1464,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 									pause = 0;
 									if (key)
 									{
-										int j = 0;
 										int pathsize = (i == 0 ? strlen("payload.before.") + strlen(key) + 1 :
 												strlen("payload.after.") + strlen(key) + 1);
 										char * tmpPath = (char *) palloc0 (pathsize);
@@ -1480,14 +1473,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 											snprintf(tmpPath, pathsize, "payload.after.%s", key);
 										if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
 										{
-											for (j = 0; j < strinfo.len; j++)
-											{
-												/* postgres array is wrapped with curly brackets instead */
-												if (strinfo.data[j] == '[')
-													strinfo.data[j] = '{';
-												if (strinfo.data[j] == ']')
-													strinfo.data[j] = '}';
-											}
+											/* postgres array is wrapped with curly brackets instead */
+											if (strinfo.data[0] == '[')
+												strinfo.data[0] = '{';
+											if (strinfo.data[strinfo.len - 1] == ']')
+												strinfo.data[strinfo.len -1] = '}';
+
 											value = pstrdup(strinfo.data);
 										}
 										if(tmpPath)
@@ -1677,7 +1668,6 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
 	oldContext = MemoryContextSwitchTo(tempContext);
 
-	elog(WARNING, "%s", event);
 	initStringInfo(&strinfo);
 
     /* Convert event string to JSONB */

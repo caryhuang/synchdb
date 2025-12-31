@@ -1003,7 +1003,7 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	conninfo->ispn.ispn_memory_size = atoi(TextDatumGetCString(res[35]));
 	strlcpy(conninfo->srcschema, TextDatumGetCString(res[36]), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 
-	elog(LOG, "name=%s hostname=%s, port=%d, user=%s pwd=%s srcdb=%s srcschema=%s"
+	elog(LOG, "name=%s hostname=%s, port=%d, user=%s srcdb=%s srcschema=%s"
 			"dstdb=%s table=%s snapshottable=%s connector=%s extras(ssl_mode=%s ssl_keystore=%s "
 			"ssl_keystore_pass=%s ssl_truststore=%s ssl_truststore_pass=%s) "
 			"jmx(jmx_listenaddr=%s jmx_port=%d jmx_rmiserveraddr=%s jmx_rmiport=%d "
@@ -1014,7 +1014,7 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"olr(olr_host=%s olr_port=%d olr_source=%s) "
 			"ispn(ispn_cache_type='%s' ispn_memory_type='%s' ispn_memory_size=%u)",
 			conninfo->name, conninfo->hostname, conninfo->port,
-			conninfo->user, conninfo->pwd, conninfo->srcdb, conninfo->srcschema,
+			conninfo->user, conninfo->srcdb, conninfo->srcschema,
 			conninfo->dstdb, conninfo->table, conninfo->snapshottable, *connector,
 			conninfo->extra.ssl_mode, conninfo->extra.ssl_keystore, conninfo->extra.ssl_keystore_pass,
 			conninfo->extra.ssl_truststore, conninfo->extra.ssl_truststore_pass,

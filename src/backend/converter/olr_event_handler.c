@@ -590,6 +590,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 					elog(DEBUG1, "Column: %s", col->colname);
 					ddlcol->name = pstrdup(col->colname);
 
+					/*
+					 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+					 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+					 * get the original object name. If the name contains a mixture of upper and lower
+					 * case letters, it is delivered as is.
+					 */
 					if (synchdb_letter_casing_strategy == LCS_AS_IS)
 					{
 						if (isallupper(ddlcol->name))	/* need to normalize to lowercase */
@@ -724,6 +730,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 				elog(DEBUG1, "pks = %s", pklist.data);
 				olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
 
+				/*
+				 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+				 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+				 * get the original object name. If the name contains a mixture of upper and lower
+				 * case letters, it is delivered as is.
+				 */
 				if (synchdb_letter_casing_strategy == LCS_AS_IS)
 				{
 					if (isallupper(olrddl->primaryKeyColumnNames))	/* need to normalize to lowercase */
@@ -782,7 +794,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						/* column name */
 						elog(DEBUG1, "  ADD COLUMN: %s", col->colname);
 						ddlcol->name = pstrdup(col->colname);
-
+						/*
+						 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+						 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+						 * get the original object name. If the name contains a mixture of upper and lower
+						 * case letters, it is delivered as is.
+						 */
 						if (synchdb_letter_casing_strategy == LCS_AS_IS)
 						{
 							if (isallupper(ddlcol->name))	/* need to normalize to lowercase */
@@ -897,6 +914,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 								appendStringInfo(&pklist, "]");
 								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
 
+								/*
+								 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+								 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+								 * get the original object name. If the name contains a mixture of upper and lower
+								 * case letters, it is delivered as is.
+								 */
 								if (synchdb_letter_casing_strategy == LCS_AS_IS)
 								{
 									if (isallupper(olrddl->primaryKeyColumnNames))	/* need to normalize to lowercase */
@@ -923,6 +946,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						olrddl->subtype = SUBTYPE_DROP_COLUMN;
 						ddlcol->name = pstrdup(cmd->name);
 
+						/*
+						 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+						 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+						 * get the original object name. If the name contains a mixture of upper and lower
+						 * case letters, it is delivered as is.
+						 */
 						if (synchdb_letter_casing_strategy == LCS_AS_IS)
 						{
 							if (isallupper(ddlcol->name))	/* need to normalize to lowercase */
@@ -949,6 +978,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						elog(DEBUG1, "MODIFY COLUMN: %s", cmd->name);
 						ddlcol->name = pstrdup(cmd->name);
 
+						/*
+						 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+						 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+						 * get the original object name. If the name contains a mixture of upper and lower
+						 * case letters, it is delivered as is.
+						 */
 						if (synchdb_letter_casing_strategy == LCS_AS_IS)
 						{
 							if (isallupper(ddlcol->name))	/* need to normalize to lowercase */
@@ -1058,6 +1093,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 								appendStringInfo(&pklist, "]");
 								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
 
+								/*
+								 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+								 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+								 * get the original object name. If the name contains a mixture of upper and lower
+								 * case letters, it is delivered as is.
+								 */
 								if (synchdb_letter_casing_strategy == LCS_AS_IS)
 								{
 									if (isallupper(olrddl->primaryKeyColumnNames))	/* need to normalize to lowercase */
@@ -1104,6 +1145,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 								appendStringInfo(&pklist, "]");
 								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
 
+								/*
+								 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+								 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+								 * get the original object name. If the name contains a mixture of upper and lower
+								 * case letters, it is delivered as is.
+								 */
 								if (synchdb_letter_casing_strategy == LCS_AS_IS)
 								{
 									if (isallupper(olrddl->primaryKeyColumnNames))	/* need to normalize to lowercase */
@@ -1131,6 +1178,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 							elog(DEBUG1, "dropping constraint: %s", cmd->name);
 							olrddl->constraintName = pstrdup(cmd->name);
 
+							/*
+							 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+							 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+							 * get the original object name. If the name contains a mixture of upper and lower
+							 * case letters, it is delivered as is.
+							 */
 							if (synchdb_letter_casing_strategy == LCS_AS_IS)
 							{
 								if (isallupper(olrddl->constraintName))	/* need to normalize to lowercase */
@@ -1279,6 +1332,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	 */
 	if (table)
 	{
+		/*
+		 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+		 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+		 * get the original object name. If the name contains a mixture of upper and lower
+		 * case letters, it is delivered as is.
+		 */
 		if (synchdb_letter_casing_strategy == LCS_AS_IS)
 		{
 			if (isallupper(table))	/* need to normalize to lowercase */

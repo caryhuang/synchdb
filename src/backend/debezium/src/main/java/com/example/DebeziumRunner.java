@@ -695,7 +695,6 @@ public class DebeziumRunner {
 					props.setProperty("publication.autocreate.mode", "all_tables");
 				else
 					props.setProperty("publication.autocreate.mode", "filtered");
-				props.setProperty("database.server.name", "pgserver1");
 				props.setProperty("database.dbname", myParameters.database);
 				props.setProperty("schema.include.list", myParameters.srcschema);
 				
