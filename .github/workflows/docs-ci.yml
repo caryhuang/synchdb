@@ -34,7 +34,7 @@ jobs:
           git remote remove docsite 2>/dev/null || true
           git remote add docsite https://x-access-token:${{ secrets.DOCS_PUSH_TOKEN }}@github.com/caryhuang/synchdb-docs.git
           git remote -v
-          git fetch docsite test:test || true
+          git fetch docsite versioned-docs:versioned-docs || true
 
       - name: Check DOCS_PUSH_TOKEN exists
         run: |
@@ -47,14 +47,14 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" == "refs/heads/synchdb-devel" ]]; then
-            mike --debug deploy --push --remote docsite --branch test devel
+            mike --debug deploy --push --remote docsite --branch versioned-docs devel
             exit 0
           fi
 
           if [[ "${GITHUB_REF}" =~ ^refs/tags/v ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
-            mike --debug deploy --push --update-aliases --remote docsite --branch test "${VERSION}" latest
-            mike --debug set-default --push --remote docsite --branch test latest
+            mike --debug deploy --push --update-aliases --remote docsite --branch versioned-docs "${VERSION}" latest
+            mike --debug set-default --push --remote docsite --branch versioned-docs latest
             exit 0
           fi
 
