@@ -1,0 +1,240 @@
+site_name: SynchDB Documentation
+repo_url: https://github.com/hornetlabs/synchdb
+site_url: https://docs.synchdb.com/
+edit_uri: https://github.com/hornetlabs/synchdb
+site_description: SynchDB is a PostgreSQL extension for synchronizing data from different database sources..
+site_author: Hornetlabs Technology Inc.
+copyright: Copyright &copy; 2024 Maintained by <a href="https://github.com/hornetlabs">Hornetlabs Technology </a>. <a href="https://www.netlify.com/"><img src="https://www.netlify.com/img/global/badges/netlify-color-accent.svg" alt="Deployed by Netlify" width="114" height="51"></a>
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.annotation
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: folder
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: es
+          name: Español
+          site_name: Documentación de SynchDB
+          build: true
+          nav_translations:
+            User guide: Guía del usuario
+            Home: Inicio
+            Architecture: Arquitectura
+            Architecture Overview: Descripción general de la arquitectura
+            SynchDB Components: Arquitectura de componentes de SynchDB
+            Debezium Runner Components: Arquitectura de componentes de Debezium Runner
+            Non-Native Data Type Processing: Procesamiento de tipos de datos no nativos
+            Native Data Type Processing: Procesamiento de tipos de datos nativos
+            Overview: Visión General
+            Batch Processing: Manejo de Cambios por Lotes
+            Debezium Metadata Files: Debezium Archivos de Metadatos
+            User guide: Guía del usuario
+            Source Database Setup: configuración de base de datos remota
+            Installation: Instalación
+            Prepare Sample Databases: Preparar Bases de Datos de Ejemplo
+            Quick Start: Inicio Rápido
+            SynchDB Configuration: SynchDB Configuración
+            Default Data Type Mapping: Mapeo de Tipos de Datos Predeterminado
+            Customize Object Mapping and Transformation: Personalizar la asignación y transformación de objetos
+            Automatic Connector Launcher: Lanzador Automático de Conectores
+            DDL Replication: Replicación DDL
+            Selective Table Replication: Sincronización Selectiva de Tablas
+            Set Offset: Establecer Desplazamiento
+            Utility Functions: Funciones de Utilidad
+            Changelog: Registro de Cambios
+            Configure Error Strategies: Configurar estrategias de error
+            Create a Connector: Crear un conector
+            Statistic View: Vista de estadísticas
+            State View: Vista de estado
+            Start/Stop a Connector: Iniciar/Detener un conector
+            Object Mapping Workflow: Flujo de trabajo de mapeo de objetos
+            MySQL CDC to PostgreSQL: CDC de MySQL a PostgreSQL
+            SQL Server CDC to PostgreSQL: CDC de SQL Server a PostgreSQL
+            Oracle CDC to PostgreSQL: CDC de Oracle a PostgreSQL
+            Table Snapshot and Re-snapshot: Instantánea de tabla y nueva instantánea
+            JMX Monitor Settings: Configuración del monitor JMX
+            JVM Memory Usage: Uso de memoria de JVM
+            Attribute View: Vista de atributos
+            JMX Exporter Settings: Configuración del exportador JMX
+            Configure Openlog Replicator for Oracle Connector: Configurar Openlog Replicator para Oracle Connector
+            Openlog Replicator Event Processor: Procesador de eventos del replicador Openlog
+            Getting Started: Empezando
+            Monitoring: escucha
+            Tutorial: Tutorial
+            Secured Connection: Conexión segura
+            Configure Replication Offset: Configurar el desplazamiento de replicación
+            Configure Infinispan: Configurar Infinispan
+            Configure Snapshot Engine: Configurar el motor de instantáneas
+            FDW Based Snapshot: Instantánea basada en FDW
+        - locale: zh
+          name: 中文
+          site_name: SynchDB 文档
+          build: true
+          nav_translations:
+            User guide: 用户指南
+            Architecture: 架构
+            Architecture Overview: 架构概述
+            SynchDB Components: SynchDB组件架构
+            Debezium Runner Components: Debezium Runner组件架构
+            Non-Native Data Type Processing: 非原生数据类型处理
+            Native Data Type Processing: 原生数据类型处理
+            Home: 主页
+            Overview: 概述
+            Batch Processing: 批量处理
+            Debezium Metadata Files: Debezium 元数据文件
+            User guide: 用户指南
+            Installation: 安装
+            Source Database Setup: 源数据库设置
+            Prepare Sample Databases: 准备示例数据库
+            Quick Start: 快速入门
+            SynchDB Configuration: SynchDB 配置
+            Default Data Type Mapping: 默认数据类型映射
+            Customize Object Mapping and Transformation: 自定义对象映射和转换
+            Automatic Connector Launcher: 连接器自动启动器
+            DDL Replication: DDL复制
+            Selective Table Replication: 选择性表同步
+            Set Offset: 设置偏移量
+            Utility Functions: 实用函数
+            Changelog: 变更日志
+            Configure Error Strategies: 配置错误处理策略
+            Create a Connector: 创建连接器
+            Statistic View: 统计视图
+            State View: 状态视图
+            Start/Stop a Connector: 启动/停止连接器
+            Object Mapping Workflow: 对象映射工作流程
+            MySQL CDC to PostgreSQL: MySQL CDC 到 PostgreSQL
+            SQL Server CDC to PostgreSQL: SQL Server CDC 到 PostgreSQL
+            Oracle CDC to PostgreSQL: Oracle CDC 到 PostgreSQL
+            Table Snapshot and Re-snapshot: 表快照和重新快照
+            JMX Monitor Settings: JMX 监视器设置
+            JVM Memory Usage: JVM 内存使用情况
+            Attribute View: 属性视图
+            JMX Exporter Settings: JMX exporter 设置
+            Configure Openlog Replicator for Oracle Connector: 为 Oracle 连接器配置 Openlog Replicator
+            Openlog Replicator Event Processor: Openlog Replicator 事件处理器
+            Debezium Event Processor: Debezium 事件处理器
+            Getting Started: 快速入门
+            Monitoring: 监控
+            Tutorial: 教程
+            Secured Connection: 安全连接
+            Configure Replication Offset: 配置复制偏移
+            Configure Infinispan: 配置 infinispan
+            Configure Snapshot Engine: 配置快照引擎
+            FDW Based Snapshot: 基於FDW的快照
+  - mike:
+      version_selector: true
+      css_dir: css
+      javascript_dir: js
+      canonical_version: latest
+  - awesome-pages
+  - print-site
+
+extra:
+  version:
+    provider: mike
+
+nav:
+ - Home: index.md
+ - Architecture:
+   - Architecture Overview: architecture/architecture.md
+   - Debezium Event Processor: architecture/debezium_event_processor.md
+   - Debezium Runner Components: architecture/debezium_runner_components.md
+   - Openlog Replicator Event Processor: architecture/openlog_replicator_event_processor.md
+   - Batch Processing: architecture/batch_change_handling.md
+   - Non-Native Data Type Processing: architecture/non_native_datatype_handling.md
+   - Native Data Type Processing: architecture/native_datatype_handling.md
+   - Debezium Metadata Files: architecture/metadata_files.md
+   - DDL Replication: architecture/ddl_replication.md
+   - FDW Based Snapshot: architecture/fdw_based_snapshot.md
+   # - Test Framework: architecture/test_framework.md
+ - Getting Started:
+   - Installation: getting-started/installation.md
+   - Source Database Setup: getting-started/remote_database_setups.md   
+   - SynchDB Configuration: getting-started/configuration.md     
+   #- Prepare Sample Databases: getting-started/prepare_tests_env.md
+   - Quick Start: getting-started/quick_start.md
+ - Monitoring:
+   - Statistic View: monitoring/stats_view.md
+   - State View: monitoring/state_view.md
+   - Attribute View: monitoring/attr_view.md
+   - JVM Memory Usage: monitoring/jvm_mem.md
+   - JMX Monitor Settings: monitoring/jmx_monitor.md
+   - JMX Exporter Settings: monitoring/jmx_exporter.md
+ - Tutorial:
+   - MySQL CDC to PostgreSQL: tutorial/mysql_cdc_to_postgresql.md
+   - SQL Server CDC to PostgreSQL: tutorial/sqlserver_cdc_to_postgresql.md
+   - Oracle CDC to PostgreSQL: tutorial/oracle_cdc_to_postgresql.md
+   - Selective Table Replication: tutorial/selective_table_sync.md
+   # - Data Transformation: tutorial/data_transformation.md
+   - Table Snapshot and Re-snapshot: tutorial/table_snapshot_resnapshot.md
+   # - Schema Only Synchronization: tutorial/schema_only_sync.md
+   # - Multi Source Replication: tutorial/multi_source_replication.md
+   - Object Mapping Workflow: tutorial/object_mapping_workflow.md
+ - User guide:
+   - Create a Connector: user-guide/create_a_connector.md
+   - Start/Stop a Connector: user-guide/start_stop_connector.md
+   - Automatic Connector Launcher: user-guide/connector_auto_launcher.md  
+   - Default Data Type Mapping: user-guide/default_datatype_mapping.md
+   - Customize Object Mapping and Transformation: user-guide/object_mapping_rules.md
+   - Secured Connection: user-guide/secured_connection.md
+   - Configure Error Strategies: user-guide/configure_error_strategies.md
+   - Configure Replication Offset: user-guide/set_offset.md
+   - Configure Openlog Replicator for Oracle Connector: user-guide/configure_olr.md
+   - Configure Infinispan: user-guide/configure_infinispan.md
+   - Configure Snapshot Engine: user-guide/configure_snapshot_engine.md
+   # - Utility Functions: user-guide/utility_functions.md
+ - Changelog: changelog.md
+ # - Homepage: https://www.synchdb.com
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - footnotes
+  - attr_list
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.critic
+  - pymdownx.details
+  - pymdownx.emoji
+  - pymdownx.inlinehilite
+  - pymdownx.magiclink
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences
+  - pymdownx.tasklist
+  - pymdownx.tilde
