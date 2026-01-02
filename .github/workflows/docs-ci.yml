@@ -38,7 +38,8 @@ jobs:
           git remote remove docsite 2>/dev/null || true
           git remote add docsite https://x-access-token:${{ secrets.DOCS_PUSH_TOKEN }}@github.com/caryhuang/synchdb-docs.git
           git remote -v
-          git ls-remote --heads docsite | head -n 5
+          git fetch docsite test:test || true
+
       - name: Check DOCS_PUSH_TOKEN exists
         if: github.event_name == 'push'
         run: |
