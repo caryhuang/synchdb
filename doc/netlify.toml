@@ -1,0 +1,31 @@
+[build]
+  publish = "site"
+  command = "mkdocs build"
+
+[build.environment]
+  PYTHON_VERSION = "3.8"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[context.production.environment]
+  MKDOCS_ENV = "production"
+
+[context.deploy-preview.environment]
+  MKDOCS_ENV = "preview"
+
+# Use Netlify's built-in caching
+[build.processing]
+  skip_processing = false
+[build.processing.css]
+  bundle = true
+  minify = true
+[build.processing.js]
+  bundle = true
+  minify = true
+[build.processing.html]
+  pretty_urls = true
+[build.processing.images]
+  compress = true
