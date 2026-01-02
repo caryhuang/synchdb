@@ -3,6 +3,8 @@ on:
   push:
     branches:
       - synchdb-devel
+    tags:
+      - 'v*'
     paths:
       - 'doc/**'
       - '.github/workflows/docs-ci.yml'
@@ -43,7 +45,18 @@ jobs:
       - name: Deploy documentation
         working-directory: doc
         run: |
-          mike --debug deploy --push --remote docsite --branch test 1.3
-          mike --debug deploy --push --update-aliases --remote docsite --branch test 1.3 latest
-          mike --debug set-default --push --remote docsite --branch test latest
-          #mkdocs build
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == "refs/heads/synchdb-devel" ]]; then
+            mike --debug deploy --push --remote docsite --branch test devel
+            exit 0
+          fi
+
+          if [[ "${GITHUB_REF}" =~ ^refs/tags/v ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            mike --debug deploy --push --update-aliases --remote docsite --branch test "${VERSION}" latest
+            mike --debug set-default --push --remote docsite --branch test latest
+            exit 0
+          fi
+
+          echo "No matching ref for deployment: ${GITHUB_REF}"
+          exit 0
