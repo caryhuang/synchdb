@@ -32,7 +32,7 @@ jobs:
       - name: Add docs remote repo
         run: |
           git remote remove docsite 2>/dev/null || true
-          git remote add docsite https://x-access-token:${{ secrets.DOCS_PUSH_TOKEN }}@github.com/caryhuang/synchdb-docs.git
+          git remote add docsite https://x-access-token:${{ secrets.DOCS_PUSH_TOKEN }}@github.com/hornetlabs/synchdb-docs.git
           git remote -v
           git fetch docsite versioned-docs:versioned-docs || true
 
