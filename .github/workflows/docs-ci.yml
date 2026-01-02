@@ -37,11 +37,10 @@ jobs:
         run: |
           git remote add docsite https://x-access-token:${{ secrets.DOCS_PUSH_TOKEN }}@github.com/caryhuang/synchdb-docs.git
       - name: Deploy documentation
-        working-directory: doc
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mike deploy --push --remote docsite --branch test 1.3
-          mike deploy --update-aliases --remote docsite --branch test 1.3 latest
-          mike set-default --remote docsite --branch test latest
+          mike deploy --push --config-file mkdocs-doc.yml --remote docsite --branch test 1.3
+          mike deploy --update-aliases --config-file mkdocs-doc.yml --remote docsite --branch test 1.3 latest
+          mike set-default --config-file mkdocs-doc.yml --remote docsite --branch test latest
           #mkdocs build
