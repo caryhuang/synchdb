@@ -35,7 +35,7 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
       - name: Add docs remote repo
         run: |
-          git remote add docsite https://github.com/caryhuang/synchdb-docs.git
+          git remote add docsite https://x-access-token:${{ secrets.DOCS_PUSH_TOKEN }}@github.com/caryhuang/synchdb-docs.git
       - name: Deploy documentation
         working-directory: doc
         env:
