@@ -41,15 +41,15 @@ jobs:
           git fetch docsite test:test || true
 
       - name: Check DOCS_PUSH_TOKEN exists
-        if: github.event_name == 'push'
         run: |
           if [ -z "${{ secrets.DOCS_PUSH_TOKEN }}" ]; then
             echo "DOCS_PUSH_TOKEN is missing or not available"
             exit 1
           fi
       - name: Deploy documentation
+        working-directory: doc
         run: |
-          mike --debug deploy --push --config-file mkdocs-doc.yml --remote docsite --branch test 1.3
-          mike --debug deploy --update-aliases --config-file mkdocs-doc.yml --remote docsite --branch test 1.3 latest
-          mike --debug set-default --config-file mkdocs-doc.yml --remote docsite --branch test latest
+          mike --debug deploy --push --remote docsite --branch test 1.3
+          mike --debug deploy --update-aliases --remote docsite --branch test 1.3 latest
+          mike --debug set-default --remote docsite --branch test latest
           #mkdocs build
