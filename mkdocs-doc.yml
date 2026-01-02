@@ -1,2 +1,2 @@
-INHERIT: mkdocs.yml
+INHERIT: doc/mkdocs.yml
 docs_dir: doc
