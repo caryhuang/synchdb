@@ -35,9 +35,16 @@ jobs:
       - name: Add docs remote repo
         run: |
           git remote add docsite https://x-access-token:${{ secrets.DOCS_PUSH_TOKEN }}@github.com/caryhuang/synchdb-docs.git
+          git remote -v
+          git ls-remote --heads docsite | head -n 5
+      - name: Check DOCS_PUSH_TOKEN exists
+        if: github.event_name == 'push'
+        run: |
+          if [ -z "${{ secrets.DOCS_PUSH_TOKEN }}" ]; then
+            echo "DOCS_PUSH_TOKEN is missing or not available"
+            exit 1
+          fi
       - name: Deploy documentation
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mike --debug deploy --push --config-file mkdocs-doc.yml --remote docsite --branch test 1.3
           mike --debug deploy --update-aliases --config-file mkdocs-doc.yml --remote docsite --branch test 1.3 latest
