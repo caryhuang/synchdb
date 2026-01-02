@@ -3,8 +3,12 @@ on:
   workflow_dispatch:
   push:
     branches: [ main, synchdb-devel]
+    paths-ignore:
+      - 'doc/**'
   pull_request:
     branches: [ main, synchdb-devel]
+    paths-ignore:
+      - 'doc/**'
 jobs:
   params:
     runs-on: ubuntu-22.04
