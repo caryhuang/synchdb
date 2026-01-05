@@ -47,14 +47,14 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" == "refs/heads/synchdb-devel" ]]; then
-            mike --debug deploy --push --remote docsite --branch versioned-docs devel
+            mike deploy --push --remote docsite --branch versioned-docs devel
             exit 0
           fi
 
           if [[ "${GITHUB_REF}" =~ ^refs/tags/v ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
-            mike --debug deploy --push --update-aliases --remote docsite --branch versioned-docs "${VERSION}" latest
-            mike --debug set-default --push --remote docsite --branch versioned-docs latest
+            mike deploy --push --remote docsite --branch versioned-docs "${VERSION}"
+            mike set-default --push --remote docsite --branch versioned-docs "${VERSION}"
             exit 0
           fi
 
