@@ -1190,6 +1190,16 @@ dbz_engine_get_offset(int connectorId)
 		elog(WARNING, "Exception occurred while getting connector offset");
 		(*env)->DeleteLocalRef(env, jdb);
 		(*env)->DeleteLocalRef(env, jName);
+		(*env)->DeleteLocalRef(env, jdstdb);
+		return NULL;
+	}
+
+	if (result == NULL)
+	{
+		elog(WARNING, "getConnectorOffset returned NULL");
+		(*env)->DeleteLocalRef(env, jdb);
+		(*env)->DeleteLocalRef(env, jName);
+		(*env)->DeleteLocalRef(env, jdstdb);
 		return NULL;
 	}
 
@@ -1205,6 +1215,7 @@ dbz_engine_get_offset(int connectorId)
 	(*env)->DeleteLocalRef(env, jdb);
 	(*env)->DeleteLocalRef(env, result);
 	(*env)->DeleteLocalRef(env, jName);
+	(*env)->DeleteLocalRef(env, jdstdb);
 
 	elog(DEBUG1, "Retrieved offset for %s connector: %s",
 			connectorTypeToString(sdb_state->connectors[connectorId].type), resultStr);
